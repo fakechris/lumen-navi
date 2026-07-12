@@ -96,6 +96,8 @@ pub struct JobRecord {
     pub attempts: i64,
     pub last_error: Option<String>,
     pub updated_at: DateTime<Utc>,
+    /// When the job becomes claimable (backoff). None/empty = immediately.
+    pub available_at: Option<DateTime<Utc>>,
 }
 
 /// Process-local store for scaffolding and tests.

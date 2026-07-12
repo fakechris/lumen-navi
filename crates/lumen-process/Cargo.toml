@@ -7,6 +7,8 @@ description = "Async enrichment and processing jobs over stored events"
 
 [dependencies]
 async-trait = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
 lumen-platform = { workspace = true }
 lumen-store = { workspace = true }
 lumen-types = { workspace = true }
@@ -17,4 +19,5 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { workspace = true }

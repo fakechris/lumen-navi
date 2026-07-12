@@ -75,7 +75,9 @@ async fn main() -> Result<()> {
     // --- OCR worker (async; independent of capture) ---
     let (ocr_cancel_tx, ocr_cancel_rx) = tokio::sync::watch::channel(false);
     let ocr_handle = if config.ocr.enabled {
-        let engine = Arc::new(MacVisionOcr::new());
+        let engine = Arc::new(MacVisionOcr::with_max_image_bytes(
+            config.ocr.max_image_bytes as usize,
+        ));
         if engine.is_supported() {
             let worker = Arc::new(OcrWorker::new(
                 Arc::clone(&store),
@@ -83,11 +85,20 @@ async fn main() -> Result<()> {
                 OcrWorkerConfig {
                     languages: config.ocr.languages.clone(),
                     poll_interval: Duration::from_millis(config.ocr.poll_interval_ms),
-                    batch_size: config.ocr.batch_size,
+                    batch_size: config.ocr.batch_size.max(1),
                     include_boxes: config.ocr.include_boxes,
-                    max_attempts: 5,
+                    boxes_when_empty_only: config.ocr.boxes_when_empty_only,
+                    max_attempts: config.ocr.max_attempts as i64,
+                    retry_base: Duration::from_millis(config.ocr.retry_base_ms),
+                    retry_max: Duration::from_millis(config.ocr.retry_max_ms),
+                    engine_timeout: Duration::from_millis(config.ocr.timeout_ms),
+                    stale_running: Duration::from_millis(config.ocr.stale_running_ms),
+                    max_image_bytes: config.ocr.max_image_bytes as usize,
+                    max_text_chars: config.ocr.max_text_chars as usize,
+                    shutdown_drain: Duration::from_millis(config.ocr.shutdown_drain_ms),
                 },
             ));
+            let _ = worker.reclaim_stale();
             let w = Arc::clone(&worker);
             let rx = ocr_cancel_rx.clone();
             Some((
@@ -141,7 +152,11 @@ async fn main() -> Result<()> {
                     ) {
                         Ok(stored) => {
                             if ocr_on {
-                                let _ = store_w.enqueue_job(stored.id, "ocr_screen");
+                                match store_w.enqueue_job(stored.id, "ocr_screen") {
+                                    Ok(Some(_)) => {}
+                                    Ok(None) => debug_skip_dup_ocr(),
+                                    Err(e) => warn!(error = %e, "enqueue ocr_screen failed"),
+                                }
                             }
                             info!(
                                 id = %stored.id,
@@ -242,30 +257,40 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Let OCR drain remaining jobs briefly after capture stops (finite runs).
     if let Some((worker, handle)) = ocr_handle {
-        if config.capture.screen_ticks > 0 {
-            for _ in 0..15u32 {
-                let n: usize = worker.tick_once().await.unwrap_or(0);
-                if n == 0 {
-                    tokio::time::sleep(Duration::from_millis(300)).await;
-                    let n2: usize = worker.tick_once().await.unwrap_or(0);
-                    if n2 == 0 {
-                        break;
-                    }
-                }
-            }
-        }
+        // Signal stop then join (worker drains with shutdown_drain).
         let _ = ocr_cancel_tx.send(true);
         let _ = handle.await;
-        let st = worker.stats();
-        info!(
-            processed = st.processed,
-            succeeded = st.succeeded,
-            empty = st.empty,
-            failed = st.failed,
-            "ocr stats"
-        );
+        // Finite capture runs: extra drain for late enqueues.
+        if config.capture.screen_ticks > 0 {
+            let st = worker.drain(40).await;
+            info!(
+                processed = st.processed,
+                succeeded = st.succeeded,
+                empty = st.empty,
+                failed = st.failed,
+                dead = st.dead,
+                skipped = st.skipped_existing,
+                reclaimed = st.reclaimed,
+                timed_out = st.timed_out,
+                "ocr stats"
+            );
+        } else {
+            let st = worker.stats();
+            info!(
+                processed = st.processed,
+                succeeded = st.succeeded,
+                empty = st.empty,
+                failed = st.failed,
+                dead = st.dead,
+                reclaimed = st.reclaimed,
+                timed_out = st.timed_out,
+                "ocr stats"
+            );
+        }
+        if let Ok(counts) = store.job_counts_by_status("ocr_screen") {
+            info!(?counts, "ocr job counts");
+        }
     }
 
     if config.sources.audio {
@@ -282,4 +307,9 @@ async fn main() -> Result<()> {
     );
     info!(stored = health.stored_events, "health");
     Ok(())
+}
+
+#[inline]
+fn debug_skip_dup_ocr() {
+    // open job already exists — normal under burst captures
 }

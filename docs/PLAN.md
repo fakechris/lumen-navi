@@ -63,19 +63,19 @@ Design: [`docs/OBSERVE_CAPTURE.md`](OBSERVE_CAPTURE.md)
 
 ---
 
-## Phase S4 — Vision OCR (product step) ✅ MVP
+## Phase S4 — Vision OCR (product) ✅
 
-Product intent: [`docs/OCR_PRODUCT.md`](OCR_PRODUCT.md)  
-*(No reverse-engineering notes in this repo.)*
+Product: [`docs/OCR_PRODUCT.md`](OCR_PRODUCT.md)
 
-- [x] In-process Vision engine (quality text + layout boxes)  
-- [x] Job worker for `ocr_screen` → `derived` `ocr.v1`  
-- [x] Languages default `zh-Hans` + `en-US`; serialized Vision calls  
-- [x] Never block capture  
-- [ ] (S4.1) optional OCR helper process for isolation  
+- [x] Vision engine with real errors, size guards, global serialization  
+- [x] Job state machine: dedupe open jobs, backoff retry, stale reclaim, timeouts  
+- [x] Idempotent `ocr.v1` derived upsert  
+- [x] Config surface complete (batch, boxes policy, limits, drain)  
+- [x] Unit tests for worker + store job semantics  
+- [ ] (S4.1) optional OCR helper process isolation  
 - [ ] FTS / search UX over OCR text  
 
-**Exit (MVP):** screenshot events get OCR text without slowing Observe loop.
+**Exit:** production-hardened OCR path; capture remains non-blocking.
 
 ---
 

@@ -1,6 +1,6 @@
 //! SQLite schema for meta/navi.db
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub const MIGRATE_V1: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -79,4 +79,22 @@ CREATE TABLE IF NOT EXISTS activity_sessions (
 
 CREATE INDEX IF NOT EXISTS idx_activity_sessions_status ON activity_sessions(status);
 CREATE INDEX IF NOT EXISTS idx_activity_sessions_started ON activity_sessions(started_at);
+"#;
+
+/// OCR / job robustness: backoff, uniqueness, reclaim support.
+pub const MIGRATE_V3: &str = r#"
+ALTER TABLE jobs ADD COLUMN available_at TEXT;
+ALTER TABLE jobs ADD COLUMN created_at TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_jobs_claim
+  ON jobs(kind, status, available_at, updated_at);
+
+-- At most one open OCR job per event (pending/running/failed still countable via unique open).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_open_ocr
+  ON jobs(event_id, kind)
+  WHERE status IN ('pending', 'running');
+
+-- One derived document per (event, kind) — OCR idempotent.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_derived_event_kind
+  ON derived(event_id, kind);
 "#;

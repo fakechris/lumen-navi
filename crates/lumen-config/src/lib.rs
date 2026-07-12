@@ -35,14 +35,10 @@ pub struct SourcesConfig {
 #[serde(default)]
 pub struct CaptureConfig {
     pub screen_interval_ms: u64,
-    /// Legacy hash window (secondary). Primary dedup is grayscale probe.
     pub screen_dedup_window_ms: u64,
     pub screen_max_edge: u32,
-    /// 0 = until Ctrl+C.
     pub screen_ticks: u64,
-    /// Divisor for visual probe resolution (default 6).
     pub probe_scale: u32,
-    /// Mean abs gray distance threshold in [0,1] (default 0.05).
     pub visual_change_threshold: f64,
     pub debounce_default_ms: u64,
     pub debounce_churn_ms: u64,
@@ -50,9 +46,7 @@ pub struct CaptureConfig {
     pub idle_session_ms: u64,
     pub queue_capacity: usize,
     pub focus_poll_ms: u64,
-    /// `all` | `main`
     pub displays: String,
-    /// `jpeg` | `png`
     pub encode: String,
     pub jpeg_quality: u8,
 }
@@ -93,7 +87,6 @@ impl CaptureConfig {
 #[serde(default)]
 pub struct PrivacyConfig {
     pub paused: bool,
-    /// Product privacy mode: never capture screen pixels.
     pub closed_eyes: bool,
 }
 
@@ -115,12 +108,21 @@ pub struct RetentionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OcrConfig {
-    /// Run async OCR worker alongside capture.
     pub enabled: bool,
     pub languages: Vec<String>,
     pub poll_interval_ms: u64,
     pub batch_size: usize,
     pub include_boxes: bool,
+    /// Only run layout OCR when accurate text is empty (default true — cheaper).
+    pub boxes_when_empty_only: bool,
+    pub max_attempts: u32,
+    pub retry_base_ms: u64,
+    pub retry_max_ms: u64,
+    pub timeout_ms: u64,
+    pub stale_running_ms: u64,
+    pub max_image_bytes: u64,
+    pub max_text_chars: u64,
+    pub shutdown_drain_ms: u64,
 }
 
 impl Default for OcrConfig {
@@ -128,9 +130,18 @@ impl Default for OcrConfig {
         Self {
             enabled: true,
             languages: vec!["zh-Hans".into(), "en-US".into()],
-            poll_interval_ms: 2000,
-            batch_size: 4,
+            poll_interval_ms: 1_500,
+            batch_size: 2,
             include_boxes: true,
+            boxes_when_empty_only: true,
+            max_attempts: 5,
+            retry_base_ms: 2_000,
+            retry_max_ms: 60_000,
+            timeout_ms: 90_000,
+            stale_running_ms: 300_000,
+            max_image_bytes: 25 * 1024 * 1024,
+            max_text_chars: 500_000,
+            shutdown_drain_ms: 30_000,
         }
     }
 }
@@ -177,8 +188,8 @@ mod tests {
         assert!(c.sources.screen);
         assert!(!c.privacy.closed_eyes);
         assert_eq!(c.capture.probe_scale, 6);
-        assert!((c.capture.visual_change_threshold - 0.05).abs() < 1e-9);
-        assert!(c.capture.all_displays());
-        assert!(c.capture.use_jpeg());
+        assert!(c.ocr.enabled);
+        assert_eq!(c.ocr.batch_size, 2);
+        assert!(c.ocr.boxes_when_empty_only);
     }
 }

@@ -555,10 +555,13 @@ name = "lumen-process"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
+ "chrono",
  "lumen-platform",
  "lumen-store",
  "lumen-types",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
