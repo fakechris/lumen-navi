@@ -163,10 +163,12 @@ id, media_type, path (relative), bytes?, content_hash?  // BLAKE3 preferred
 
 ```text
 $data_dir/
-  blobs/ca/ab/<fullhash>
-  meta/navi.db
-  tmp/
+  blobs/<aa>/<bb>/<blake3-hex>   # content-addressed; aa/bb = first 4 hex chars
+  meta/navi.db                   # events, artifacts, jobs, derived, kv
+  tmp/                           # atomic write staging (*.part → rename)
 ```
+
+Implemented by `lumen_store::SqliteStore` + `BlobStore` (Phase S1).
 
 ### Jobs & derived
 

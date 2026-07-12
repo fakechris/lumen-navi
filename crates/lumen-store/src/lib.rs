@@ -1,21 +1,50 @@
 //! Event and artifact persistence.
 //!
-//! Phase 0 ships an in-memory store so the daemon and intake layers can be
-//! wired without choosing a final SQLite schema yet.
+//! - [`MemoryEventStore`] — tests and ephemeral smoke
+//! - [`SqliteStore`] — durable Phase S1 store (SQLite meta + CA blobs)
+
+mod blob;
+mod schema;
+mod sqlite;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use lumen_types::SourceEvent;
 use thiserror::Error;
 use uuid::Uuid;
+
+pub use blob::BlobStore;
+pub use schema::SCHEMA_VERSION;
+pub use sqlite::SqliteStore;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("db: {0}")]
+    Db(String),
+    #[error("json: {0}")]
+    Json(String),
     #[error("store error: {0}")]
     Other(String),
+}
+
+impl StoreError {
+    pub(crate) fn io(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+
+    pub(crate) fn db(err: impl ToString) -> Self {
+        Self::Db(err.to_string())
+    }
+
+    pub(crate) fn json(err: impl ToString) -> Self {
+        Self::Json(err.to_string())
+    }
 }
 
 #[async_trait]
@@ -25,6 +54,48 @@ pub trait EventStore: Send + Sync {
     async fn get(&self, id: Uuid) -> Result<Option<SourceEvent>, StoreError>;
     async fn wipe_all(&self) -> Result<(), StoreError>;
     async fn len(&self) -> Result<usize, StoreError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobStatus {
+    Pending,
+    Running,
+    Done,
+    Failed,
+    Dead,
+}
+
+impl JobStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Dead => "dead",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "running" => Self::Running,
+            "done" => Self::Done,
+            "failed" => Self::Failed,
+            "dead" => Self::Dead,
+            _ => Self::Pending,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct JobRecord {
+    pub id: Uuid,
+    pub event_id: Uuid,
+    pub kind: String,
+    pub status: JobStatus,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Process-local store for scaffolding and tests.
@@ -94,12 +165,12 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
-    async fn append_and_list() {
+    async fn memory_append_and_list() {
         let store = MemoryEventStore::default();
         store
             .append(vec![SourceEvent::new(
                 SourceKind::Screen,
-                "screenshot",
+                "screenshot.v1",
                 json!({}),
             )])
             .await

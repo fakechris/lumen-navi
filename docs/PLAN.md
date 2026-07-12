@@ -12,23 +12,24 @@
 
 ---
 
-## Phase S0 — Skeleton freeze ✅ / in progress
+## Phase S0 — Skeleton freeze ✅
 
 - [x] Greenfield workspace + Phase 0 stubs  
 - [x] Architecture freeze (three planes, media-first)  
 - [x] External refs: lumen-asr GitHub, cua-driver MIT boundary  
 - [x] Crate shells: config, platform, platform-macos, sources-media, api  
-- [ ] All shells wired into daemon smoke (thin)
+- [x] Shells wired into daemon smoke  
 
 **Exit:** docs + compile-green skeleton matching `docs/ARCHITECTURE.md`.
 
 ---
 
-## Phase S1 — Store durability
+## Phase S1 — Store durability ✅
 
-- SQLite: `events`, `artifacts`, `jobs`, `derived`, `kv`  
-- Content-addressed blobs (`blobs/ca/..`) + atomic temp→rename  
-- Transactional append; wipe; restart tests  
+- [x] SQLite: `events`, `artifacts`, `jobs`, `derived`, `kv` (`meta/navi.db`)  
+- [x] Content-addressed blobs (`blobs/ab/cd/<blake3>`) + atomic temp→rename  
+- [x] Transactional append; wipe; reopen/restart tests  
+- [x] Daemon opens durable store, writes boot + smoke events  
 
 **Exit:** synthetic screen events survive restart.
 
@@ -126,6 +127,6 @@ https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 
 ## Next actions
 
-1. Finish S0 daemon wiring of new crates (thin).  
-2. S1 SQLite + blob store.  
-3. S2 macOS screen source end-to-end.  
+1. ~~S0 skeleton~~ / ~~S1 durable store~~  
+2. **S2 macOS screen source end-to-end**  
+3. S3 audio source  

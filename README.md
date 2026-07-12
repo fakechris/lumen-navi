@@ -69,4 +69,9 @@ Requires Rust stable (edition 2021+).
 
 ## Status
 
-**Phase S0 — core skeleton freeze.** Media adapters are shells; real capture lands in S2+.
+**Phase S1 — durable store.** SQLite (`data/meta/navi.db`) + BLAKE3 content-addressed blobs. Media adapters are still shells; real screen capture lands in **S2**.
+
+```bash
+cargo run -p lumen-daemon   # writes under ./data by default
+# second run: existing_events increases (restart durability)
+```
