@@ -65,13 +65,14 @@ Design: [`docs/OBSERVE_CAPTURE.md`](OBSERVE_CAPTURE.md)
 
 ## Phase S4 — Vision OCR (product step)
 
-Research: [`docs/OCR_VISION_RESEARCH.md`](OCR_VISION_RESEARCH.md)
+Product intent: [`docs/OCR_PRODUCT.md`](OCR_PRODUCT.md)  
+*(Engine research notes stay outside this repo.)*
 
-- [ ] In-process Vision engine (Accurate text + Fast boxes)  
+- [ ] In-process Vision engine (quality text + layout boxes)  
 - [ ] Job worker for `ocr_screen` → `derived` `ocr.v1`  
 - [ ] Languages default `zh-Hans` + `en-US`; concurrency gate  
 - [ ] Never block capture  
-- [ ] (S4.1) optional `lumen-ocr-helper` process like Yansu  
+- [ ] (S4.1) optional OCR helper process for isolation  
 
 **Exit:** screenshot events get OCR text without slowing Observe loop.
 
