@@ -53,13 +53,19 @@ Design: [`docs/OBSERVE_CAPTURE.md`](OBSERVE_CAPTURE.md)
 
 ---
 
-## Phase S3 — Audio source
+## Phase S3 — Audio source ✅
 
-- Mic path first; system audio later if needed  
-- Session vs continuous modes; `session_id` grouping  
-- Independent enable flag alongside screen  
+Product: [`docs/AUDIO_PRODUCT.md`](AUDIO_PRODUCT.md)
 
-**Exit:** concurrent screen + audio for 1h with restart recovery.
+- [x] Mic path via cpal (dedicated audio thread; stream `!Send` isolated)  
+- [x] Continuous + session (VAD/RMS) modes; `session_id` grouping  
+- [x] `audio_chunk.v1` + WAV CA blobs; independent `sources.audio`  
+- [x] Concurrent with screen; privacy pause; bounded backpressure  
+- [x] Unit tests with synthetic PCM (no live mic required)  
+- [ ] Long-run soak (manual)  
+- [ ] System audio loopback (later)  
+
+**Exit:** concurrent screen + audio durable intake; restart keeps stored chunks.
 
 ---
 
@@ -130,10 +136,11 @@ https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 
 | Topic | Default |
 |-------|---------|
-| Local API | UDS (+ optional loopback HTTP later) |
+| Local API | Loopback HTTP `127.0.0.1:7420` (UDS later) |
 | Hash | BLAKE3 |
-| Image | PNG first |
+| Image | JPEG default (q=75) |
 | Screen trigger | 2–5s interval + focus change |
+| Mic | Continuous chunks (default 5s); session+VAD optional |
 | System audio | After mic |
 | Desktop shell | After S3 |
 
@@ -141,6 +148,7 @@ https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 
 ## Next actions
 
-1. ~~S0 / S1 / S2 Observe / S4 OCR MVP~~  
+1. ~~S0 / S1 / S2 / S3 audio / S4 OCR + FTS~~  
 2. S4.1 OCR helper isolation (optional)  
-3. S3 audio source  
+3. Manual soak: screen + audio 1h  
+4. U1 timeline / search UI (API ready)

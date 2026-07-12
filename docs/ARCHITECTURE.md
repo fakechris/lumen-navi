@@ -191,7 +191,7 @@ Media-first job kinds: `ocr_screen`, `transcribe_audio`, `segment_activity`, `re
 | Kind | Fields (intent) |
 |------|-----------------|
 | `screenshot.v1` | app_name, bundle_id, window_title, display_id, bounds, pixel_hash, reason |
-| `audio_chunk.v1` / `audio_session.v1` | device, sample_rate, channels, duration_ms, mode, vad? |
+| `audio_chunk.v1` | device, sample_rate, channels, duration_ms, mode, rms, peak, format=`wav_s16le` (see `docs/AUDIO_PRODUCT.md`) |
 | `video_segment.v1` | display_id, duration_ms, codec, linked_screenshot_ids? |
 
 ---

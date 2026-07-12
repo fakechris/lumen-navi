@@ -1,7 +1,6 @@
-//! Lumen Navi daemon — Observe capture + async Vision OCR + local control API.
+//! Lumen Navi daemon — Observe (screen + mic) + OCR + local control API.
 //!
-//! Capture never waits on OCR. OCR consumes `ocr_screen` jobs into `derived` ocr.v1.
-//! Control API exposes health + OCR full-text search on loopback HTTP.
+//! Screen and audio never wait on each other. OCR never blocks capture.
 
 mod control_server;
 
@@ -10,18 +9,18 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use lumen_api::{HealthResponse, SourceStatus};
-use lumen_config::Config;
-use lumen_platform::{OcrEngine, PermissionProbe};
+use lumen_config::{AudioConfig, Config, PrivacyConfig};
+use lumen_platform::{MicCapturer, MicOpenConfig, OcrEngine, PermissionProbe};
 use lumen_platform_macos::{
-    request_screen_recording, MacDisplays, MacFrontmost, MacPermissions, MacScreenCapturer,
-    MacScreenLock, MacVisionOcr,
+    request_screen_recording, MacDisplays, MacFrontmost, MacMicCapturer, MacPermissions,
+    MacScreenCapturer, MacScreenLock, MacVisionOcr,
 };
 use lumen_process::{OcrWorker, OcrWorkerConfig};
-use lumen_sources_media::{AudioSource, CaptureOrchestrator, CapturedBatch};
+use lumen_sources_media::{AudioOrchestrator, CaptureOrchestrator, CapturedBatch};
 use lumen_store::{EventStore, SCHEMA_VERSION, SqliteStore};
 use lumen_types::{SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -35,17 +34,20 @@ async fn main() -> Result<()> {
     info!(
         product = "lumen-navi",
         repo = "https://github.com/fakechris/lumen-navi",
-        phase = "S4-search",
+        phase = "S3-audio",
         "daemon starting"
     );
 
     let config = Config::load_or_default("navi.toml").unwrap_or_default();
     info!(
         data_dir = %config.data_dir.display(),
-        displays = %config.capture.displays,
+        screen = config.sources.screen,
+        audio = config.sources.audio,
+        audio_mode = %config.audio.mode,
+        audio_chunk_ms = config.audio.chunk_ms,
         ocr = config.ocr.enabled,
-        ocr_langs = ?config.ocr.languages,
-        ticks = config.capture.screen_ticks,
+        ticks_screen = config.capture.screen_ticks,
+        ticks_audio = config.audio.ticks,
         api = config.api.enabled,
         api_bind = %config.api.bind,
         "config"
@@ -71,8 +73,10 @@ async fn main() -> Result<()> {
             SourceKind::Other("daemon".into()),
             "daemon.boot.v1",
             json!({
-                "phase": "S4-search",
+                "phase": "S3-audio",
                 "observe": true,
+                "screen": config.sources.screen,
+                "audio": config.sources.audio,
                 "ocr": config.ocr.enabled,
                 "api": config.api.enabled,
             }),
@@ -81,15 +85,19 @@ async fn main() -> Result<()> {
 
     let perms = MacPermissions;
     let mut status = perms.status().await?;
-    info!(screen = ?status.screen_recording, "permissions");
+    info!(
+        screen = ?status.screen_recording,
+        mic = ?status.microphone,
+        "permissions"
+    );
     if config.sources.screen && !status.can_capture_screen() {
         let _ = request_screen_recording();
         status = perms.status().await?;
-        info!(screen = ?status.screen_recording, "after request");
+        info!(screen = ?status.screen_recording, "after screen request");
     }
 
-    // --- OCR worker (async; independent of capture) ---
-    let (ocr_cancel_tx, ocr_cancel_rx) = tokio::sync::watch::channel(false);
+    // --- OCR worker ---
+    let (ocr_cancel_tx, ocr_cancel_rx) = watch::channel(false);
     let ocr_handle = if config.ocr.enabled {
         let engine = Arc::new(MacVisionOcr::with_max_image_bytes(
             config.ocr.max_image_bytes as usize,
@@ -138,22 +146,47 @@ async fn main() -> Result<()> {
         running: false,
         last_error: None,
     };
+    let mut audio_status = SourceStatus {
+        id: "audio".into(),
+        enabled: config.sources.audio,
+        running: false,
+        last_error: None,
+    };
 
-    // --- Local control API (health + OCR search) ---
+    // --- Local control API ---
     let _api_handle = if config.api.enabled {
         control_server::spawn(
             &config.api.bind,
             control_server::ControlState {
                 store: Arc::clone(&store),
                 paused: config.privacy.paused,
-                sources: vec![screen_status.clone()],
+                sources: vec![screen_status.clone(), audio_status.clone()],
             },
         )
     } else {
         None
     };
 
+    // Shared cancel for long-running observe tasks.
+    let (observe_cancel_tx, observe_cancel_rx) = watch::channel(false);
+
+    // --- Audio (concurrent with screen) ---
+    let audio_task = if config.sources.audio {
+        audio_status.running = true;
+        let store_a = Arc::clone(&store);
+        let audio_cfg = config.audio.clone();
+        let privacy = config.privacy.clone();
+        let cancel = observe_cancel_rx.clone();
+        Some(tokio::spawn(async move {
+            run_audio_loop(store_a, audio_cfg, privacy, cancel).await
+        }))
+    } else {
+        None
+    };
+
     let mut ran_long_loop = false;
+    let expect_long = (config.sources.screen && config.capture.screen_ticks == 0)
+        || (config.sources.audio && config.audio.ticks == 0);
 
     if config.sources.screen {
         let mut orch = CaptureOrchestrator::new(
@@ -217,7 +250,7 @@ async fn main() -> Result<()> {
         focus_tick.tick().await;
         capture_tick.tick().await;
 
-        info!("observe loop running (Ctrl+C to stop if ticks=0)");
+        info!("observe screen loop running (Ctrl+C to stop if ticks=0)");
         if max_ticks == 0 {
             ran_long_loop = true;
         }
@@ -290,13 +323,48 @@ async fn main() -> Result<()> {
             drop_bp = st.dropped_backpressure,
             "capture stats"
         );
+    } else if config.sources.audio && config.audio.ticks == 0 {
+        // Audio-only continuous: wait until Ctrl+C (audio task runs in background).
+        ran_long_loop = true;
+        info!("audio-only observe running; Ctrl+C to stop");
+        let _ = tokio::signal::ctrl_c().await;
+        info!("Ctrl+C");
+    } else if config.sources.audio && config.audio.ticks > 0 {
+        // Finite audio smoke without screen: wait for audio task / cancel after grace.
+        let wait_ms = config.audio.chunk_ms.saturating_mul(config.audio.ticks.saturating_add(2));
+        tokio::time::sleep(Duration::from_millis(wait_ms.max(2_000))).await;
+    }
+
+    // Stop audio + OCR.
+    let _ = observe_cancel_tx.send(true);
+    if let Some(handle) = audio_task {
+        match handle.await {
+            Ok(Ok(st)) => {
+                audio_status.running = false;
+                info!(
+                    emitted = st.chunks_emitted,
+                    silent = st.chunks_dropped_silent,
+                    pause = st.chunks_dropped_pause,
+                    sessions_open = st.sessions_opened,
+                    sessions_close = st.sessions_closed,
+                    "audio stats"
+                );
+            }
+            Ok(Err(e)) => {
+                audio_status.running = false;
+                audio_status.last_error = Some(e.to_string());
+                warn!(error = %e, "audio task failed");
+            }
+            Err(e) => {
+                audio_status.running = false;
+                warn!(error = %e, "audio task join failed");
+            }
+        }
     }
 
     if let Some((worker, handle)) = ocr_handle {
-        // Signal stop then join (worker drains with shutdown_drain).
         let _ = ocr_cancel_tx.send(true);
         let _ = handle.await;
-        // Finite capture runs: extra drain for late enqueues.
         if config.capture.screen_ticks > 0 {
             let st = worker.drain(40).await;
             info!(
@@ -328,25 +396,29 @@ async fn main() -> Result<()> {
         }
     }
 
-    if config.sources.audio {
-        let mut a = AudioSource::new();
-        use lumen_intake::Source;
-        a.start().await?;
-        a.stop().await?;
-    }
-
-    // API-only / no long capture: keep serving until Ctrl+C.
-    if config.api.enabled && !ran_long_loop && config.capture.screen_ticks == 0 {
+    // API-only keep-alive when no long observe ran.
+    if config.api.enabled && expect_long && !ran_long_loop {
         info!(
             bind = %config.api.bind,
-            "control API idle (no infinite capture loop); Ctrl+C to stop"
+            "control API idle; Ctrl+C to stop"
+        );
+        tokio::signal::ctrl_c().await?;
+        info!("Ctrl+C");
+    } else if config.api.enabled
+        && !expect_long
+        && !config.sources.screen
+        && !config.sources.audio
+    {
+        info!(
+            bind = %config.api.bind,
+            "control API only; Ctrl+C to stop"
         );
         tokio::signal::ctrl_c().await?;
         info!("Ctrl+C");
     }
 
     let health = HealthResponse::scaffold(
-        vec![screen_status],
+        vec![screen_status, audio_status],
         store.len().await?,
         config.privacy.paused,
         store.ocr_doc_count().unwrap_or(0),
@@ -358,6 +430,79 @@ async fn main() -> Result<()> {
         "health"
     );
     Ok(())
+}
+
+async fn run_audio_loop(
+    store: Arc<SqliteStore>,
+    config: AudioConfig,
+    privacy: PrivacyConfig,
+    mut cancel: watch::Receiver<bool>,
+) -> Result<lumen_sources_media::AudioStats> {
+    let open_cfg = MicOpenConfig {
+        preferred_sample_rate: config.sample_rate,
+        preferred_channels: config.channels,
+        chunk_ms: config.chunk_ms,
+        device: config.device.clone(),
+    };
+    let capturer = MacMicCapturer;
+    let stream = tokio::task::spawn_blocking(move || capturer.open(open_cfg))
+        .await
+        .context("join mic open")?
+        .context("open microphone")?;
+
+    info!(
+        mode = %config.mode,
+        chunk_ms = config.chunk_ms,
+        ticks = config.ticks,
+        "audio observe started"
+    );
+
+    let mut orch = AudioOrchestrator::new(config.clone(), privacy);
+    let max_ticks = config.ticks;
+    let mut poll = tokio::time::interval(Duration::from_millis(100));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        if *cancel.borrow() {
+            break;
+        }
+        if max_ticks > 0 && orch.stats().chunks_emitted >= max_ticks {
+            break;
+        }
+
+        tokio::select! {
+            _ = cancel.changed() => {
+                if *cancel.borrow() {
+                    break;
+                }
+            }
+            _ = poll.tick() => {
+                let batch = orch.drain_ready(&stream);
+                for cap in batch {
+                    let bytes = cap.wav.len();
+                    match store.put_and_append(cap.event, cap.media_type, &cap.wav) {
+                        Ok(stored) => {
+                            info!(
+                                id = %stored.id,
+                                kind = %stored.kind,
+                                bytes,
+                                session = ?stored.session_id,
+                                "persisted audio chunk"
+                            );
+                        }
+                        Err(e) => warn!(error = %e, "audio persist failed"),
+                    }
+                    if max_ticks > 0 && orch.stats().chunks_emitted >= max_ticks {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    orch.force_close_session();
+    stream.stop();
+    Ok(orch.stats())
 }
 
 #[inline]

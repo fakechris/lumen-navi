@@ -10,6 +10,7 @@ cc = "1"
 
 [dependencies]
 async-trait = { workspace = true }
+cpal = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 lumen-platform = { workspace = true }
 serde_json = { workspace = true }

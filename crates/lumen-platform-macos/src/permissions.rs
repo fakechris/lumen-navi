@@ -5,6 +5,8 @@ use lumen_platform::{
     PermissionProbe, PermissionState, PermissionStatus, PlatformError,
 };
 
+use crate::mic::default_input_available;
+
 /// macOS permission probe.
 pub struct MacPermissions;
 
@@ -13,9 +15,18 @@ impl PermissionProbe for MacPermissions {
     async fn status(&self) -> Result<PermissionStatus, PlatformError> {
         Ok(PermissionStatus {
             screen_recording: screen_recording_state(),
-            microphone: PermissionState::NotDetermined,
+            microphone: mic_state(),
             accessibility: accessibility_state(),
         })
+    }
+}
+
+fn mic_state() -> PermissionState {
+    // Opening a stream triggers the system prompt; here we only probe device presence.
+    if default_input_available() {
+        PermissionState::Granted
+    } else {
+        PermissionState::NotDetermined
     }
 }
 

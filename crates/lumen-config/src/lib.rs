@@ -23,6 +23,55 @@ pub struct Config {
     pub ocr: OcrConfig,
     #[serde(default)]
     pub api: ApiConfig,
+    #[serde(default)]
+    pub audio: AudioConfig,
+}
+
+/// Microphone intake (S3). Enable flag is `sources.audio`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioConfig {
+    /// `continuous` | `session`
+    pub mode: String,
+    /// Preferred sample rate; device may negotiate another rate.
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// Chunk duration before flush to store.
+    pub chunk_ms: u64,
+    pub queue_capacity: usize,
+    /// 0 = run until stop; >0 = finite chunks (smoke).
+    pub ticks: u64,
+    /// Session mode: close after this much silence.
+    pub session_silence_ms: u64,
+    /// Energy VAD threshold (RMS of float samples in [-1, 1]).
+    pub vad_rms_threshold: f32,
+    /// Drop chunks below VAD threshold (useful in session mode).
+    pub drop_silent_chunks: bool,
+    /// Empty = system default input device.
+    pub device: String,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            mode: "continuous".into(),
+            sample_rate: 16_000,
+            channels: 1,
+            chunk_ms: 5_000,
+            queue_capacity: 8,
+            ticks: 0,
+            session_silence_ms: 2_500,
+            vad_rms_threshold: 0.008,
+            drop_silent_chunks: false,
+            device: String::new(),
+        }
+    }
+}
+
+impl AudioConfig {
+    pub fn is_session_mode(&self) -> bool {
+        self.mode.eq_ignore_ascii_case("session")
+    }
 }
 
 /// Local control API (loopback HTTP).
@@ -185,6 +234,7 @@ impl Default for Config {
             },
             ocr: OcrConfig::default(),
             api: ApiConfig::default(),
+            audio: AudioConfig::default(),
         }
     }
 }
@@ -215,5 +265,8 @@ mod tests {
         assert!(c.ocr.boxes_when_empty_only);
         assert!(c.api.enabled);
         assert_eq!(c.api.bind, "127.0.0.1:7420");
+        assert!(c.sources.audio);
+        assert_eq!(c.audio.chunk_ms, 5_000);
+        assert!(!c.audio.is_session_mode());
     }
 }
