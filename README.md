@@ -2,36 +2,45 @@
 
 Local-first **continuous context** platform.
 
-Lumen Navi continuously ingests multi-modal signals from the user’s digital life, stores them under clear privacy boundaries, and turns them into structured memory and actionable context for people and agents.
+Lumen Navi continuously ingests multi-modal signals (screen, audio, later browser & tools), stores them under clear privacy boundaries, and turns them into structured memory and actionable context.
 
-This repository is a **greenfield Rust workspace**. It is not a port of any previous prototype stack.
+**Greenfield Rust workspace** — https://github.com/fakechris/lumen-navi
 
-## Product one-liner
+## One-liner
 
-**Keep watching what matters — screen, sound, browser, and tools — then make that stream useful.**
+**Keep watching what matters — screen and sound first — then make that stream useful.**
 
-## Workspace layout
+## Architecture (summary)
+
+Three planes:
+
+| Plane | Role | Status |
+|-------|------|--------|
+| **Observe** | Multi-source intake | Media-first (screen / audio / video) |
+| **Memory** | Durable store + async process | Core skeleton |
+| **Act** | Optional computer-use | Later, via open-source **cua-driver** (MIT) |
+
+Full write-up: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · roadmap: [`docs/PLAN.md`](docs/PLAN.md) · vision: [`docs/VISION.md`](docs/VISION.md)
+
+## Workspace
 
 ```
 lumen-navi/
 ├── crates/
-│   ├── lumen-types      # Shared domain types & event envelope
-│   ├── lumen-intake     # Source adapters + intake pipeline
-│   ├── lumen-store      # Persistence (raw + derived)
-│   ├── lumen-process    # Processing / enrichment jobs
-│   └── lumen-daemon     # Long-running local daemon entrypoint
-├── apps/                # Future desktop / CLI surfaces
-├── extensions/          # Browser extensions (Chrome first)
-└── docs/                # Product & architecture (no legacy research)
+│   ├── lumen-types            # Event envelope & shared types
+│   ├── lumen-config           # Config / flags / retention defaults
+│   ├── lumen-platform         # OS capability ports
+│   ├── lumen-platform-macos   # macOS implementations
+│   ├── lumen-intake           # Source runtime, supervisor, policy
+│   ├── lumen-sources-media    # Screen / audio / video adapters (first)
+│   ├── lumen-store            # Events + blobs + jobs
+│   ├── lumen-process          # Enrichment jobs
+│   ├── lumen-api              # Versioned local control API schema
+│   └── lumen-daemon           # Long-running entrypoint
+├── apps/                      # Desktop later
+├── extensions/                # Chrome later
+└── docs/
 ```
-
-## Docs
-
-| Doc | Purpose |
-|-----|---------|
-| [`docs/VISION.md`](docs/VISION.md) | Product vision and principles |
-| [`docs/PLAN.md`](docs/PLAN.md) | Preliminary roadmap & scope |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Target system shape |
 
 ## Quick start
 
@@ -45,8 +54,19 @@ Requires Rust stable (edition 2021+).
 
 ## Related projects
 
-- **Lumen ASR** (`~/source/lumen-asr`) — voice dictation product; may later become an *intake source* or share platform crates, but remains a separate product.
+| Project | Link | Relationship |
+|---------|------|----------------|
+| **Lumen ASR** | https://github.com/fakechris/lumen-asr | Separate **voice dictation** product. May later become an intake source or share engine *patterns*; **not** merged into this monorepo. |
+| **cua-driver** | https://github.com/trycua/cua | Open-source **MIT** computer-use driver for the optional **Act** plane only. Observe/capture is Navi-owned. **Do not** use `cua-agent[omni]` (AGPL). |
+
+## Priority order
+
+1. Stable core skeleton (this phase)  
+2. Screen + audio durability  
+3. Light processing (OCR / ASR jobs)  
+4. Chrome extension & other edges  
+5. Optional Act via cua-driver · desktop UI  
 
 ## Status
 
-**Phase 0 — scaffolding & product framing.** Architecture is intentional; most adapters are stubs.
+**Phase S0 — core skeleton freeze.** Media adapters are shells; real capture lands in S2+.

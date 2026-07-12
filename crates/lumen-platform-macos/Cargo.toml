@@ -1,0 +1,11 @@
+[package]
+name = "lumen-platform-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "macOS implementations of lumen-platform ports"
+
+[dependencies]
+async-trait = { workspace = true }
+lumen-platform = { workspace = true }
+tracing = { workspace = true }

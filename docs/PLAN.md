@@ -1,132 +1,131 @@
-# Lumen Navi — Preliminary Plan
+# Lumen Navi — Roadmap
 
-> Recorded: 2026-07-11  
-> Nature: working plan, not a frozen spec  
-> Decision context: start a greenfield Rust project; multi-source continuous intake is the core
+> Greenfield Rust · media-first · https://github.com/fakechris/lumen-navi  
+> Related: [Lumen ASR](https://github.com/fakechris/lumen-asr) (separate) · [cua-driver](https://github.com/trycua/cua) (optional Act, MIT only)
 
-## 1. Strategic shift (product / engineering)
+## Locked priorities
 
-| Before (context only) | Now |
-|-----------------------|-----|
-| Exploratory / prototype-heavy work in other trees | **Serious product development** |
-| Go desktop experiment as main line | **Rust core platform** |
-| Single-app feature chasing | **Intake + process architecture first** |
-| Entangled historical docs | **Clean repo; product docs only** |
+1. **Screen + media intake** before browser  
+2. **Stable core skeleton** before product surfaces  
+3. Chrome / coding agents / UI **after** Observe→Memory is durable  
+4. Optional **Act** via open-source **cua-driver** (MIT) — never blocks capture  
 
-This repo (`~/source/lumen-navi`) is the home for that new line of work.
+---
 
-## 2. What we are building first
+## Phase S0 — Skeleton freeze ✅ / in progress
 
-### Must be true early
+- [x] Greenfield workspace + Phase 0 stubs  
+- [x] Architecture freeze (three planes, media-first)  
+- [x] External refs: lumen-asr GitHub, cua-driver MIT boundary  
+- [x] Crate shells: config, platform, platform-macos, sources-media, api  
+- [ ] All shells wired into daemon smoke (thin)
 
-1. **A long-running local daemon** (`lumen-daemon`) that owns capture schedules and source lifecycle.
-2. **A unified event envelope** (`lumen-types`) so every source looks the same downstream.
-3. **Append-only-ish storage** for raw artifacts + metadata (`lumen-store`).
-4. **Async processing workers** that can lag behind capture (`lumen-process`).
-5. **At least one real source path end-to-end** (likely screen *or* browser first — decide in Phase 1).
+**Exit:** docs + compile-green skeleton matching `docs/ARCHITECTURE.md`.
 
-### Explicitly multi-source from day one (design)
+---
 
-Even if implementation is staged, the **API assumes many sources**:
+## Phase S1 — Store durability
 
-- Screen capture (screenshots)
-- Video recording (optional / policy-gated)
-- Audio recording
-- Chrome extension (web navigation & page activity)
-- Coding-agent conversation / session logs
-- Future adapters without core rewrites
+- SQLite: `events`, `artifacts`, `jobs`, `derived`, `kv`  
+- Content-addressed blobs (`blobs/ca/..`) + atomic temp→rename  
+- Transactional append; wipe; restart tests  
 
-## 3. Phased roadmap
+**Exit:** synthetic screen events survive restart.
 
-### Phase 0 — Scaffolding ✅ (this commit)
+---
 
-- [x] New repository workspace under `/Users/chris/source/lumen-navi`
-- [x] Product vision + plan + architecture notes (no legacy research material)
-- [x] Crate skeleton: types / intake / store / process / daemon
-- [x] `cargo build` / `cargo test` green on stubs
+## Phase S2 — Screen source (first real)
 
-### Phase 1 — Event core + store
+- macOS Screen Recording permission port  
+- Interval (2–5s) + focus-change triggers  
+- Frontmost metadata + pixel_hash dedup  
+- PNG + `screenshot.v1` events  
 
-- Stabilize `SourceEvent` / `ArtifactRef` schema
-- SQLite (or equivalent) for metadata; filesystem for blobs
-- Retention policy hooks (TTL, pause, wipe)
-- Daemon boot, config, graceful shutdown
-- In-memory or file-backed “source registry”
+**Exit:** 30–60 min continuous capture; pause works; no data loss.
 
-**Exit criteria:** daemon can append synthetic events and list them; restart preserves data.
+---
 
-### Phase 2 — First real intake path
+## Phase S3 — Audio source
 
-Pick one primary slice (recommended order to validate architecture):
+- Mic path first; system audio later if needed  
+- Session vs continuous modes; `session_id` grouping  
+- Independent enable flag alongside screen  
 
-**Option A — Browser first (fast feedback)**  
-Chrome MV3 extension → local daemon (HTTP/WebSocket/native messaging) → store.
+**Exit:** concurrent screen + audio for 1h with restart recovery.
 
-**Option B — Screen first (platform hard parts early)**  
-macOS screenshot schedule → store → optional OCR job later.
+---
 
-Decision rule: if the goal is **multi-source product story** and UI demo, prefer A; if the goal is **prove continuous media pipeline**, prefer B. Default recommendation: **A then B** (protocol first, media second).
+## Phase S4 — Process pipeline (light)
 
-**Exit criteria:** one real source writes events continuously for 30+ minutes without data loss.
+- Enqueue jobs on append  
+- OCR processor for screenshots (pluggable)  
+- Optional ASR for audio (design-compatible with lumen-asr engines; no hard dep)  
+- Derived records queryable  
 
-### Phase 3 — Media sources (screen / audio / video)
+**Exit:** raw event → at least one derived record without blocking capture.
 
-- Screen: interval + idle/active heuristics; app denylist
-- Audio: session-based and continuous modes; permission UX
-- Video: optional; same retention and cost controls as screen
-- Artifact lifecycle: write → index → process → compact/archive
+---
 
-**Exit criteria:** concurrent screen + audio capture with separate retention policies.
+## Phase S5 — Video (optional / gated)
 
-### Phase 4 — Processing layer
+- Same store/job model; feature-flagged; cost controls  
 
-- Pluggable processors: OCR, ASR, summarization, entity extraction
-- Job queue with retries / dead-letter
-- Derived views: sessions, page visits, coding sessions
-- Privacy processors (redaction) before any export or cloud path
+---
 
-**Exit criteria:** raw event → derived “activity segment” available via store API.
+## Phase B1 — Chrome (explicitly later)
 
-### Phase 5 — Surfaces & agents
+- MV3 extension + native messaging / loopback  
+- `SourceKind::Browser` only — **no core trait changes** if API stayed versioned  
 
-- Local timeline / search UI (desktop later)
-- Coding-agent adapters (export context in; ingest transcripts out)
-- Optional integration with Lumen ASR as an audio/text source
-- Policy for external LLM use (BYO keys, local-only mode)
+---
 
-## 4. Repo boundaries
+## Phase A1 — Act (optional)
+
+- Bundle/spawn **cua-driver** (MIT only from trycua/cua)  
+- `lumen-act` thin client  
+- Never block intake  
+
+---
+
+## Phase U1 — Surfaces
+
+- Local timeline / search UI  
+- Optional bridge: ingest from / export to [Lumen ASR](https://github.com/fakechris/lumen-asr)  
+- Coding-agent transcript adapters  
+
+---
+
+## Repo boundaries
 
 ```
-~/source/lumen-navi     ← this product (Rust core + extensions)
-~/source/lumen-asr      ← separate dictation product (may share ideas later)
+https://github.com/fakechris/lumen-navi   ← this product
+https://github.com/fakechris/lumen-asr    ← dictation product (separate)
+https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 ```
 
-**Hard rule for this repo**
+**Hard rules**
 
-- Product, architecture, and engineering docs only.
-- No reverse-engineering notes, binary dumps, or competitor decompilation material.
-- No carrying over old monorepo structure by default; design for Navi’s intake model.
+- Product/architecture docs only — no reverse-engineering material.  
+- No AGPL `cua-agent[omni]`.  
+- No monorepo merge with lumen-asr by default.
 
-## 5. Open decisions (to resolve soon)
+---
 
-| Topic | Options | Owner trigger |
-|-------|---------|---------------|
-| First real source | Browser vs screen | Phase 1 exit |
-| Local IPC | HTTP loopback / UDS / native messaging | Before Chrome extension |
-| Blob store layout | content-addressed vs time-partitioned | Before media capture |
-| Desktop shell | Tauri later vs daemon-only first | After Phase 2 |
-| Identity / “who” model | deferred vs early principal table | After multi-source demos |
+## Defaults
 
-## 6. Near-term engineering norms
+| Topic | Default |
+|-------|---------|
+| Local API | UDS (+ optional loopback HTTP later) |
+| Hash | BLAKE3 |
+| Image | PNG first |
+| Screen trigger | 2–5s interval + focus change |
+| System audio | After mic |
+| Desktop shell | After S3 |
 
-- Small, compiling increments; tests for schema & store first.
-- Feature flags for expensive capture modes.
-- macOS permissions treated as product surface, not afterthought.
-- Chinese + English product copy OK; code identifiers English.
+---
 
-## 7. Immediate next actions (when development resumes)
+## Next actions
 
-1. Freeze v0 `SourceEvent` fields with tests.
-2. Implement store append + list + wipe.
-3. Choose Phase 2 source (browser recommended) and define the wire protocol.
-4. Scaffold `extensions/chrome` only after protocol draft exists.
+1. Finish S0 daemon wiring of new crates (thin).  
+2. S1 SQLite + blob store.  
+3. S2 macOS screen source end-to-end.  

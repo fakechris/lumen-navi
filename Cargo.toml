@@ -2,16 +2,26 @@
 resolver = "2"
 members = [
   "crates/lumen-types",
+  "crates/lumen-config",
+  "crates/lumen-platform",
+  "crates/lumen-platform-macos",
   "crates/lumen-intake",
+  "crates/lumen-sources-media",
   "crates/lumen-store",
   "crates/lumen-process",
+  "crates/lumen-api",
   "crates/lumen-daemon",
 ]
 default-members = [
   "crates/lumen-types",
+  "crates/lumen-config",
+  "crates/lumen-platform",
+  "crates/lumen-platform-macos",
   "crates/lumen-intake",
+  "crates/lumen-sources-media",
   "crates/lumen-store",
   "crates/lumen-process",
+  "crates/lumen-api",
   "crates/lumen-daemon",
 ]
 
@@ -20,6 +30,7 @@ version = "0.1.0"
 edition = "2021"
 license = "UNLICENSED"
 authors = ["Chris"]
+repository = "https://github.com/fakechris/lumen-navi"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -29,11 +40,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 lumen-types = { path = "crates/lumen-types" }
+lumen-config = { path = "crates/lumen-config" }
+lumen-platform = { path = "crates/lumen-platform" }
+lumen-platform-macos = { path = "crates/lumen-platform-macos" }
 lumen-intake = { path = "crates/lumen-intake" }
+lumen-sources-media = { path = "crates/lumen-sources-media" }
 lumen-store = { path = "crates/lumen-store" }
 lumen-process = { path = "crates/lumen-process" }
+lumen-api = { path = "crates/lumen-api" }

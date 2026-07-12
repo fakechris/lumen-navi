@@ -1,0 +1,13 @@
+[package]
+name = "lumen-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Versioned local control API schema for daemon, UI, and future extensions"
+
+[dependencies]
+chrono = { workspace = true }
+lumen-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }

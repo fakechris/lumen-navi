@@ -1,0 +1,19 @@
+[package]
+name = "lumen-sources-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Screen, audio, and video intake adapters"
+
+[dependencies]
+async-trait = { workspace = true }
+lumen-config = { workspace = true }
+lumen-intake = { workspace = true }
+lumen-platform = { workspace = true }
+lumen-types = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

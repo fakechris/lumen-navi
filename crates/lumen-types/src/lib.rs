@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// High-level origin of an event.
+///
+/// Media kinds (`Screen`, `Audio`, `Video`) are first-class for the spine path.
+/// `Browser` / `CodingAgent` are reserved for later edge adapters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceKind {
@@ -18,6 +21,15 @@ pub enum SourceKind {
     CodingAgent,
     /// Escape hatch for adapters not yet given a dedicated variant.
     Other(String),
+}
+
+/// Conventional event `kind` strings (payload schemas versioned in the string).
+pub mod event_kind {
+    pub const SCREENSHOT_V1: &str = "screenshot.v1";
+    pub const AUDIO_CHUNK_V1: &str = "audio_chunk.v1";
+    pub const AUDIO_SESSION_V1: &str = "audio_session.v1";
+    pub const VIDEO_SEGMENT_V1: &str = "video_segment.v1";
+    pub const PAGE_VISIT_V1: &str = "page_visit.v1";
 }
 
 /// Reference to a blob on disk (or future object store).
