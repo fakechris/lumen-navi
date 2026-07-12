@@ -40,6 +40,21 @@ pub struct CaptureConfig {
     pub screen_interval_ms: u64,
     /// Skip writing when pixel_hash matches within this window.
     pub screen_dedup_window_ms: u64,
+    /// Longest edge for stored screenshots (0 = native resolution).
+    #[serde(default = "default_max_edge")]
+    pub screen_max_edge: u32,
+    /// How many screen ticks the daemon captures before exit.
+    /// `0` = run until Ctrl+C.
+    #[serde(default = "default_screen_ticks")]
+    pub screen_ticks: u64,
+}
+
+fn default_max_edge() -> u32 {
+    1920
+}
+
+fn default_screen_ticks() -> u64 {
+    3
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +77,8 @@ impl Default for Config {
             capture: CaptureConfig {
                 screen_interval_ms: 3_000,
                 screen_dedup_window_ms: 5_000,
+                screen_max_edge: default_max_edge(),
+                screen_ticks: default_screen_ticks(),
             },
             retention: RetentionConfig {
                 max_blob_mb: 20_480,
@@ -93,5 +110,7 @@ mod tests {
         assert!(c.sources.audio);
         assert!(!c.sources.browser);
         assert!(!c.sources.video);
+        assert_eq!(c.capture.screen_ticks, 3);
+        assert_eq!(c.capture.screen_max_edge, 1920);
     }
 }

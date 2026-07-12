@@ -1,19 +1,20 @@
 //! Lumen Navi local daemon.
 //!
-//! Phase S1: durable SQLite + CA blob store under `data_dir`.
-//! Real capture loops land in S2+.
+//! Phase S2: real macOS screen capture → durable store (interval + dedup).
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use lumen_api::{HealthResponse, SourceStatus};
 use lumen_config::Config;
-use lumen_intake::{drain_once, Source};
-use lumen_platform::{NullFrontmost, NullPermissions, PermissionProbe};
-use lumen_platform_macos::MacScreenCapturer;
+use lumen_intake::Source;
+use lumen_platform::PermissionProbe;
+use lumen_platform_macos::{
+    request_screen_recording, MacFrontmost, MacPermissions, MacScreenCapturer,
+};
 use lumen_sources_media::{AudioSource, ScreenSource};
-use lumen_store::{EventStore, SqliteStore, StoreSink};
-use lumen_types::{event_kind, SourceEvent, SourceKind};
+use lumen_store::{EventStore, SqliteStore};
+use lumen_types::{SourceEvent, SourceKind};
 use serde_json::json;
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -28,7 +29,7 @@ async fn main() -> Result<()> {
     info!(
         product = "lumen-navi",
         repo = "https://github.com/fakechris/lumen-navi",
-        phase = "S1",
+        phase = "S2",
         "daemon starting"
     );
 
@@ -38,7 +39,10 @@ async fn main() -> Result<()> {
         screen = config.sources.screen,
         audio = config.sources.audio,
         browser = config.sources.browser,
-        "config loaded (media-first defaults; browser off)"
+        interval_ms = config.capture.screen_interval_ms,
+        ticks = config.capture.screen_ticks,
+        max_edge = config.capture.screen_max_edge,
+        "config loaded"
     );
 
     std::fs::create_dir_all(&config.data_dir)
@@ -54,78 +58,129 @@ async fn main() -> Result<()> {
         "durable store open"
     );
 
-    // Boot marker proves durability across process restarts (survives in navi.db).
     let boot = SourceEvent::new(
         SourceKind::Other("daemon".into()),
         "daemon.boot.v1",
         json!({
             "payload_version": 1,
-            "phase": "S1",
+            "phase": "S2",
             "note": "process start marker"
         }),
     );
     store.append(vec![boot]).await?;
-    // Tiny CA blob attached to a synthetic screen-shaped event (pipeline check).
-    let smoke = SourceEvent::new(
-        SourceKind::Screen,
-        event_kind::SCREENSHOT_V1,
-        json!({
-            "payload_version": 1,
-            "reason": "daemon_smoke",
-        }),
-    );
-    let smoke = store.put_and_append(smoke, "application/octet-stream", b"lumen-navi-s1-smoke")?;
-    store.enqueue_job(smoke.id, "ocr_screen")?;
 
-    let perms = NullPermissions;
-    let status = perms.status().await?;
+    let perms = MacPermissions;
+    let mut status = perms.status().await?;
     info!(
         screen = ?status.screen_recording,
         mic = ?status.microphone,
-        "permission probe (stub until signed macOS capture)"
+        accessibility = ?status.accessibility,
+        "permission probe"
     );
 
-    let sink = StoreSink::new(Arc::clone(&store));
-    let mut sources: Vec<Box<dyn Source>> = Vec::new();
-    let mut statuses: Vec<SourceStatus> = Vec::new();
+    if config.sources.screen && !status.can_capture_screen() {
+        info!("requesting Screen Recording access (system prompt may appear)");
+        let _ = request_screen_recording();
+        status = perms.status().await?;
+        info!(screen = ?status.screen_recording, "permission after request");
+    }
+
+    let mut screen_status = SourceStatus {
+        id: "screen".into(),
+        enabled: config.sources.screen,
+        running: false,
+        last_error: None,
+    };
+    let mut audio_status = SourceStatus {
+        id: "audio".into(),
+        enabled: config.sources.audio,
+        running: false,
+        last_error: None,
+    };
 
     if config.sources.screen {
-        let screen = ScreenSource::new(
-            Arc::new(MacScreenCapturer),
-            Arc::new(NullFrontmost),
+        let capturer = MacScreenCapturer::with_max_edge(config.capture.screen_max_edge);
+        let mut screen = ScreenSource::new(
+            Arc::new(capturer),
+            Arc::new(MacFrontmost),
             &config.capture,
         );
-        sources.push(Box::new(screen));
-        statuses.push(SourceStatus {
-            id: "screen".into(),
-            enabled: true,
-            running: false,
-            last_error: None,
-        });
+        screen.start().await?;
+        screen_status.running = true;
+
+        let interval = screen.interval();
+        let max_ticks = config.capture.screen_ticks;
+        info!(
+            ?interval,
+            max_ticks,
+            "screen capture loop (ticks=0 means until Ctrl+C)"
+        );
+
+        let mut tick: u64 = 0;
+        loop {
+            if max_ticks > 0 && tick >= max_ticks {
+                break;
+            }
+            tick += 1;
+
+            match screen.capture_tick().await {
+                Ok(batch) => {
+                    for item in batch {
+                        if let Some((media, bytes)) = item.blob {
+                            let stored = store.put_and_append(item.event, media, &bytes)?;
+                            info!(
+                                id = %stored.id,
+                                kind = %stored.kind,
+                                artifacts = stored.artifacts.len(),
+                                "stored screenshot"
+                            );
+                        } else {
+                            store.append(vec![item.event]).await?;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "screen capture tick failed");
+                    screen_status.last_error = Some(e.to_string());
+                    // Keep looping — permission may be granted mid-run after Settings toggle.
+                }
+            }
+
+            if max_ticks > 0 && tick >= max_ticks {
+                break;
+            }
+            // Sleep, but wake early on Ctrl+C when running forever.
+            if max_ticks == 0 {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        info!("Ctrl+C — stopping capture loop");
+                        break;
+                    }
+                    _ = tokio::time::sleep(interval) => {}
+                }
+            } else {
+                tokio::time::sleep(interval).await;
+            }
+        }
+
+        screen.stop().await?;
+        screen_status.running = false;
     }
 
     if config.sources.audio {
-        sources.push(Box::new(AudioSource::new()));
-        statuses.push(SourceStatus {
-            id: "audio".into(),
-            enabled: true,
-            running: false,
-            last_error: None,
-        });
+        // S3 will run audio; for now just register status.
+        let mut audio = AudioSource::new();
+        audio.start().await?;
+        audio_status.running = true;
+        audio.stop().await?;
+        audio_status.running = false;
     }
 
     if config.sources.browser {
         warn!("browser source enabled in config but not implemented until Phase B1");
     }
 
-    for source in sources.iter_mut() {
-        source.start().await?;
-        let n = drain_once(source.as_mut(), &sink).await?;
-        info!(source = source.id(), events = n, "poll complete");
-        source.stop().await?;
-    }
-
-    let recent = store.list_recent(5).await?;
+    let recent = store.list_recent(8).await?;
     for ev in &recent {
         info!(
             id = %ev.id,
@@ -135,12 +190,15 @@ async fn main() -> Result<()> {
         );
     }
 
-    let health = HealthResponse::scaffold(statuses, store.len().await?, false);
+    let health = HealthResponse::scaffold(
+        vec![screen_status, audio_status],
+        store.len().await?,
+        false,
+    );
     info!(
         api_version = health.api_version,
         stored = health.stored_events,
         sources = health.sources.len(),
-        jobs = store.list_jobs(10)?.len(),
         "health snapshot"
     );
 

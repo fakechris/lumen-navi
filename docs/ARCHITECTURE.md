@@ -170,6 +170,13 @@ $data_dir/
 
 Implemented by `lumen_store::SqliteStore` + `BlobStore` (Phase S1).
 
+### Screen capture (Phase S2)
+
+- Port: `ScreenCapturer` / `MacScreenCapturer` (`CGDisplayCreateImage` → PNG)
+- Adapter: `lumen_sources_media::ScreenSource::capture_tick` (interval + `pixel_hash` dedup)
+- Payload kind: `screenshot.v1` with frontmost app metadata
+- **Not** cua-driver — observe plane only; Act plane remains optional/later
+
 ### Jobs & derived
 
 ```text

@@ -7,6 +7,7 @@ description = "Screen, audio, and video intake adapters"
 
 [dependencies]
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 lumen-config = { workspace = true }
 lumen-intake = { workspace = true }
 lumen-platform = { workspace = true }

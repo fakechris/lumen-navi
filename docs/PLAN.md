@@ -35,14 +35,18 @@
 
 ---
 
-## Phase S2 — Screen source (first real)
+## Phase S2 — Screen source (first real) ✅
 
-- macOS Screen Recording permission port  
-- Interval (2–5s) + focus-change triggers  
-- Frontmost metadata + pixel_hash dedup  
-- PNG + `screenshot.v1` events  
+- [x] macOS Screen Recording permission probe + request  
+- [x] CoreGraphics main-display capture → PNG (optional max-edge downscale)  
+- [x] Interval capture loop + pixel_hash dedup window  
+- [x] Frontmost app metadata (NSWorkspace / osascript fallback)  
+- [x] PNG blob + `screenshot.v1` into durable store  
+- [ ] Focus-change trigger (optional enhancement)  
+- [ ] Long-run 30–60 min soak (manual / later CI)  
 
-**Exit:** 30–60 min continuous capture; pause works; no data loss.
+**Exit (S2 code):** daemon captures real frames when TCC granted.  
+**Remaining soak / focus-change:** tracked as follow-ups, not blocking S3.
 
 ---
 
@@ -127,6 +131,6 @@ https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 
 ## Next actions
 
-1. ~~S0 skeleton~~ / ~~S1 durable store~~  
-2. **S2 macOS screen source end-to-end**  
-3. S3 audio source  
+1. ~~S0~~ / ~~S1~~ / ~~S2 screen capture~~  
+2. **S3 audio source** (mic first)  
+3. S4 process pipeline (OCR job on screenshots)  

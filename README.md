@@ -69,9 +69,10 @@ Requires Rust stable (edition 2021+).
 
 ## Status
 
-**Phase S1 — durable store.** SQLite (`data/meta/navi.db`) + BLAKE3 content-addressed blobs. Media adapters are still shells; real screen capture lands in **S2**.
+**Phase S2 — real macOS screen capture.** Interval screenshots → PNG blobs → SQLite. Defaults: 3 ticks @ 3s, max edge 1920px. Grant **Screen Recording** to the terminal/binary if capture fails.
 
 ```bash
 cargo run -p lumen-daemon   # writes under ./data by default
-# second run: existing_events increases (restart durability)
+# navi.toml overrides: capture.screen_ticks, screen_interval_ms, screen_max_edge
+# screen_ticks = 0 → run until Ctrl+C
 ```
