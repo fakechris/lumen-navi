@@ -5,10 +5,14 @@ edition.workspace = true
 license.workspace = true
 description = "macOS implementations of lumen-platform ports"
 
+[build-dependencies]
+cc = "1"
+
 [dependencies]
 async-trait = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 lumen-platform = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 

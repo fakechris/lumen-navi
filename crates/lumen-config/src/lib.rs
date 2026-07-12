@@ -19,6 +19,8 @@ pub struct Config {
     pub capture: CaptureConfig,
     pub privacy: PrivacyConfig,
     pub retention: RetentionConfig,
+    #[serde(default)]
+    pub ocr: OcrConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,9 +40,9 @@ pub struct CaptureConfig {
     pub screen_max_edge: u32,
     /// 0 = until Ctrl+C.
     pub screen_ticks: u64,
-    /// Divisor for visual probe resolution (Yansu uses 6).
+    /// Divisor for visual probe resolution (default 6).
     pub probe_scale: u32,
-    /// Mean abs gray distance threshold in [0,1] (Yansu 0.05).
+    /// Mean abs gray distance threshold in [0,1] (default 0.05).
     pub visual_change_threshold: f64,
     pub debounce_default_ms: u64,
     pub debounce_churn_ms: u64,
@@ -110,6 +112,29 @@ pub struct RetentionConfig {
     pub wipe_on_request: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OcrConfig {
+    /// Run async OCR worker alongside capture.
+    pub enabled: bool,
+    pub languages: Vec<String>,
+    pub poll_interval_ms: u64,
+    pub batch_size: usize,
+    pub include_boxes: bool,
+}
+
+impl Default for OcrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            languages: vec!["zh-Hans".into(), "en-US".into()],
+            poll_interval_ms: 2000,
+            batch_size: 4,
+            include_boxes: true,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -126,6 +151,7 @@ impl Default for Config {
                 max_blob_mb: 20_480,
                 wipe_on_request: true,
             },
+            ocr: OcrConfig::default(),
         }
     }
 }

@@ -117,6 +117,137 @@ impl SqliteStore {
         Ok(job)
     }
 
+    /// Atomically claim up to `limit` pending jobs of `kind` (status → running).
+    pub fn claim_pending_jobs(&self, kind: &str, limit: usize) -> Result<Vec<JobRecord>, StoreError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        let mut stmt = tx
+            .prepare(
+                r#"SELECT id, event_id, kind, status, attempts, last_error, updated_at
+                   FROM jobs WHERE status = 'pending' AND kind = ?1
+                   ORDER BY updated_at ASC LIMIT ?2"#,
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map(params![kind, limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(StoreError::db)?;
+        let mut claimed = Vec::new();
+        let now = Utc::now().to_rfc3339();
+        for r in rows {
+            let (id, event_id, kind, attempts, last_error, _) = r.map_err(StoreError::db)?;
+            tx.execute(
+                r#"UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ?1
+                   WHERE id = ?2 AND status = 'pending'"#,
+                params![now, id],
+            )
+            .map_err(StoreError::db)?;
+            claimed.push(JobRecord {
+                id: parse_uuid(id)?,
+                event_id: parse_uuid(event_id)?,
+                kind,
+                status: JobStatus::Running,
+                attempts: attempts + 1,
+                last_error,
+                updated_at: Utc::now(),
+            });
+        }
+        drop(stmt);
+        tx.commit().map_err(StoreError::db)?;
+        Ok(claimed)
+    }
+
+    pub fn complete_job(&self, job_id: Uuid, status: JobStatus, error: Option<&str>) -> Result<(), StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.execute(
+            r#"UPDATE jobs SET status = ?1, last_error = ?2, updated_at = ?3 WHERE id = ?4"#,
+            params![
+                status.as_str(),
+                error,
+                Utc::now().to_rfc3339(),
+                job_id.to_string()
+            ],
+        )
+        .map_err(StoreError::db)?;
+        Ok(())
+    }
+
+    pub fn insert_derived(
+        &self,
+        event_id: Uuid,
+        kind: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Result<Uuid, StoreError> {
+        let id = Uuid::new_v4();
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.execute(
+            r#"INSERT INTO derived (id, event_id, kind, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)"#,
+            params![
+                id.to_string(),
+                event_id.to_string(),
+                kind.into(),
+                body.into(),
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(StoreError::db)?;
+        Ok(id)
+    }
+
+    pub fn list_derived_for_event(&self, event_id: Uuid) -> Result<Vec<(Uuid, String, String)>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT id, kind, body FROM derived WHERE event_id = ?1 ORDER BY created_at ASC"#,
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map(params![event_id.to_string()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(StoreError::db)?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, kind, body) = r.map_err(StoreError::db)?;
+            out.push((parse_uuid(id)?, kind, body));
+        }
+        Ok(out)
+    }
+
+    /// Load first artifact bytes for an event (relative path under data_dir).
+    pub fn load_first_artifact_bytes(&self, event_id: Uuid) -> Result<Option<(String, Vec<u8>)>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let row = conn
+            .query_row(
+                r#"SELECT media_type, path FROM artifacts WHERE event_id = ?1 ORDER BY ordinal ASC LIMIT 1"#,
+                params![event_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(StoreError::db)?;
+        let Some((media, rel)) = row else {
+            return Ok(None);
+        };
+        drop(conn);
+        let bytes = self.blobs.read_relative(&rel)?;
+        Ok(Some((media, bytes)))
+    }
+
     pub fn list_jobs(&self, limit: usize) -> Result<Vec<JobRecord>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let mut stmt = conn

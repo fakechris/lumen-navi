@@ -7,10 +7,14 @@ description = "Async enrichment and processing jobs over stored events"
 
 [dependencies]
 async-trait = { workspace = true }
+lumen-platform = { workspace = true }
+lumen-store = { workspace = true }
 lumen-types = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

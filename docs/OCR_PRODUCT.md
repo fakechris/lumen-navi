@@ -32,3 +32,20 @@ Derived record `ocr.v1` (or dedicated table later):
 ## Exit criteria
 
 Screenshot events gain OCR text while Observe loop FPS/latency stays unaffected.
+
+## Implementation status (S4 MVP)
+
+- In-process macOS Vision bridge (`MacVisionOcr`)
+- Async `OcrWorker` claims `ocr_screen` jobs → writes `derived` rows `kind=ocr.v1`
+- Default languages: `zh-Hans`, `en-US`
+- Quality text path + optional layout boxes
+- Capture path only enqueues jobs; never calls Vision
+
+```toml
+[ocr]
+enabled = true
+languages = ["zh-Hans", "en-US"]
+poll_interval_ms = 2000
+batch_size = 4
+include_boxes = true
+```

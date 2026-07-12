@@ -63,18 +63,19 @@ Design: [`docs/OBSERVE_CAPTURE.md`](OBSERVE_CAPTURE.md)
 
 ---
 
-## Phase S4 — Vision OCR (product step)
+## Phase S4 — Vision OCR (product step) ✅ MVP
 
 Product intent: [`docs/OCR_PRODUCT.md`](OCR_PRODUCT.md)  
-*(Engine research notes stay outside this repo.)*
+*(No reverse-engineering notes in this repo.)*
 
-- [ ] In-process Vision engine (quality text + layout boxes)  
-- [ ] Job worker for `ocr_screen` → `derived` `ocr.v1`  
-- [ ] Languages default `zh-Hans` + `en-US`; concurrency gate  
-- [ ] Never block capture  
+- [x] In-process Vision engine (quality text + layout boxes)  
+- [x] Job worker for `ocr_screen` → `derived` `ocr.v1`  
+- [x] Languages default `zh-Hans` + `en-US`; serialized Vision calls  
+- [x] Never block capture  
 - [ ] (S4.1) optional OCR helper process for isolation  
+- [ ] FTS / search UX over OCR text  
 
-**Exit:** screenshot events get OCR text without slowing Observe loop.
+**Exit (MVP):** screenshot events get OCR text without slowing Observe loop.
 
 ---
 
@@ -138,6 +139,6 @@ https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 
 ## Next actions
 
-1. ~~S0 / S1 / S2 Observe capture product path~~  
-2. **S4 Vision OCR** (job consumer for `ocr_screen` — complete product step)  
-3. S3 audio (can parallelize after OCR or before)  
+1. ~~S0 / S1 / S2 Observe / S4 OCR MVP~~  
+2. S4.1 OCR helper isolation (optional)  
+3. S3 audio source  

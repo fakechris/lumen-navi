@@ -1,11 +1,15 @@
 //! Processing / enrichment over stored intake events.
 //!
 //! Capture must not wait on this layer. Jobs read raw events and write derived
-//! records (summaries, transcripts, redactions) without mutating originals.
+//! records without mutating originals.
+
+mod ocr_worker;
 
 use async_trait::async_trait;
 use lumen_types::SourceEvent;
 use thiserror::Error;
+
+pub use ocr_worker::{OcrWorker, OcrWorkerConfig, OcrWorkerStats};
 
 #[derive(Debug, Error)]
 pub enum ProcessError {
@@ -22,13 +26,10 @@ pub trait Processor: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessOutcome {
-    /// Nothing to do for this event.
     Skipped,
-    /// Processor produced a human-readable note (placeholder for derived records).
     Note(String),
 }
 
-/// No-op processor used while the pipeline shape settles.
 pub struct IdentityProcessor;
 
 #[async_trait]

@@ -119,6 +119,74 @@ pub trait ScreenCapturer: Send + Sync {
     ) -> Result<RawFrame, PlatformError>;
 }
 
+// --- OCR (process plane; never called from capture hot path) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OcrBox {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub text: String,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OcrResult {
+    pub text: String,
+    pub confidence: f64,
+    pub languages: Vec<String>,
+    /// `accurate` | `fast`
+    pub mode: String,
+    pub boxes: Vec<OcrBox>,
+}
+
+/// On-device OCR. Implementations must be safe to call off the capture thread.
+#[async_trait]
+pub trait OcrEngine: Send + Sync {
+    fn is_supported(&self) -> bool;
+
+    /// Quality path: best-effort full text.
+    async fn recognize_text(
+        &self,
+        image: &[u8],
+        languages: &[String],
+    ) -> Result<OcrResult, PlatformError>;
+
+    /// Layout path: text regions with normalized boxes.
+    async fn recognize_boxes(
+        &self,
+        image: &[u8],
+        languages: &[String],
+    ) -> Result<OcrResult, PlatformError>;
+}
+
+/// Stub OCR for tests / non-macOS.
+pub struct NullOcr;
+
+#[async_trait]
+impl OcrEngine for NullOcr {
+    fn is_supported(&self) -> bool {
+        false
+    }
+
+    async fn recognize_text(
+        &self,
+        _image: &[u8],
+        _languages: &[String],
+    ) -> Result<OcrResult, PlatformError> {
+        Err(PlatformError::Unsupported("OCR not available".into()))
+    }
+
+    async fn recognize_boxes(
+        &self,
+        _image: &[u8],
+        _languages: &[String],
+    ) -> Result<OcrResult, PlatformError> {
+        Err(PlatformError::Unsupported("OCR not available".into()))
+    }
+}
+
 // --- Null stubs (tests / non-macOS) ---
 
 pub struct NullPermissions;

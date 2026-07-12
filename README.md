@@ -69,12 +69,16 @@ Requires Rust stable (edition 2021+).
 
 ## Status
 
-**Phase S2 complete — product Observe capture.** Multi-display, focus triggers, grayscale change detection, debounce, screen-lock / closed-eyes gates, backpressure, activity sessions. Design: [`docs/OBSERVE_CAPTURE.md`](docs/OBSERVE_CAPTURE.md).
+**S2 Observe + S4 OCR MVP.** Capture is productized; Vision OCR runs **async** on `ocr_screen` jobs → `derived`/`ocr.v1`.
 
 ```bash
 cargo run -p lumen-daemon   # data/ · Ctrl+C to stop (screen_ticks=0 default)
-# navi.toml: capture.displays=all|main, probe_scale, visual_change_threshold,
-#            privacy.closed_eyes, encode=jpeg|png
 ```
 
-Grant **Screen Recording** if capture fails. **OCR is the next step** (jobs already enqueued as `ocr_screen`). **cua-driver is not used for capture.**
+| Config | Notes |
+|--------|--------|
+| `capture.*` | multi-display, probe, debounce — see `docs/OBSERVE_CAPTURE.md` |
+| `ocr.enabled` | default true; `ocr.languages` default `zh-Hans` + `en-US` |
+| `privacy.closed_eyes` | hard stop on screen capture |
+
+Grant **Screen Recording** if capture fails. **cua-driver is not used for capture/OCR.**

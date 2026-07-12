@@ -1,8 +1,6 @@
-//! Lumen Navi daemon — product Observe capture loop (S2 complete).
+//! Lumen Navi daemon — Observe capture + async Vision OCR.
 //!
-//! Multi-display · focus trigger · grayscale probe · debounce · lock/closed_eyes
-//! · backpressure · activity sessions. OCR is Phase S4 (not here).
-//! Does **not** use cua-driver (Act plane only, later).
+//! Capture never waits on OCR. OCR consumes `ocr_screen` jobs into `derived` ocr.v1.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,11 +8,12 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use lumen_api::{HealthResponse, SourceStatus};
 use lumen_config::Config;
-use lumen_platform::PermissionProbe;
+use lumen_platform::{OcrEngine, PermissionProbe};
 use lumen_platform_macos::{
     request_screen_recording, MacDisplays, MacFrontmost, MacPermissions, MacScreenCapturer,
-    MacScreenLock,
+    MacScreenLock, MacVisionOcr,
 };
+use lumen_process::{OcrWorker, OcrWorkerConfig};
 use lumen_sources_media::{AudioSource, CaptureOrchestrator, CapturedBatch};
 use lumen_store::{EventStore, SqliteStore};
 use lumen_types::{SourceEvent, SourceKind, TriggerReason};
@@ -33,18 +32,16 @@ async fn main() -> Result<()> {
     info!(
         product = "lumen-navi",
         repo = "https://github.com/fakechris/lumen-navi",
-        phase = "S2-complete",
-        "daemon starting (Observe capture product path)"
+        phase = "S4-ocr",
+        "daemon starting"
     );
 
     let config = Config::load_or_default("navi.toml").unwrap_or_default();
     info!(
         data_dir = %config.data_dir.display(),
         displays = %config.capture.displays,
-        encode = %config.capture.encode,
-        probe_scale = config.capture.probe_scale,
-        threshold = config.capture.visual_change_threshold,
-        closed_eyes = config.privacy.closed_eyes,
+        ocr = config.ocr.enabled,
+        ocr_langs = ?config.ocr.languages,
         ticks = config.capture.screen_ticks,
         "config"
     );
@@ -56,16 +53,13 @@ async fn main() -> Result<()> {
         SqliteStore::open(&config.data_dir)
             .with_context(|| format!("open store {}", config.data_dir.display()))?,
     );
-    info!(
-        existing = store.len().await?,
-        "durable store open (schema v2 sessions)"
-    );
+    info!(existing = store.len().await?, "durable store open");
 
     store
         .append(vec![SourceEvent::new(
             SourceKind::Other("daemon".into()),
             "daemon.boot.v1",
-            json!({ "phase": "S2-complete", "observe": true }),
+            json!({ "phase": "S4-ocr", "observe": true, "ocr": config.ocr.enabled }),
         )])
         .await?;
 
@@ -77,6 +71,39 @@ async fn main() -> Result<()> {
         status = perms.status().await?;
         info!(screen = ?status.screen_recording, "after request");
     }
+
+    // --- OCR worker (async; independent of capture) ---
+    let (ocr_cancel_tx, ocr_cancel_rx) = tokio::sync::watch::channel(false);
+    let ocr_handle = if config.ocr.enabled {
+        let engine = Arc::new(MacVisionOcr::new());
+        if engine.is_supported() {
+            let worker = Arc::new(OcrWorker::new(
+                Arc::clone(&store),
+                engine,
+                OcrWorkerConfig {
+                    languages: config.ocr.languages.clone(),
+                    poll_interval: Duration::from_millis(config.ocr.poll_interval_ms),
+                    batch_size: config.ocr.batch_size,
+                    include_boxes: config.ocr.include_boxes,
+                    max_attempts: 5,
+                },
+            ));
+            let w = Arc::clone(&worker);
+            let rx = ocr_cancel_rx.clone();
+            Some((
+                worker,
+                tokio::spawn(async move {
+                    w.run_until_cancelled(rx).await;
+                }),
+            ))
+        } else {
+            warn!("Vision OCR not supported on this OS; worker not started");
+            None
+        }
+    } else {
+        info!("OCR disabled in config");
+        None
+    };
 
     let mut screen_status = SourceStatus {
         id: "screen".into(),
@@ -97,6 +124,7 @@ async fn main() -> Result<()> {
 
         let (tx, mut rx) = mpsc::channel::<CapturedBatch>(config.capture.queue_capacity);
         let store_w = Arc::clone(&store);
+        let ocr_on = config.ocr.enabled;
         let persist = tokio::spawn(async move {
             while let Some(batch) = rx.recv().await {
                 if let Some(ref closed) = batch.closed_session {
@@ -112,8 +140,9 @@ async fn main() -> Result<()> {
                         &frame.png_or_jpeg_bytes,
                     ) {
                         Ok(stored) => {
-                            // S4 will enqueue ocr_screen here.
-                            let _ = store_w.enqueue_job(stored.id, "ocr_screen");
+                            if ocr_on {
+                                let _ = store_w.enqueue_job(stored.id, "ocr_screen");
+                            }
                             info!(
                                 id = %stored.id,
                                 kind = %stored.kind,
@@ -138,15 +167,12 @@ async fn main() -> Result<()> {
         focus_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut capture_tick = tokio::time::interval(interval);
         capture_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // first ticks fire immediately — skip one for focus baseline
         focus_tick.tick().await;
         capture_tick.tick().await;
 
         info!("observe loop running (Ctrl+C to stop if ticks=0)");
 
         loop {
-            // Stop after N full captures, or after N interval attempts when capped
-            // (visual skip would otherwise hang a finite smoke run on a static desktop).
             if max_ticks > 0 && (full_ticks >= max_ticks || interval_ticks >= max_ticks) {
                 break;
             }
@@ -216,6 +242,32 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Let OCR drain remaining jobs briefly after capture stops (finite runs).
+    if let Some((worker, handle)) = ocr_handle {
+        if config.capture.screen_ticks > 0 {
+            for _ in 0..15u32 {
+                let n: usize = worker.tick_once().await.unwrap_or(0);
+                if n == 0 {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    let n2: usize = worker.tick_once().await.unwrap_or(0);
+                    if n2 == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = ocr_cancel_tx.send(true);
+        let _ = handle.await;
+        let st = worker.stats();
+        info!(
+            processed = st.processed,
+            succeeded = st.succeeded,
+            empty = st.empty,
+            failed = st.failed,
+            "ocr stats"
+        );
+    }
+
     if config.sources.audio {
         let mut a = AudioSource::new();
         use lumen_intake::Source;
@@ -229,7 +281,5 @@ async fn main() -> Result<()> {
         config.privacy.paused,
     );
     info!(stored = health.stored_events, "health");
-    info!("OCR (Vision) is next product step — capture never blocked");
-    info!("cua-driver is Act-only later — not used for Observe");
     Ok(())
 }
