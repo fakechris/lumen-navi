@@ -63,14 +63,17 @@ Design: [`docs/OBSERVE_CAPTURE.md`](OBSERVE_CAPTURE.md)
 
 ---
 
-## Phase S4 — Process pipeline (light)
+## Phase S4 — Vision OCR (product step)
 
-- Enqueue jobs on append  
-- OCR processor for screenshots (pluggable)  
-- Optional ASR for audio (design-compatible with lumen-asr engines; no hard dep)  
-- Derived records queryable  
+Research: [`docs/OCR_VISION_RESEARCH.md`](OCR_VISION_RESEARCH.md)
 
-**Exit:** raw event → at least one derived record without blocking capture.
+- [ ] In-process Vision engine (Accurate text + Fast boxes)  
+- [ ] Job worker for `ocr_screen` → `derived` `ocr.v1`  
+- [ ] Languages default `zh-Hans` + `en-US`; concurrency gate  
+- [ ] Never block capture  
+- [ ] (S4.1) optional `lumen-ocr-helper` process like Yansu  
+
+**Exit:** screenshot events get OCR text without slowing Observe loop.
 
 ---
 
