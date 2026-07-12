@@ -1,0 +1,20 @@
+[package]
+name = "lumen-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Long-running local daemon for Lumen Navi intake"
+
+[[bin]]
+name = "lumen-daemon"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+lumen-intake = { workspace = true }
+lumen-process = { workspace = true }
+lumen-store = { workspace = true }
+lumen-types = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

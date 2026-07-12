@@ -1,0 +1,12 @@
+[package]
+name = "lumen-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared domain types for Lumen Navi"
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }

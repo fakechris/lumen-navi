@@ -1,0 +1,23 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local secrets & data
+.env
+.env.*
+!.env.example
+/data/
+*.db
+*.db-journal
+
+# Node (extensions later)
+node_modules/
+dist/
+*.log

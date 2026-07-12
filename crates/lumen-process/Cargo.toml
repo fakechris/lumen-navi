@@ -1,0 +1,16 @@
+[package]
+name = "lumen-process"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Async enrichment and processing jobs over stored events"
+
+[dependencies]
+async-trait = { workspace = true }
+lumen-types = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

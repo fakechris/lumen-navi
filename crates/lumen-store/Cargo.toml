@@ -1,0 +1,16 @@
+[package]
+name = "lumen-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Persistence for raw events and artifacts"
+
+[dependencies]
+async-trait = { workspace = true }
+lumen-intake = { workspace = true }
+lumen-types = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
