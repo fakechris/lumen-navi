@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 pub use blob::BlobStore;
 pub use schema::SCHEMA_VERSION;
-pub use sqlite::SqliteStore;
+pub use sqlite::{OcrSearchHit, SqliteStore};
 
 #[derive(Debug, Error)]
 pub enum StoreError {

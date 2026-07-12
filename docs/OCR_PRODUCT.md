@@ -17,6 +17,8 @@ capture → store event + blob → enqueue job ocr_screen (deduped if open)
                 ↓
          derived kind=ocr.v1 (upsert) → job done
                 ↓
+         ocr_docs + FTS5 index (searchable)
+                ↓
     on failure: backoff pending | dead after max_attempts
 ```
 
@@ -70,11 +72,47 @@ shutdown_drain_ms = 30000
 }
 ```
 
+## Search index
+
+Schema v4 adds `ocr_docs` (one row per event) plus external-content FTS5 (`ocr_fts`).
+
+| Path | Behavior |
+|------|----------|
+| Write | `insert_derived(..., "ocr.v1", body)` upserts `ocr_docs` in the same transaction |
+| Migrate | Opening an older DB backfills from existing `derived` ocr.v1 rows |
+| Reindex | `SqliteStore::reindex_ocr_docs()` rebuilds from all ocr.v1 bodies |
+| Query | `SqliteStore::search_ocr(q, limit)` — FTS MATCH, LIKE fallback |
+
+## Local control API (loopback)
+
+Default bind: `127.0.0.1:7420` (`[api]` in config).
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/health` or `/v1/health` | Events count, ocr_docs, schema version, sources |
+| GET | `/v1/ocr/search?q=…&limit=20` | OCR full-text search |
+| POST | `/v1/control` | JSON `ControlRequest` (`health`, `search_ocr`, `reindex_ocr`, `list_events`, …) |
+
+Example:
+
+```bash
+curl -s 'http://127.0.0.1:7420/v1/ocr/search?q=发票&limit=5' | jq .
+curl -s -X POST http://127.0.0.1:7420/v1/control \
+  -H 'content-type: application/json' \
+  -d '{"op":"reindex_ocr"}'
+```
+
+```toml
+[api]
+enabled = true
+bind = "127.0.0.1:7420"
+```
+
 ## Non-goals (this ship)
 
 - Cloud OCR  
 - PII redaction of OCR text  
-- Full-text search UI  
+- Desktop/timeline search UI (API only)  
 - Separate OCR helper process (S4.1 optional)  
 
 ## Exit criteria
@@ -83,3 +121,4 @@ shutdown_drain_ms = 30000
 - Capture loop remains responsive with OCR enabled  
 - Crash/restart does not lose work permanently (pending reclaim + reopen)  
 - Duplicate captures do not spawn duplicate open OCR jobs  
+- OCR text is queryable via FTS / local control API  

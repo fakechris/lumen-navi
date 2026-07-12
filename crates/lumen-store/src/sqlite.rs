@@ -10,8 +10,19 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::blob::BlobStore;
-use crate::schema::{MIGRATE_V1, MIGRATE_V2, MIGRATE_V3, SCHEMA_VERSION};
+use crate::schema::{MIGRATE_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, SCHEMA_VERSION};
 use crate::{EventStore, JobRecord, JobStatus, StoreError};
+
+/// One OCR search hit (FTS).
+#[derive(Debug, Clone)]
+pub struct OcrSearchHit {
+    pub event_id: Uuid,
+    pub session_id: Option<Uuid>,
+    pub event_ts: Option<DateTime<Utc>>,
+    pub confidence: f64,
+    pub snippet: String,
+    pub text_preview: String,
+}
 
 /// On-disk store: `$data_dir/meta/navi.db` + `$data_dir/blobs/...`.
 pub struct SqliteStore {
@@ -254,6 +265,7 @@ impl SqliteStore {
     }
 
     /// Insert or replace derived body for (event_id, kind).
+    /// When `kind == "ocr.v1"`, also upserts searchable `ocr_docs` + FTS.
     pub fn insert_derived(
         &self,
         event_id: Uuid,
@@ -262,9 +274,12 @@ impl SqliteStore {
     ) -> Result<Uuid, StoreError> {
         let kind = kind.into();
         let body = body.into();
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
-        // Prefer stable id if exists
-        let existing: Option<String> = conn
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        let existing: Option<String> = tx
             .query_row(
                 r#"SELECT id FROM derived WHERE event_id = ?1 AND kind = ?2"#,
                 params![event_id.to_string(), kind],
@@ -274,7 +289,7 @@ impl SqliteStore {
             .map_err(StoreError::db)?;
         let id = if let Some(e) = existing {
             let id = parse_uuid(e)?;
-            conn.execute(
+            tx.execute(
                 r#"UPDATE derived SET body = ?1, created_at = ?2 WHERE id = ?3"#,
                 params![body, Utc::now().to_rfc3339(), id.to_string()],
             )
@@ -282,7 +297,7 @@ impl SqliteStore {
             id
         } else {
             let id = Uuid::new_v4();
-            conn.execute(
+            tx.execute(
                 r#"INSERT INTO derived (id, event_id, kind, body, created_at) VALUES (?1, ?2, ?3, ?4, ?5)"#,
                 params![
                     id.to_string(),
@@ -295,7 +310,176 @@ impl SqliteStore {
             .map_err(StoreError::db)?;
             id
         };
+
+        if kind == "ocr.v1" {
+            upsert_ocr_doc_tx(&tx, event_id, &body)?;
+        }
+        tx.commit().map_err(StoreError::db)?;
         Ok(id)
+    }
+
+    /// Full-text search over OCR documents.
+    ///
+    /// Uses FTS5 when available; falls back to LIKE for short tokens (trigram
+    /// needs ≥3 chars) or when FTS returns no hits.
+    pub fn search_ocr(&self, query: &str, limit: usize) -> Result<Vec<OcrSearchHit>, StoreError> {
+        let fts_q = sanitize_fts_query(query);
+        let like_q = like_pattern(query);
+        if fts_q.is_empty() && like_q.is_none() {
+            return Ok(vec![]);
+        }
+        let limit = limit.clamp(1, 200);
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+
+        let fts_ok = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ocr_fts'",
+                [],
+                |_| Ok(1i32),
+            )
+            .optional()
+            .map_err(StoreError::db)?
+            .is_some();
+
+        if fts_ok && !fts_q.is_empty() {
+            let sql = r#"
+                SELECT d.event_id, d.session_id, d.event_ts, d.confidence, d.text,
+                       snippet(ocr_fts, 0, '「', '」', '…', 16) AS snip
+                FROM ocr_fts
+                JOIN ocr_docs d ON d.id = ocr_fts.rowid
+                WHERE ocr_fts MATCH ?1
+                ORDER BY bm25(ocr_fts)
+                LIMIT ?2
+            "#;
+            match conn.prepare(sql) {
+                Ok(mut stmt) => {
+                    let rows = stmt.query_map(params![fts_q, limit as i64], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, f64>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
+                        ))
+                    });
+                    if let Ok(rows) = rows {
+                        let mut out = Vec::new();
+                        let mut ok = true;
+                        for r in rows {
+                            match r {
+                                Ok((eid, sid, ets, conf, text, snip)) => {
+                                    match parse_uuid(eid) {
+                                        Ok(event_id) => out.push(OcrSearchHit {
+                                            event_id,
+                                            session_id: sid
+                                                .and_then(|s| Uuid::parse_str(&s).ok()),
+                                            event_ts: ets.and_then(|s| {
+                                                DateTime::parse_from_rfc3339(&s)
+                                                    .ok()
+                                                    .map(|d| d.with_timezone(&Utc))
+                                            }),
+                                            confidence: conf,
+                                            snippet: snip,
+                                            text_preview: preview_text(&text, 240),
+                                        }),
+                                        Err(_) => ok = false,
+                                    }
+                                }
+                                Err(_) => ok = false,
+                            }
+                        }
+                        if ok && !out.is_empty() {
+                            return Ok(out);
+                        }
+                    }
+                }
+                Err(_) => { /* fall through to LIKE */ }
+            }
+        }
+
+        // LIKE fallback (short CJK, FTS miss, or FTS unavailable).
+        let Some(like) = like_q else {
+            return Ok(vec![]);
+        };
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT event_id, session_id, event_ts, confidence, text
+                   FROM ocr_docs WHERE text LIKE ?1 ESCAPE '\'
+                   ORDER BY updated_at DESC LIMIT ?2"#,
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map(params![like, limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(StoreError::db)?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (eid, sid, ets, conf, text) = r.map_err(StoreError::db)?;
+            out.push(OcrSearchHit {
+                event_id: parse_uuid(eid)?,
+                session_id: sid.and_then(|s| Uuid::parse_str(&s).ok()),
+                event_ts: ets.and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
+                }),
+                confidence: conf,
+                snippet: preview_text(&text, 120),
+                text_preview: preview_text(&text, 240),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Rebuild ocr_docs/FTS from all derived ocr.v1 rows.
+    pub fn reindex_ocr_docs(&self) -> Result<usize, StoreError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        // Collect first so we never nest statements on the same connection.
+        let derived: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare(r#"SELECT event_id, body FROM derived WHERE kind = 'ocr.v1'"#)
+                .map_err(StoreError::db)?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .map_err(StoreError::db)?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(StoreError::db)?);
+            }
+            out
+        };
+
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        tx.execute_batch("DELETE FROM ocr_docs;").map_err(StoreError::db)?;
+        // Contentless/external FTS rebuild (ignore if FTS unavailable).
+        let _ = tx.execute_batch("INSERT INTO ocr_fts(ocr_fts) VALUES('delete-all');");
+        let mut n = 0usize;
+        for (eid, body) in derived {
+            let event_id = parse_uuid(eid)?;
+            upsert_ocr_doc_tx(&tx, event_id, &body)?;
+            n += 1;
+        }
+        tx.commit().map_err(StoreError::db)?;
+        Ok(n)
+    }
+
+    pub fn ocr_doc_count(&self) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let n: i64 = conn
+            .query_row("SELECT COUNT(1) FROM ocr_docs", [], |r| r.get(0))
+            .map_err(StoreError::db)?;
+        Ok(n as usize)
     }
 
     pub fn has_derived(&self, event_id: Uuid, kind: &str) -> Result<bool, StoreError> {
@@ -502,6 +686,7 @@ impl SqliteStore {
             let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
             conn.execute_batch(
                 r#"
+                DELETE FROM ocr_docs;
                 DELETE FROM derived;
                 DELETE FROM jobs;
                 DELETE FROM artifacts;
@@ -653,8 +838,248 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
         v = 3;
     }
 
+    if v < 4 {
+        conn.execute_batch(MIGRATE_V4).map_err(StoreError::db)?;
+        // FTS5: try trigram, fall back to unicode61.
+        let fts = conn.execute_batch(
+            r#"
+            CREATE VIRTUAL TABLE IF NOT EXISTS ocr_fts USING fts5(
+              text,
+              content='ocr_docs',
+              content_rowid='id',
+              tokenize='trigram'
+            );
+            "#,
+        );
+        if fts.is_err() {
+            conn.execute_batch(
+                r#"
+                CREATE VIRTUAL TABLE IF NOT EXISTS ocr_fts USING fts5(
+                  text,
+                  content='ocr_docs',
+                  content_rowid='id',
+                  tokenize='unicode61'
+                );
+                "#,
+            )
+            .map_err(StoreError::db)?;
+        }
+        conn.execute_batch(
+            r#"
+            CREATE TRIGGER IF NOT EXISTS ocr_docs_ai AFTER INSERT ON ocr_docs BEGIN
+              INSERT INTO ocr_fts(rowid, text) VALUES (new.id, new.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS ocr_docs_ad AFTER DELETE ON ocr_docs BEGIN
+              INSERT INTO ocr_fts(ocr_fts, rowid, text) VALUES('delete', old.id, old.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS ocr_docs_au AFTER UPDATE ON ocr_docs BEGIN
+              INSERT INTO ocr_fts(ocr_fts, rowid, text) VALUES('delete', old.id, old.text);
+              INSERT INTO ocr_fts(rowid, text) VALUES (new.id, new.text);
+            END;
+            "#,
+        )
+        .map_err(StoreError::db)?;
+        // Backfill from existing derived OCR (collect first — no nested statements).
+        let derived: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare(r#"SELECT event_id, body FROM derived WHERE kind = 'ocr.v1'"#)
+                .map_err(StoreError::db)?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .map_err(StoreError::db)?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(StoreError::db)?);
+            }
+            out
+        };
+        for (eid, body) in derived {
+            if let Ok(event_id) = Uuid::parse_str(&eid) {
+                let _ = upsert_ocr_doc_conn(conn, event_id, &body);
+            }
+        }
+        conn.execute(
+            "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
+            params!["4"],
+        )
+        .map_err(StoreError::db)?;
+        v = 4;
+    }
+
     let _ = v;
     Ok(())
+}
+
+fn upsert_ocr_doc_tx(
+    tx: &rusqlite::Transaction<'_>,
+    event_id: Uuid,
+    body_json: &str,
+) -> Result<(), StoreError> {
+    let (text, confidence, session_id, event_ts) = parse_ocr_body(body_json, event_id)?;
+    // Enrich session/ts from events table when missing.
+    let (session_id, event_ts) = {
+        let row = tx
+            .query_row(
+                r#"SELECT session_id, ts FROM events WHERE id = ?1"#,
+                params![event_id.to_string()],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map_err(StoreError::db)?;
+        match row {
+            Some((s, t)) => (session_id.or(s), event_ts.or(t)),
+            None => (session_id, event_ts),
+        }
+    };
+    let now = Utc::now().to_rfc3339();
+    tx.execute(
+        r#"INSERT INTO ocr_docs (event_id, text, confidence, session_id, event_ts, updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+           ON CONFLICT(event_id) DO UPDATE SET
+             text=excluded.text,
+             confidence=excluded.confidence,
+             session_id=excluded.session_id,
+             event_ts=excluded.event_ts,
+             updated_at=excluded.updated_at"#,
+        params![
+            event_id.to_string(),
+            text,
+            confidence,
+            session_id,
+            event_ts,
+            now
+        ],
+    )
+    .map_err(StoreError::db)?;
+    Ok(())
+}
+
+fn upsert_ocr_doc_conn(
+    conn: &Connection,
+    event_id: Uuid,
+    body_json: &str,
+) -> Result<(), StoreError> {
+    let (text, confidence, session_id, event_ts) = parse_ocr_body(body_json, event_id)?;
+    let (session_id, event_ts) = {
+        let row = conn
+            .query_row(
+                r#"SELECT session_id, ts FROM events WHERE id = ?1"#,
+                params![event_id.to_string()],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map_err(StoreError::db)?;
+        match row {
+            Some((s, t)) => (session_id.or(s), event_ts.or(t)),
+            None => (session_id, event_ts),
+        }
+    };
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        r#"INSERT INTO ocr_docs (event_id, text, confidence, session_id, event_ts, updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+           ON CONFLICT(event_id) DO UPDATE SET
+             text=excluded.text,
+             confidence=excluded.confidence,
+             session_id=excluded.session_id,
+             event_ts=excluded.event_ts,
+             updated_at=excluded.updated_at"#,
+        params![
+            event_id.to_string(),
+            text,
+            confidence,
+            session_id,
+            event_ts,
+            now
+        ],
+    )
+    .map_err(StoreError::db)?;
+    Ok(())
+}
+
+fn parse_ocr_body(
+    body_json: &str,
+    event_id: Uuid,
+) -> Result<(String, f64, Option<String>, Option<String>), StoreError> {
+    let v: serde_json::Value =
+        serde_json::from_str(body_json).map_err(|e| StoreError::json(e.to_string()))?;
+    let text = v
+        .get("text")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let confidence = v.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    // session/event_ts may not be in body — filled from events table.
+    let _ = event_id;
+    Ok((text, confidence, None, None))
+}
+
+/// FTS5 query sanitizer: keep letters/numbers/CJK; join with spaces (AND).
+/// Drops tokens shorter than 3 chars (trigram tokenizer minimum).
+fn sanitize_fts_query(raw: &str) -> String {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    for ch in raw.chars() {
+        if ch.is_alphanumeric() || is_cjk(ch) {
+            cur.push(ch);
+        } else if !cur.is_empty() {
+            parts.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+    parts
+        .into_iter()
+        .filter(|p| p.chars().count() >= 3)
+        .map(|p| format!("\"{}\"", p.replace('"', "")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{4e00}'..='\u{9fff}' // CJK Unified
+            | '\u{3400}'..='\u{4dbf}' // Extension A
+            | '\u{f900}'..='\u{faff}' // Compatibility
+            | '\u{3000}'..='\u{303f}' // CJK punctuation (rarely searched)
+    )
+}
+
+/// Escape LIKE wildcards; return None if nothing searchable remains.
+fn like_pattern(raw: &str) -> Option<String> {
+    let trimmed: String = raw
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut esc = String::with_capacity(trimmed.len() + 2);
+    for ch in trimmed.chars() {
+        match ch {
+            '%' | '_' | '\\' => {
+                esc.push('\\');
+                esc.push(ch);
+            }
+            _ => esc.push(ch),
+        }
+    }
+    if esc.is_empty() {
+        None
+    } else {
+        Some(format!("%{esc}%"))
+    }
+}
+
+fn preview_text(s: &str, max: usize) -> String {
+    let t = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if t.chars().count() <= max {
+        t
+    } else {
+        t.chars().take(max).collect::<String>() + "…"
+    }
 }
 
 fn insert_event(tx: &rusqlite::Transaction<'_>, event: &SourceEvent) -> Result<(), StoreError> {
@@ -851,5 +1276,58 @@ mod tests {
         let list = store.list_derived_for_event(eid).unwrap();
         assert_eq!(list.len(), 1);
         assert!(list[0].2.contains("\"b\""));
+    }
+
+    #[tokio::test]
+    async fn ocr_search_indexes_on_insert_derived() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let event = SourceEvent::new(
+            SourceKind::Screen,
+            event_kind::SCREENSHOT_V1,
+            json!({}),
+        );
+        let eid = event.id;
+        store.append(vec![event]).await.unwrap();
+        store
+            .insert_derived(
+                eid,
+                "ocr.v1",
+                r#"{"payload_version":1,"text":"unique-lumen-navi alpha 中文检索","confidence":0.9}"#,
+            )
+            .unwrap();
+        assert_eq!(store.ocr_doc_count().unwrap(), 1);
+
+        let hits = store.search_ocr("unique-lumen-navi", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].event_id, eid);
+        assert!(hits[0].text_preview.contains("unique-lumen-navi"));
+
+        let zh = store.search_ocr("中文", 10).unwrap();
+        assert_eq!(zh.len(), 1);
+
+        // Reindex rebuilds from derived without loss.
+        let n = store.reindex_ocr_docs().unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(store.ocr_doc_count().unwrap(), 1);
+        assert_eq!(store.search_ocr("alpha", 5).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ocr_search_empty_query_is_empty() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        assert!(store.search_ocr("   ", 10).unwrap().is_empty());
+        assert!(store.search_ocr("!!!", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sanitize_fts_keeps_cjk_and_alnum() {
+        let q = sanitize_fts_query("hello, 世界检索!!");
+        assert!(q.contains("hello"));
+        assert!(q.contains("世界检索"));
+        // tokens shorter than 3 chars are dropped for trigram FTS
+        assert!(sanitize_fts_query("中文").is_empty());
+        assert!(like_pattern("中文").is_some());
     }
 }

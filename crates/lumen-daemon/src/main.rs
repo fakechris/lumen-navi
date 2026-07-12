@@ -1,6 +1,9 @@
-//! Lumen Navi daemon — Observe capture + async Vision OCR.
+//! Lumen Navi daemon — Observe capture + async Vision OCR + local control API.
 //!
 //! Capture never waits on OCR. OCR consumes `ocr_screen` jobs into `derived` ocr.v1.
+//! Control API exposes health + OCR full-text search on loopback HTTP.
+
+mod control_server;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +18,7 @@ use lumen_platform_macos::{
 };
 use lumen_process::{OcrWorker, OcrWorkerConfig};
 use lumen_sources_media::{AudioSource, CaptureOrchestrator, CapturedBatch};
-use lumen_store::{EventStore, SqliteStore};
+use lumen_store::{EventStore, SCHEMA_VERSION, SqliteStore};
 use lumen_types::{SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -32,7 +35,7 @@ async fn main() -> Result<()> {
     info!(
         product = "lumen-navi",
         repo = "https://github.com/fakechris/lumen-navi",
-        phase = "S4-ocr",
+        phase = "S4-search",
         "daemon starting"
     );
 
@@ -43,6 +46,8 @@ async fn main() -> Result<()> {
         ocr = config.ocr.enabled,
         ocr_langs = ?config.ocr.languages,
         ticks = config.capture.screen_ticks,
+        api = config.api.enabled,
+        api_bind = %config.api.bind,
         "config"
     );
 
@@ -53,13 +58,24 @@ async fn main() -> Result<()> {
         SqliteStore::open(&config.data_dir)
             .with_context(|| format!("open store {}", config.data_dir.display()))?,
     );
-    info!(existing = store.len().await?, "durable store open");
+    let ocr_docs = store.ocr_doc_count().unwrap_or(0);
+    info!(
+        existing = store.len().await?,
+        ocr_docs,
+        schema = SCHEMA_VERSION,
+        "durable store open"
+    );
 
     store
         .append(vec![SourceEvent::new(
             SourceKind::Other("daemon".into()),
             "daemon.boot.v1",
-            json!({ "phase": "S4-ocr", "observe": true, "ocr": config.ocr.enabled }),
+            json!({
+                "phase": "S4-search",
+                "observe": true,
+                "ocr": config.ocr.enabled,
+                "api": config.api.enabled,
+            }),
         )])
         .await?;
 
@@ -122,6 +138,22 @@ async fn main() -> Result<()> {
         running: false,
         last_error: None,
     };
+
+    // --- Local control API (health + OCR search) ---
+    let _api_handle = if config.api.enabled {
+        control_server::spawn(
+            &config.api.bind,
+            control_server::ControlState {
+                store: Arc::clone(&store),
+                paused: config.privacy.paused,
+                sources: vec![screen_status.clone()],
+            },
+        )
+    } else {
+        None
+    };
+
+    let mut ran_long_loop = false;
 
     if config.sources.screen {
         let mut orch = CaptureOrchestrator::new(
@@ -186,6 +218,9 @@ async fn main() -> Result<()> {
         capture_tick.tick().await;
 
         info!("observe loop running (Ctrl+C to stop if ticks=0)");
+        if max_ticks == 0 {
+            ran_long_loop = true;
+        }
 
         loop {
             if max_ticks > 0 && (full_ticks >= max_ticks || interval_ticks >= max_ticks) {
@@ -300,12 +335,28 @@ async fn main() -> Result<()> {
         a.stop().await?;
     }
 
+    // API-only / no long capture: keep serving until Ctrl+C.
+    if config.api.enabled && !ran_long_loop && config.capture.screen_ticks == 0 {
+        info!(
+            bind = %config.api.bind,
+            "control API idle (no infinite capture loop); Ctrl+C to stop"
+        );
+        tokio::signal::ctrl_c().await?;
+        info!("Ctrl+C");
+    }
+
     let health = HealthResponse::scaffold(
         vec![screen_status],
         store.len().await?,
         config.privacy.paused,
+        store.ocr_doc_count().unwrap_or(0),
+        SCHEMA_VERSION,
     );
-    info!(stored = health.stored_events, "health");
+    info!(
+        stored = health.stored_events,
+        ocr_docs = health.ocr_docs,
+        "health"
+    );
     Ok(())
 }
 

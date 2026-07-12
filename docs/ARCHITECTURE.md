@@ -215,8 +215,9 @@ Media-first job kinds: `ocr_screen`, `transcribe_audio`, `segment_activity`, `re
 
 ### Local API (minimal)
 
-`health` · `pause`/`resume` · `list_events` · `wipe` · `permissions`  
-Transport default: **UDS**; loopback HTTP optional later. Chrome reuses the same host.
+`health` · `search_ocr` · `reindex_ocr` · `list_events` · `wipe` · `pause`/`resume` · `permissions`  
+
+Transport **now**: loopback HTTP (`127.0.0.1:7420` by default). UDS preferred later for desktop UI. Chrome reuses the same host schema (`lumen-api`).
 
 ### Source style
 

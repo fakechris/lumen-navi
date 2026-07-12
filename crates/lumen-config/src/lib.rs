@@ -21,6 +21,27 @@ pub struct Config {
     pub retention: RetentionConfig,
     #[serde(default)]
     pub ocr: OcrConfig,
+    #[serde(default)]
+    pub api: ApiConfig,
+}
+
+/// Local control API (loopback HTTP).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiConfig {
+    /// Serve control plane while daemon is running.
+    pub enabled: bool,
+    /// Bind address. Default loopback only.
+    pub bind: String,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bind: "127.0.0.1:7420".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +184,7 @@ impl Default for Config {
                 wipe_on_request: true,
             },
             ocr: OcrConfig::default(),
+            api: ApiConfig::default(),
         }
     }
 }
@@ -191,5 +213,7 @@ mod tests {
         assert!(c.ocr.enabled);
         assert_eq!(c.ocr.batch_size, 2);
         assert!(c.ocr.boxes_when_empty_only);
+        assert!(c.api.enabled);
+        assert_eq!(c.api.bind, "127.0.0.1:7420");
     }
 }

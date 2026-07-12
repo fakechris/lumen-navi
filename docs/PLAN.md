@@ -72,10 +72,12 @@ Product: [`docs/OCR_PRODUCT.md`](OCR_PRODUCT.md)
 - [x] Idempotent `ocr.v1` derived upsert  
 - [x] Config surface complete (batch, boxes policy, limits, drain)  
 - [x] Unit tests for worker + store job semantics  
+- [x] Schema v4 `ocr_docs` + FTS5; reindex; search API  
+- [x] Local control API (loopback): health + OCR search + reindex  
 - [ ] (S4.1) optional OCR helper process isolation  
-- [ ] FTS / search UX over OCR text  
+- [ ] Desktop / timeline search UI (U1)  
 
-**Exit:** production-hardened OCR path; capture remains non-blocking.
+**Exit:** production-hardened OCR path; capture remains non-blocking; OCR text searchable.
 
 ---
 

@@ -1,6 +1,6 @@
 //! SQLite schema for meta/navi.db
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 pub const MIGRATE_V1: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -97,4 +97,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_open_ocr
 -- One derived document per (event, kind) — OCR idempotent.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_derived_event_kind
   ON derived(event_id, kind);
+"#;
+
+/// OCR search documents + FTS5.
+pub const MIGRATE_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS ocr_docs (
+  id INTEGER PRIMARY KEY,
+  event_id TEXT NOT NULL UNIQUE,
+  text TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0,
+  session_id TEXT,
+  event_ts TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ocr_docs_session ON ocr_docs(session_id);
+CREATE INDEX IF NOT EXISTS idx_ocr_docs_event_ts ON ocr_docs(event_ts);
 "#;

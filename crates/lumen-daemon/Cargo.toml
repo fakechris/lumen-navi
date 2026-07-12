@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+axum = { workspace = true }
 lumen-api = { workspace = true }
 lumen-config = { workspace = true }
 lumen-intake = { workspace = true }
@@ -21,6 +22,7 @@ lumen-process = { workspace = true }
 lumen-sources-media = { workspace = true }
 lumen-store = { workspace = true }
 lumen-types = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
