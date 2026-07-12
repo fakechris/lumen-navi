@@ -24,3 +24,16 @@
 node_modules/
 dist/
 *.log
+
+# ── Agent local instructions (NEVER commit) ──
+# Project agent rules stay on this machine only.
+AGENTS.md
+Claude.md
+CLAUDE.md
+MEMORY.md
+.agents/
+.grok/
+.cursor/rules/
+**/*DEEP*.md
+**/IDA_*.md
+**/*REVERSE*.md
