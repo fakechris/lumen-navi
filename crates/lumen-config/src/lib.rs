@@ -1,6 +1,4 @@
-//! Daemon and intake configuration.
-//!
-//! Defaults are media-first: screen + audio enabled; browser off until later phases.
+//! Daemon and intake configuration — media-first Observe defaults.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -19,47 +17,95 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub sources: SourcesConfig,
     pub capture: CaptureConfig,
+    pub privacy: PrivacyConfig,
     pub retention: RetentionConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourcesConfig {
-    /// Continuous / interval screenshots.
     pub screen: bool,
-    /// Microphone (system audio is a later flag).
     pub audio: bool,
-    /// Optional higher-cost video segments.
     pub video: bool,
-    /// Chrome extension path — off until Phase B1.
     pub browser: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CaptureConfig {
-    /// Screenshot interval in milliseconds when idle interval mode is used.
     pub screen_interval_ms: u64,
-    /// Skip writing when pixel_hash matches within this window.
+    /// Legacy hash window (secondary). Primary dedup is grayscale probe.
     pub screen_dedup_window_ms: u64,
-    /// Longest edge for stored screenshots (0 = native resolution).
-    #[serde(default = "default_max_edge")]
     pub screen_max_edge: u32,
-    /// How many screen ticks the daemon captures before exit.
-    /// `0` = run until Ctrl+C.
-    #[serde(default = "default_screen_ticks")]
+    /// 0 = until Ctrl+C.
     pub screen_ticks: u64,
+    /// Divisor for visual probe resolution (Yansu uses 6).
+    pub probe_scale: u32,
+    /// Mean abs gray distance threshold in [0,1] (Yansu 0.05).
+    pub visual_change_threshold: f64,
+    pub debounce_default_ms: u64,
+    pub debounce_churn_ms: u64,
+    pub same_app_min_ms: u64,
+    pub idle_session_ms: u64,
+    pub queue_capacity: usize,
+    pub focus_poll_ms: u64,
+    /// `all` | `main`
+    pub displays: String,
+    /// `jpeg` | `png`
+    pub encode: String,
+    pub jpeg_quality: u8,
 }
 
-fn default_max_edge() -> u32 {
-    1920
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            screen_interval_ms: 3_000,
+            screen_dedup_window_ms: 5_000,
+            screen_max_edge: 1920,
+            screen_ticks: 0,
+            probe_scale: 6,
+            visual_change_threshold: 0.05,
+            debounce_default_ms: 1_000,
+            debounce_churn_ms: 3_000,
+            same_app_min_ms: 10_000,
+            idle_session_ms: 300_000,
+            queue_capacity: 8,
+            focus_poll_ms: 500,
+            displays: "all".into(),
+            encode: "jpeg".into(),
+            jpeg_quality: 75,
+        }
+    }
 }
 
-fn default_screen_ticks() -> u64 {
-    3
+impl CaptureConfig {
+    pub fn all_displays(&self) -> bool {
+        !self.displays.eq_ignore_ascii_case("main")
+    }
+
+    pub fn use_jpeg(&self) -> bool {
+        self.encode.eq_ignore_ascii_case("jpeg")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrivacyConfig {
+    pub paused: bool,
+    /// Product privacy mode: never capture screen pixels.
+    pub closed_eyes: bool,
+}
+
+impl Default for PrivacyConfig {
+    fn default() -> Self {
+        Self {
+            paused: false,
+            closed_eyes: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetentionConfig {
-    /// Soft disk budget in megabytes (PolicyGate uses this later).
     pub max_blob_mb: u64,
     pub wipe_on_request: bool,
 }
@@ -74,12 +120,8 @@ impl Default for Config {
                 video: false,
                 browser: false,
             },
-            capture: CaptureConfig {
-                screen_interval_ms: 3_000,
-                screen_dedup_window_ms: 5_000,
-                screen_max_edge: default_max_edge(),
-                screen_ticks: default_screen_ticks(),
-            },
+            capture: CaptureConfig::default(),
+            privacy: PrivacyConfig::default(),
             retention: RetentionConfig {
                 max_blob_mb: 20_480,
                 wipe_on_request: true,
@@ -104,13 +146,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_media_first() {
+    fn defaults_product_observe() {
         let c = Config::default();
         assert!(c.sources.screen);
-        assert!(c.sources.audio);
-        assert!(!c.sources.browser);
-        assert!(!c.sources.video);
-        assert_eq!(c.capture.screen_ticks, 3);
-        assert_eq!(c.capture.screen_max_edge, 1920);
+        assert!(!c.privacy.closed_eyes);
+        assert_eq!(c.capture.probe_scale, 6);
+        assert!((c.capture.visual_change_threshold - 0.05).abs() < 1e-9);
+        assert!(c.capture.all_displays());
+        assert!(c.capture.use_jpeg());
     }
 }

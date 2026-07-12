@@ -35,18 +35,21 @@
 
 ---
 
-## Phase S2 — Screen source (first real) ✅
+## Phase S2 — Screen Observe (product-complete) ✅
 
-- [x] macOS Screen Recording permission probe + request  
-- [x] CoreGraphics main-display capture → PNG (optional max-edge downscale)  
-- [x] Interval capture loop + pixel_hash dedup window  
-- [x] Frontmost app metadata (NSWorkspace / osascript fallback)  
-- [x] PNG blob + `screenshot.v1` into durable store  
-- [ ] Focus-change trigger (optional enhancement)  
-- [ ] Long-run 30–60 min soak (manual / later CI)  
+Design: [`docs/OBSERVE_CAPTURE.md`](OBSERVE_CAPTURE.md)
 
-**Exit (S2 code):** daemon captures real frames when TCC granted.  
-**Remaining soak / focus-change:** tracked as follow-ups, not blocking S3.
+- [x] Multi-display (`all` | `main`) via `CGGetActiveDisplayList`  
+- [x] Focus / title change triggers + adaptive debounce (1s / 3s, same-app 10s)  
+- [x] Grayscale visual probe at 1/`probe_scale` (default 6), threshold 0.05  
+- [x] Gates: pause, closed_eyes, screen lock  
+- [x] Backpressure (bounded persist queue)  
+- [x] Activity sessions (`activity_sessions` table) + idle close  
+- [x] JPEG default encode (q=75) + max edge  
+- [x] **No cua-driver** on Observe path  
+- [ ] Long-run soak (manual)
+
+**OCR / Vision = Phase S4 (next product step), deliberately not mixed into capture.**
 
 ---
 
@@ -131,6 +134,6 @@ https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 
 ## Next actions
 
-1. ~~S0~~ / ~~S1~~ / ~~S2 screen capture~~  
-2. **S3 audio source** (mic first)  
-3. S4 process pipeline (OCR job on screenshots)  
+1. ~~S0 / S1 / S2 Observe capture product path~~  
+2. **S4 Vision OCR** (job consumer for `ocr_screen` — complete product step)  
+3. S3 audio (can parallelize after OCR or before)  

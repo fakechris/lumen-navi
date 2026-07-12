@@ -1,6 +1,6 @@
 //! SQLite schema for meta/navi.db
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub const MIGRATE_V1: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 
 CREATE TABLE IF NOT EXISTS artifacts (
   id TEXT PRIMARY KEY NOT NULL,
@@ -62,4 +63,20 @@ CREATE TABLE IF NOT EXISTS kv (
   key TEXT PRIMARY KEY NOT NULL,
   value TEXT NOT NULL
 );
+"#;
+
+pub const MIGRATE_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS activity_sessions (
+  id TEXT PRIMARY KEY NOT NULL,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  primary_app TEXT,
+  primary_bundle TEXT,
+  trigger TEXT NOT NULL,
+  snapshot_count INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_sessions_status ON activity_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_activity_sessions_started ON activity_sessions(started_at);
 "#;

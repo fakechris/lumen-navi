@@ -5,12 +5,12 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use lumen_types::{ArtifactRef, SourceEvent, SourceKind};
+use lumen_types::{ActivitySession, ArtifactRef, SourceEvent, SourceKind};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::blob::BlobStore;
-use crate::schema::{MIGRATE_V1, SCHEMA_VERSION};
+use crate::schema::{MIGRATE_V1, MIGRATE_V2, SCHEMA_VERSION};
 use crate::{EventStore, JobRecord, JobStatus, StoreError};
 
 /// On-disk store: `$data_dir/meta/navi.db` + `$data_dir/blobs/...`.
@@ -59,6 +59,34 @@ impl SqliteStore {
         event.artifacts.push(artifact);
         self.append_sync(std::slice::from_ref(&event))?;
         Ok(event)
+    }
+
+    pub fn upsert_session(&self, session: &ActivitySession) -> Result<(), StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.execute(
+            r#"INSERT INTO activity_sessions
+               (id, started_at, ended_at, primary_app, primary_bundle, trigger, snapshot_count, status)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+               ON CONFLICT(id) DO UPDATE SET
+                 ended_at=excluded.ended_at,
+                 primary_app=excluded.primary_app,
+                 primary_bundle=excluded.primary_bundle,
+                 trigger=excluded.trigger,
+                 snapshot_count=excluded.snapshot_count,
+                 status=excluded.status"#,
+            params![
+                session.id.to_string(),
+                session.started_at.to_rfc3339(),
+                session.ended_at.map(|t| t.to_rfc3339()),
+                session.primary_app,
+                session.primary_bundle,
+                session.trigger,
+                session.snapshot_count as i64,
+                session.status.as_str(),
+            ],
+        )
+        .map_err(StoreError::db)?;
+        Ok(())
     }
 
     pub fn enqueue_job(&self, event_id: Uuid, kind: impl Into<String>) -> Result<JobRecord, StoreError> {
@@ -281,24 +309,34 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
         .optional()
         .map_err(StoreError::db)?;
 
-    match current {
-        None => {
-            conn.execute(
-                "INSERT INTO schema_meta (key, value) VALUES ('version', ?1)",
-                params![SCHEMA_VERSION.to_string()],
-            )
-            .map_err(StoreError::db)?;
-        }
-        Some(v) => {
-            let v: i64 = v.parse().unwrap_or(0);
-            if v > SCHEMA_VERSION {
-                return Err(StoreError::Other(format!(
-                    "database schema version {v} is newer than supported {SCHEMA_VERSION}"
-                )));
-            }
-            // Future migrations: if v < SCHEMA_VERSION { ... }
-        }
+    let mut v: i64 = current.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
+    if current.is_none() {
+        // Fresh DB after V1 tables: stamp as 1 then upgrade.
+        conn.execute(
+            "INSERT INTO schema_meta (key, value) VALUES ('version', '1')",
+            [],
+        )
+        .map_err(StoreError::db)?;
+        v = 1;
     }
+
+    if v > SCHEMA_VERSION {
+        return Err(StoreError::Other(format!(
+            "database schema version {v} is newer than supported {SCHEMA_VERSION}"
+        )));
+    }
+
+    if v < 2 {
+        conn.execute_batch(MIGRATE_V2).map_err(StoreError::db)?;
+        conn.execute(
+            "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
+            params!["2"],
+        )
+        .map_err(StoreError::db)?;
+        v = 2;
+    }
+
+    let _ = v;
     Ok(())
 }
 

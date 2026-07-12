@@ -3,11 +3,11 @@ name = "lumen-sources-media"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Screen, audio, and video intake adapters"
+description = "Screen/audio/video intake and Observe capture orchestrator"
 
 [dependencies]
 async-trait = { workspace = true }
-blake3 = { workspace = true }
+chrono = { workspace = true }
 lumen-config = { workspace = true }
 lumen-intake = { workspace = true }
 lumen-platform = { workspace = true }

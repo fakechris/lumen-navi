@@ -1,12 +1,13 @@
-//! macOS platform ports — screen capture, frontmost app, permissions.
+//! macOS platform ports — multi-display capture, frontmost, lock, permissions.
 //!
-//! Capture uses CoreGraphics `CGDisplayCreateImage` (not cua-driver; observe ≠ act).
-//! Screen Recording TCC must be granted for non-empty frames on modern macOS.
+//! Observe plane only — does **not** use cua-driver.
 
 mod capture;
 mod frontmost;
+mod lock;
 mod permissions;
 
-pub use capture::MacScreenCapturer;
+pub use capture::{MacDisplays, MacScreenCapturer};
 pub use frontmost::MacFrontmost;
+pub use lock::{is_screen_locked, MacScreenLock};
 pub use permissions::{request_screen_recording, MacPermissions};

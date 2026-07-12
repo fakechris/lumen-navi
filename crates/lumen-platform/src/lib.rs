@@ -1,7 +1,4 @@
-//! Platform capability ports.
-//!
-//! Implementations live in `lumen-platform-macos` (and future OS crates).
-//! Core intake/store/process must depend on these traits only — no `#[cfg]` soup.
+//! OS capability ports for Observe capture (no `#[cfg]` in consumers).
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -50,50 +47,81 @@ pub struct FrontmostApp {
     pub window_title: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ScreenshotFrame {
-    pub png_bytes: Vec<u8>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DisplayId(pub u32);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisplayInfo {
+    pub id: DisplayId,
     pub width: u32,
     pub height: u32,
-    pub display_id: Option<u32>,
+    pub origin_x: i32,
+    pub origin_y: i32,
+    pub is_main: bool,
 }
 
+/// Encoded (or encode-ready RGBA) frame for archival.
 #[derive(Debug, Clone)]
-pub struct AudioChunk {
-    pub pcm_s16le: Vec<u8>,
-    pub sample_rate: u32,
-    pub channels: u16,
+pub struct ScreenshotFrame {
+    pub png_or_jpeg_bytes: Vec<u8>,
+    pub media_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub display_id: DisplayId,
 }
 
-/// Query OS permission state (does not prompt unless the impl chooses to).
+/// Raw BGRA frame for visual probing (not stored).
+#[derive(Debug, Clone)]
+pub struct RawFrame {
+    pub bgra: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub bytes_per_row: usize,
+    pub display_id: DisplayId,
+}
+
 #[async_trait]
 pub trait PermissionProbe: Send + Sync {
     async fn status(&self) -> Result<PermissionStatus, PlatformError>;
 }
 
-/// Frontmost application / window metadata (cheap signal).
 #[async_trait]
 pub trait FrontmostAppProbe: Send + Sync {
     async fn frontmost(&self) -> Result<Option<FrontmostApp>, PlatformError>;
 }
 
-/// Full-display or main-display screenshot.
+#[async_trait]
+pub trait ScreenLockProbe: Send + Sync {
+    async fn is_locked(&self) -> Result<bool, PlatformError>;
+}
+
+#[async_trait]
+pub trait DisplayEnumerator: Send + Sync {
+    async fn list_displays(&self) -> Result<Vec<DisplayInfo>, PlatformError>;
+}
+
 #[async_trait]
 pub trait ScreenCapturer: Send + Sync {
-    async fn capture_main_display(&self) -> Result<ScreenshotFrame, PlatformError>;
+    /// Full archival capture for one display (already scaled/encoded).
+    async fn capture_display(
+        &self,
+        id: DisplayId,
+        max_edge: u32,
+        jpeg: bool,
+        jpeg_quality: u8,
+    ) -> Result<ScreenshotFrame, PlatformError>;
+
+    /// Downscaled raw BGRA for visual probe (`scale_div` ≥ 1, e.g. 6).
+    async fn capture_display_raw(
+        &self,
+        id: DisplayId,
+        scale_div: u32,
+    ) -> Result<RawFrame, PlatformError>;
 }
 
-/// Microphone (system audio is a separate future port).
-#[async_trait]
-pub trait AudioCapturer: Send + Sync {
-    async fn start(&mut self) -> Result<(), PlatformError>;
-    async fn stop(&mut self) -> Result<(), PlatformError>;
-    async fn next_chunk(&mut self) -> Result<Option<AudioChunk>, PlatformError>;
-}
+// --- Null stubs (tests / non-macOS) ---
 
-/// Stub probe for headless tests and non-macOS scaffolding.
 pub struct NullPermissions;
-
 #[async_trait]
 impl PermissionProbe for NullPermissions {
     async fn status(&self) -> Result<PermissionStatus, PlatformError> {
@@ -105,12 +133,76 @@ impl PermissionProbe for NullPermissions {
     }
 }
 
-/// Stub frontmost probe.
 pub struct NullFrontmost;
-
 #[async_trait]
 impl FrontmostAppProbe for NullFrontmost {
     async fn frontmost(&self) -> Result<Option<FrontmostApp>, PlatformError> {
         Ok(None)
+    }
+}
+
+pub struct NullScreenLock;
+#[async_trait]
+impl ScreenLockProbe for NullScreenLock {
+    async fn is_locked(&self) -> Result<bool, PlatformError> {
+        Ok(false)
+    }
+}
+
+/// Mean absolute difference of grayscale planes in [0, 1].
+pub fn gray_distance(a: &[u8], b: &[u8]) -> f64 {
+    if a.is_empty() || b.is_empty() || a.len() != b.len() {
+        return 1.0;
+    }
+    let mut sum = 0u64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        sum += (*x as i16 - *y as i16).unsigned_abs() as u64;
+    }
+    (sum as f64) / (a.len() as f64) / 255.0
+}
+
+/// BGRA → grayscale (BT.601).
+pub fn bgra_to_gray(frame: &RawFrame) -> Vec<u8> {
+    let w = frame.width as usize;
+    let h = frame.height as usize;
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..h {
+        let row = y * frame.bytes_per_row;
+        for x in 0..w {
+            let i = row + x * 4;
+            if i + 2 >= frame.bgra.len() {
+                break;
+            }
+            let b = frame.bgra[i] as u32;
+            let g = frame.bgra[i + 1] as u32;
+            let r = frame.bgra[i + 2] as u32;
+            // (R*77 + G*150 + B*29) >> 8
+            let yv = (r * 77 + g * 150 + b * 29) >> 8;
+            out.push(yv as u8);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gray_distance_identical_is_zero() {
+        let g = vec![10u8, 20, 30];
+        assert!((gray_distance(&g, &g) - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn bgra_to_gray_len() {
+        let frame = RawFrame {
+            bgra: vec![0, 0, 255, 255, 0, 255, 0, 255],
+            width: 2,
+            height: 1,
+            bytes_per_row: 8,
+            display_id: DisplayId(1),
+        };
+        assert_eq!(bgra_to_gray(&frame).len(), 2);
     }
 }

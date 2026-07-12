@@ -1,21 +1,25 @@
-//! Lumen Navi local daemon.
+//! Lumen Navi daemon — product Observe capture loop (S2 complete).
 //!
-//! Phase S2: real macOS screen capture → durable store (interval + dedup).
+//! Multi-display · focus trigger · grayscale probe · debounce · lock/closed_eyes
+//! · backpressure · activity sessions. OCR is Phase S4 (not here).
+//! Does **not** use cua-driver (Act plane only, later).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use lumen_api::{HealthResponse, SourceStatus};
 use lumen_config::Config;
-use lumen_intake::Source;
 use lumen_platform::PermissionProbe;
 use lumen_platform_macos::{
-    request_screen_recording, MacFrontmost, MacPermissions, MacScreenCapturer,
+    request_screen_recording, MacDisplays, MacFrontmost, MacPermissions, MacScreenCapturer,
+    MacScreenLock,
 };
-use lumen_sources_media::{AudioSource, ScreenSource};
+use lumen_sources_media::{AudioSource, CaptureOrchestrator, CapturedBatch};
 use lumen_store::{EventStore, SqliteStore};
-use lumen_types::{SourceEvent, SourceKind};
+use lumen_types::{SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
+use tokio::sync::mpsc;
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -29,20 +33,20 @@ async fn main() -> Result<()> {
     info!(
         product = "lumen-navi",
         repo = "https://github.com/fakechris/lumen-navi",
-        phase = "S2",
-        "daemon starting"
+        phase = "S2-complete",
+        "daemon starting (Observe capture product path)"
     );
 
     let config = Config::load_or_default("navi.toml").unwrap_or_default();
     info!(
         data_dir = %config.data_dir.display(),
-        screen = config.sources.screen,
-        audio = config.sources.audio,
-        browser = config.sources.browser,
-        interval_ms = config.capture.screen_interval_ms,
+        displays = %config.capture.displays,
+        encode = %config.capture.encode,
+        probe_scale = config.capture.probe_scale,
+        threshold = config.capture.visual_change_threshold,
+        closed_eyes = config.privacy.closed_eyes,
         ticks = config.capture.screen_ticks,
-        max_edge = config.capture.screen_max_edge,
-        "config loaded"
+        "config"
     );
 
     std::fs::create_dir_all(&config.data_dir)
@@ -50,39 +54,28 @@ async fn main() -> Result<()> {
 
     let store = Arc::new(
         SqliteStore::open(&config.data_dir)
-            .with_context(|| format!("open store in {}", config.data_dir.display()))?,
+            .with_context(|| format!("open store {}", config.data_dir.display()))?,
     );
     info!(
-        db = %config.data_dir.join("meta/navi.db").display(),
-        existing_events = store.len().await?,
-        "durable store open"
+        existing = store.len().await?,
+        "durable store open (schema v2 sessions)"
     );
 
-    let boot = SourceEvent::new(
-        SourceKind::Other("daemon".into()),
-        "daemon.boot.v1",
-        json!({
-            "payload_version": 1,
-            "phase": "S2",
-            "note": "process start marker"
-        }),
-    );
-    store.append(vec![boot]).await?;
+    store
+        .append(vec![SourceEvent::new(
+            SourceKind::Other("daemon".into()),
+            "daemon.boot.v1",
+            json!({ "phase": "S2-complete", "observe": true }),
+        )])
+        .await?;
 
     let perms = MacPermissions;
     let mut status = perms.status().await?;
-    info!(
-        screen = ?status.screen_recording,
-        mic = ?status.microphone,
-        accessibility = ?status.accessibility,
-        "permission probe"
-    );
-
+    info!(screen = ?status.screen_recording, "permissions");
     if config.sources.screen && !status.can_capture_screen() {
-        info!("requesting Screen Recording access (system prompt may appear)");
         let _ = request_screen_recording();
         status = perms.status().await?;
-        info!(screen = ?status.screen_recording, "permission after request");
+        info!(screen = ?status.screen_recording, "after request");
     }
 
     let mut screen_status = SourceStatus {
@@ -91,119 +84,152 @@ async fn main() -> Result<()> {
         running: false,
         last_error: None,
     };
-    let mut audio_status = SourceStatus {
-        id: "audio".into(),
-        enabled: config.sources.audio,
-        running: false,
-        last_error: None,
-    };
 
     if config.sources.screen {
-        let capturer = MacScreenCapturer::with_max_edge(config.capture.screen_max_edge);
-        let mut screen = ScreenSource::new(
-            Arc::new(capturer),
+        let mut orch = CaptureOrchestrator::new(
+            Arc::new(MacDisplays),
+            Arc::new(MacScreenCapturer),
             Arc::new(MacFrontmost),
-            &config.capture,
-        );
-        screen.start().await?;
-        screen_status.running = true;
-
-        let interval = screen.interval();
-        let max_ticks = config.capture.screen_ticks;
-        info!(
-            ?interval,
-            max_ticks,
-            "screen capture loop (ticks=0 means until Ctrl+C)"
+            Arc::new(MacScreenLock),
+            config.capture.clone(),
+            config.privacy.clone(),
         );
 
-        let mut tick: u64 = 0;
-        loop {
-            if max_ticks > 0 && tick >= max_ticks {
-                break;
-            }
-            tick += 1;
-
-            match screen.capture_tick().await {
-                Ok(batch) => {
-                    for item in batch {
-                        if let Some((media, bytes)) = item.blob {
-                            let stored = store.put_and_append(item.event, media, &bytes)?;
+        let (tx, mut rx) = mpsc::channel::<CapturedBatch>(config.capture.queue_capacity);
+        let store_w = Arc::clone(&store);
+        let persist = tokio::spawn(async move {
+            while let Some(batch) = rx.recv().await {
+                if let Some(ref closed) = batch.closed_session {
+                    let _ = store_w.upsert_session(closed);
+                }
+                if let Some(ref open) = batch.open_session {
+                    let _ = store_w.upsert_session(open);
+                }
+                for (event, frame) in batch.frames {
+                    match store_w.put_and_append(
+                        event,
+                        frame.media_type.clone(),
+                        &frame.png_or_jpeg_bytes,
+                    ) {
+                        Ok(stored) => {
+                            // S4 will enqueue ocr_screen here.
+                            let _ = store_w.enqueue_job(stored.id, "ocr_screen");
                             info!(
                                 id = %stored.id,
                                 kind = %stored.kind,
-                                artifacts = stored.artifacts.len(),
-                                "stored screenshot"
+                                media = %frame.media_type,
+                                bytes = frame.png_or_jpeg_bytes.len(),
+                                "persisted screenshot"
                             );
-                        } else {
-                            store.append(vec![item.event]).await?;
+                        }
+                        Err(e) => warn!(error = %e, "persist failed"),
+                    }
+                }
+            }
+        });
+
+        screen_status.running = true;
+        let interval = Duration::from_millis(config.capture.screen_interval_ms);
+        let focus_every = Duration::from_millis(config.capture.focus_poll_ms);
+        let max_ticks = config.capture.screen_ticks;
+        let mut full_ticks = 0u64;
+        let mut interval_ticks = 0u64;
+        let mut focus_tick = tokio::time::interval(focus_every);
+        focus_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut capture_tick = tokio::time::interval(interval);
+        capture_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // first ticks fire immediately — skip one for focus baseline
+        focus_tick.tick().await;
+        capture_tick.tick().await;
+
+        info!("observe loop running (Ctrl+C to stop if ticks=0)");
+
+        loop {
+            // Stop after N full captures, or after N interval attempts when capped
+            // (visual skip would otherwise hang a finite smoke run on a static desktop).
+            if max_ticks > 0 && (full_ticks >= max_ticks || interval_ticks >= max_ticks) {
+                break;
+            }
+
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Ctrl+C");
+                    break;
+                }
+                _ = focus_tick.tick() => {
+                    if let Some(reason) = orch.poll_focus_trigger().await {
+                        match orch.capture_tick(reason).await {
+                            Ok(Some(batch)) => {
+                                full_ticks += 1;
+                                if tx.try_send(batch).is_err() {
+                                    orch.note_backpressure_drop();
+                                    warn!("backpressure: drop capture batch");
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                warn!(error = %e, "focus capture failed");
+                                screen_status.last_error = Some(e);
+                            }
+                        }
+                    }
+                    if let Some(closed) = orch.close_idle_session() {
+                        let _ = store.upsert_session(&closed);
+                    }
+                }
+                _ = capture_tick.tick() => {
+                    interval_ticks += 1;
+                    match orch.capture_tick(TriggerReason::Interval).await {
+                        Ok(Some(batch)) => {
+                            full_ticks += 1;
+                            if tx.try_send(batch).is_err() {
+                                orch.note_backpressure_drop();
+                                warn!("backpressure: drop capture batch");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            warn!(error = %e, "interval capture failed");
+                            screen_status.last_error = Some(e);
                         }
                     }
                 }
-                Err(e) => {
-                    warn!(error = %e, "screen capture tick failed");
-                    screen_status.last_error = Some(e.to_string());
-                    // Keep looping — permission may be granted mid-run after Settings toggle.
-                }
-            }
-
-            if max_ticks > 0 && tick >= max_ticks {
-                break;
-            }
-            // Sleep, but wake early on Ctrl+C when running forever.
-            if max_ticks == 0 {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {
-                        info!("Ctrl+C — stopping capture loop");
-                        break;
-                    }
-                    _ = tokio::time::sleep(interval) => {}
-                }
-            } else {
-                tokio::time::sleep(interval).await;
             }
         }
 
-        screen.stop().await?;
+        if let Some(s) = orch.force_close_session() {
+            let _ = store.upsert_session(&s);
+        }
+        drop(tx);
+        let _ = persist.await;
         screen_status.running = false;
-    }
 
-    if config.sources.audio {
-        // S3 will run audio; for now just register status.
-        let mut audio = AudioSource::new();
-        audio.start().await?;
-        audio_status.running = true;
-        audio.stop().await?;
-        audio_status.running = false;
-    }
-
-    if config.sources.browser {
-        warn!("browser source enabled in config but not implemented until Phase B1");
-    }
-
-    let recent = store.list_recent(8).await?;
-    for ev in &recent {
+        let st = orch.stats();
         info!(
-            id = %ev.id,
-            kind = %ev.kind,
-            artifacts = ev.artifacts.len(),
-            "recent event"
+            full = st.full_captures,
+            probes = st.probes,
+            skip_visual = st.skipped_visual,
+            skip_debounce = st.skipped_debounce,
+            skip_gate = st.skipped_gate,
+            drop_bp = st.dropped_backpressure,
+            "capture stats"
         );
     }
 
-    let health = HealthResponse::scaffold(
-        vec![screen_status, audio_status],
-        store.len().await?,
-        false,
-    );
-    info!(
-        api_version = health.api_version,
-        stored = health.stored_events,
-        sources = health.sources.len(),
-        "health snapshot"
-    );
+    if config.sources.audio {
+        let mut a = AudioSource::new();
+        use lumen_intake::Source;
+        a.start().await?;
+        a.stop().await?;
+    }
 
-    info!("related: Lumen ASR https://github.com/fakechris/lumen-asr (separate product)");
-    info!("act plane later: cua-driver MIT only — https://github.com/trycua/cua");
-    info!("lumen-navi daemon exiting cleanly");
+    let health = HealthResponse::scaffold(
+        vec![screen_status],
+        store.len().await?,
+        config.privacy.paused,
+    );
+    info!(stored = health.stored_events, "health");
+    info!("OCR (Vision) is next product step — capture never blocked");
+    info!("cua-driver is Act-only later — not used for Observe");
     Ok(())
 }

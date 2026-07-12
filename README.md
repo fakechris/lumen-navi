@@ -69,10 +69,12 @@ Requires Rust stable (edition 2021+).
 
 ## Status
 
-**Phase S2 — real macOS screen capture.** Interval screenshots → PNG blobs → SQLite. Defaults: 3 ticks @ 3s, max edge 1920px. Grant **Screen Recording** to the terminal/binary if capture fails.
+**Phase S2 complete — product Observe capture.** Multi-display, focus triggers, grayscale change detection, debounce, screen-lock / closed-eyes gates, backpressure, activity sessions. Design: [`docs/OBSERVE_CAPTURE.md`](docs/OBSERVE_CAPTURE.md).
 
 ```bash
-cargo run -p lumen-daemon   # writes under ./data by default
-# navi.toml overrides: capture.screen_ticks, screen_interval_ms, screen_max_edge
-# screen_ticks = 0 → run until Ctrl+C
+cargo run -p lumen-daemon   # data/ · Ctrl+C to stop (screen_ticks=0 default)
+# navi.toml: capture.displays=all|main, probe_scale, visual_change_threshold,
+#            privacy.closed_eyes, encode=jpeg|png
 ```
+
+Grant **Screen Recording** if capture fails. **OCR is the next step** (jobs already enqueued as `ocr_screen`). **cua-driver is not used for capture.**
