@@ -1,0 +1,34 @@
+import SafariServices
+
+final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
+    private let appGroup = "__APP_GROUP__"
+
+    func beginRequest(with context: NSExtensionContext) {
+        guard let request = context.inputItems.first as? NSExtensionItem,
+              let message = request.userInfo?[SFExtensionMessageKey],
+              JSONSerialization.isValidJSONObject(message),
+              let dictionary = message as? [String: Any],
+              let requestID = dictionary["request_id"] as? String,
+              let root = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: appGroup
+              ) else {
+            complete(context, accepted: false)
+            return
+        }
+        do {
+            let directory = root.appendingPathComponent("BrowserResults", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: dictionary)
+            try data.write(to: directory.appendingPathComponent("\(requestID).json"), options: .atomic)
+            complete(context, accepted: true)
+        } catch {
+            complete(context, accepted: false)
+        }
+    }
+
+    private func complete(_ context: NSExtensionContext, accepted: Bool) {
+        let response = NSExtensionItem()
+        response.userInfo = [SFExtensionMessageKey: ["accepted": accepted]]
+        context.completeRequest(returningItems: [response], completionHandler: nil)
+    }
+}

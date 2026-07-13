@@ -1,7 +1,7 @@
 //! Frontmost application probe (cheap signal for screenshot.v1 payload).
 
+use crate::{FrontmostApp, FrontmostAppProbe, PlatformError};
 use async_trait::async_trait;
-use lumen_platform::{FrontmostApp, FrontmostAppProbe, PlatformError};
 
 pub struct MacFrontmost;
 

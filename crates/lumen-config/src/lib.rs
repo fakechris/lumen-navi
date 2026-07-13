@@ -4,6 +4,13 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+pub fn default_browser_host_config_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Library/Application Support/LumenNavi/context-browser/host.json")
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("io: {0}")]
@@ -25,6 +32,8 @@ pub struct Config {
     pub api: ApiConfig,
     #[serde(default)]
     pub audio: AudioConfig,
+    #[serde(default)]
+    pub browser: BrowserConfig,
 }
 
 /// Microphone intake (S3). Enable flag is `sources.audio`.
@@ -82,6 +91,40 @@ pub struct ApiConfig {
     pub enabled: bool,
     /// Bind address. Default loopback only.
     pub bind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserConfig {
+    pub extension_origins: Vec<String>,
+    /// Optional directory shared with a signed Safari containing app. When unset,
+    /// browser bridge state remains under `data_dir/context-browser`.
+    pub bridge_dir: Option<PathBuf>,
+    pub timeout_ms: u64,
+    pub snapshot_deadline_ms: u64,
+    pub max_chars: usize,
+    pub max_nodes: usize,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            extension_origins: Vec::new(),
+            bridge_dir: None,
+            timeout_ms: 500,
+            snapshot_deadline_ms: 1_000,
+            max_chars: 200_000,
+            max_nodes: 5_000,
+        }
+    }
+}
+
+impl BrowserConfig {
+    pub fn bridge_root(&self, data_dir: &Path) -> PathBuf {
+        self.bridge_dir
+            .clone()
+            .unwrap_or_else(|| data_dir.join("context-browser"))
+    }
 }
 
 impl Default for ApiConfig {
@@ -179,6 +222,7 @@ pub struct RetentionConfig {
 #[serde(default)]
 pub struct OcrConfig {
     pub enabled: bool,
+    pub helper_path: String,
     pub languages: Vec<String>,
     pub poll_interval_ms: u64,
     pub batch_size: usize,
@@ -199,6 +243,7 @@ impl Default for OcrConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            helper_path: String::new(),
             languages: vec!["zh-Hans".into(), "en-US".into()],
             poll_interval_ms: 1_500,
             batch_size: 2,
@@ -235,6 +280,7 @@ impl Default for Config {
             ocr: OcrConfig::default(),
             api: ApiConfig::default(),
             audio: AudioConfig::default(),
+            browser: BrowserConfig::default(),
         }
     }
 }
@@ -268,5 +314,17 @@ mod tests {
         assert!(c.sources.audio);
         assert_eq!(c.audio.chunk_ms, 5_000);
         assert!(!c.audio.is_session_mode());
+        assert!(c.browser.extension_origins.is_empty());
+        assert!(c.browser.bridge_dir.is_none());
+        assert_eq!(
+            c.browser.bridge_root(Path::new("/tmp/navi-data")),
+            PathBuf::from("/tmp/navi-data/context-browser")
+        );
+        let mut browser = c.browser;
+        browser.bridge_dir = Some(PathBuf::from("/tmp/navi-group"));
+        assert_eq!(
+            browser.bridge_root(Path::new("/tmp/navi-data")),
+            PathBuf::from("/tmp/navi-group")
+        );
     }
 }

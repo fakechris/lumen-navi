@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "capture_id": "018f7f55-1594-7af8-b2d1-95c8d8f3de10",
+  "consumer_session_id": "018f7f55-1594-7af8-b2d1-95c8d8f3de11",
+  "revision": 2,
+  "profile": "metadata",
+  "trigger": {
+    "kind": "test",
+    "pressed_at": "2026-07-12T12:00:00Z",
+    "released_at": null
+  },
+  "requested_at": "2026-07-12T12:00:00Z",
+  "frozen_at": "2026-07-12T12:00:00.010Z",
+  "target_generation": 1,
+  "target": {
+    "app_name": "Fixture App",
+    "bundle_id": "org.lumen.fixture",
+    "pid": 42,
+    "process_start_time": null,
+    "window_id": 7,
+    "window_title": "Fixture Window",
+    "window_bounds_global": null,
+    "display_id": 1,
+    "document_url": null,
+    "focused_element_fingerprint": null,
+    "captured_at": "2026-07-12T12:00:00.005Z"
+  },
+  "system": null,
+  "editor": null,
+  "ax_visible": null,
+  "browser": null,
+  "screenshots": [],
+  "ocr_documents": [],
+  "visible_text_fused": null,
+  "artifacts": [],
+  "source_status": {
+    "target": {
+      "source": "target",
+      "state": "succeeded",
+      "started_at": "2026-07-12T12:00:00Z",
+      "completed_at": "2026-07-12T12:00:00.005Z",
+      "duration_ms": 5,
+      "queue_wait_ms": 0,
+      "reason_code": null,
+      "message": null,
+      "retryable": false,
+      "target_generation": 1,
+      "truncated_nodes": 0,
+      "truncated_chars": 0
+    }
+  },
+  "privacy": {
+    "raw_text_allowed": true,
+    "screenshots_allowed": true,
+    "applied_gates": [],
+    "policy_reason": null
+  },
+  "diagnostics": {
+    "total_duration_ms": 5,
+    "payload_bytes": 0,
+    "warnings": [],
+    "counters": {}
+  }
+}

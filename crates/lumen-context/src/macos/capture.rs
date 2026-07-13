@@ -1,14 +1,39 @@
 //! Multi-display capture via CoreGraphics.
 
+use crate::{
+    DisplayEnumerator, DisplayId, DisplayInfo, PlatformError, RawFrame, ScreenCapturer,
+    ScreenshotFrame,
+};
 use async_trait::async_trait;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, ImageEncoder};
-use lumen_platform::{
-    DisplayEnumerator, DisplayId, DisplayInfo, PlatformError, RawFrame, ScreenCapturer,
-    ScreenshotFrame,
-};
 use tracing::debug;
+
+#[cfg(target_os = "macos")]
+use std::ffi::CStr;
+#[cfg(target_os = "macos")]
+use std::os::raw::{c_char, c_void};
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn lumen_context_capture_window_png(
+        window_id: u32,
+        timeout_seconds: f64,
+        out_bytes: *mut *mut u8,
+        out_length: *mut usize,
+        out_width: *mut u32,
+        out_height: *mut u32,
+        out_scale: *mut f64,
+        out_error: *mut *mut c_char,
+    ) -> i32;
+    fn lumen_context_screen_free(value: *mut c_void);
+}
+
+pub(crate) struct WindowCaptureFrame {
+    pub(crate) frame: ScreenshotFrame,
+    pub(crate) point_pixel_scale: f64,
+}
 
 pub struct MacDisplays;
 
@@ -56,14 +81,103 @@ impl ScreenCapturer for MacScreenCapturer {
     }
 }
 
+pub(crate) async fn capture_window(
+    window_id: u32,
+    timeout: std::time::Duration,
+) -> Result<WindowCaptureFrame, PlatformError> {
+    tokio::task::spawn_blocking(move || capture_window_sync(window_id, timeout))
+        .await
+        .map_err(|error| PlatformError::Message(format!("window capture join: {error}")))?
+}
+
+fn capture_window_sync(
+    window_id: u32,
+    timeout: std::time::Duration,
+) -> Result<WindowCaptureFrame, PlatformError> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut bytes_pointer = std::ptr::null_mut();
+        let mut length = 0_usize;
+        let mut width = 0_u32;
+        let mut height = 0_u32;
+        let mut scale = 1.0_f64;
+        let mut error_pointer = std::ptr::null_mut();
+        let code = unsafe {
+            lumen_context_capture_window_png(
+                window_id,
+                timeout.as_secs_f64(),
+                &mut bytes_pointer,
+                &mut length,
+                &mut width,
+                &mut height,
+                &mut scale,
+                &mut error_pointer,
+            )
+        };
+        let error = take_screen_string(error_pointer);
+        if code != 0 {
+            if !bytes_pointer.is_null() {
+                unsafe { lumen_context_screen_free(bytes_pointer.cast()) };
+            }
+            if code == 8 {
+                return Err(PlatformError::Unsupported(error));
+            }
+            let lower = error.to_lowercase();
+            if lower.contains("permission") || lower.contains("denied") {
+                return Err(PlatformError::PermissionDenied(error));
+            }
+            return Err(PlatformError::Message(if error.is_empty() {
+                format!("ScreenCaptureKit failed with code {code}")
+            } else {
+                error
+            }));
+        }
+        if bytes_pointer.is_null() || length == 0 || width == 0 || height == 0 {
+            return Err(PlatformError::Message(
+                "ScreenCaptureKit returned an empty image".to_owned(),
+            ));
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(bytes_pointer, length).to_vec() };
+        unsafe { lumen_context_screen_free(bytes_pointer.cast()) };
+        Ok(WindowCaptureFrame {
+            frame: ScreenshotFrame {
+                png_or_jpeg_bytes: bytes,
+                media_type: "image/png".to_owned(),
+                width,
+                height,
+                display_id: DisplayId(0),
+            },
+            point_pixel_scale: scale,
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window_id, timeout);
+        Err(PlatformError::Unsupported(
+            "window capture requires macOS".to_owned(),
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn take_screen_string(pointer: *mut c_char) -> String {
+    if pointer.is_null() {
+        return String::new();
+    }
+    unsafe {
+        let value = CStr::from_ptr(pointer).to_string_lossy().into_owned();
+        lumen_context_screen_free(pointer.cast());
+        value
+    }
+}
+
 fn list_displays_sync() -> Result<Vec<DisplayInfo>, PlatformError> {
     #[cfg(target_os = "macos")]
     {
         use core_graphics::display::CGDisplay;
 
-        let ids = CGDisplay::active_displays().map_err(|e| {
-            PlatformError::Message(format!("CGGetActiveDisplayList failed: {e:?}"))
-        })?;
+        let ids = CGDisplay::active_displays()
+            .map_err(|e| PlatformError::Message(format!("CGGetActiveDisplayList failed: {e:?}")))?;
         let main_id = CGDisplay::main().id;
         let mut out = Vec::with_capacity(ids.len().max(1));
         if ids.is_empty() {
@@ -121,13 +235,15 @@ fn cg_image_for_display(_id: DisplayId) -> Result<(), PlatformError> {
 }
 
 #[cfg(target_os = "macos")]
-fn rgba_from_cg(image: &core_graphics::image::CGImage) -> Result<(Vec<u8>, u32, u32), PlatformError> {
+fn rgba_from_cg(
+    image: &core_graphics::image::CGImage,
+) -> Result<(Vec<u8>, u32, u32), PlatformError> {
     let width = image.width() as u32;
     let height = image.height() as u32;
     if width == 0 || height == 0 {
         return Err(PlatformError::Message("empty display image".into()));
     }
-    let bpp = (image.bits_per_pixel() / 8) as usize;
+    let bpp = image.bits_per_pixel() / 8;
     if bpp < 3 {
         return Err(PlatformError::Message(format!(
             "unsupported bpp={}",
@@ -159,7 +275,7 @@ fn rgba_from_cg(image: &core_graphics::image::CGImage) -> Result<(Vec<u8>, u32, 
 fn bgra_from_cg(image: &core_graphics::image::CGImage) -> Result<RawFrame, PlatformError> {
     let width = image.width() as u32;
     let height = image.height() as u32;
-    let bpp = (image.bits_per_pixel() / 8) as usize;
+    let bpp = image.bits_per_pixel() / 8;
     let stride = image.bytes_per_row();
     let data = image.data();
     let raw = data.bytes();

@@ -1,0 +1,21 @@
+{
+  "name": "lumen-context-browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check src/extractor.js && node --check src/bridge.js && node --check src/popup.js && node --check src/service-worker-navi.js && node --check src/service-worker-asr.js && node --check src/service-worker-safari.js && node --check scripts/package.mjs && node --check scripts/native-host-manifest.mjs && node --check scripts/e2e-chromium.mjs && node --check scripts/build-safari-macos.mjs",
+    "package:navi": "node scripts/package.mjs navi",
+    "package:asr": "node scripts/package.mjs asr",
+    "package:safari": "node scripts/package.mjs safari",
+    "package:safari:macos": "node scripts/build-safari-macos.mjs asr",
+    "package:safari:macos:asr": "node scripts/build-safari-macos.mjs asr",
+    "package:safari:macos:navi": "node scripts/build-safari-macos.mjs navi",
+    "test:e2e:chromium": "node scripts/e2e-chromium.mjs",
+    "test:e2e:chromium:strict": "LUMEN_CHROMIUM_STRICT=1 node scripts/e2e-chromium.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  }
+}

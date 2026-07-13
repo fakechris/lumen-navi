@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Lumen Context Bridge",
+  "version": "0.1.0",
+  "description": "Captures user-approved browser context for the local Lumen application.",
+  "permissions": ["nativeMessaging", "scripting", "tabs", "webNavigation"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "src/service-worker-asr.js",
+    "type": "module"
+  },
+  "action": { "default_popup": "src/popup.html" }
+}

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use lumen_platform::{OcrEngine, OcrResult, PlatformError};
+use lumen_context::{OcrEngine, OcrResult, PlatformError};
 use lumen_store::{JobRecord, JobStatus, SqliteStore};
 use serde_json::json;
 use tracing::{debug, info, warn};
@@ -468,7 +468,7 @@ fn ocr_body_json(result: &OcrResult, event_id: uuid::Uuid, image: &[u8]) -> Stri
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use lumen_platform::{OcrBox, PlatformError};
+    use lumen_context::{OcrBox, PlatformError};
     use lumen_store::EventStore;
     use lumen_types::{event_kind, SourceEvent, SourceKind};
     use serde_json::json;

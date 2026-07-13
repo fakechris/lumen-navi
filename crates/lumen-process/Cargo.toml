@@ -9,7 +9,7 @@ description = "Async enrichment and processing jobs over stored events"
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
-lumen-platform = { workspace = true }
+lumen-context = { workspace = true }
 lumen-store = { workspace = true }
 lumen-types = { workspace = true }
 serde_json = { workspace = true }

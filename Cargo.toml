@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/lumen-context",
   "crates/lumen-types",
   "crates/lumen-config",
   "crates/lumen-platform",
@@ -13,6 +14,7 @@ members = [
   "crates/lumen-daemon",
 ]
 default-members = [
+  "crates/lumen-context",
   "crates/lumen-types",
   "crates/lumen-config",
   "crates/lumen-platform",
@@ -37,19 +39,21 @@ anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
 blake3 = "1"
+bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 cpal = "0.15"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "signal", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "signal", "net", "process", "io-util"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 lumen-types = { path = "crates/lumen-types" }
+lumen-context = { path = "crates/lumen-context" }
 lumen-config = { path = "crates/lumen-config" }
 lumen-platform = { path = "crates/lumen-platform" }
 lumen-platform-macos = { path = "crates/lumen-platform-macos" }

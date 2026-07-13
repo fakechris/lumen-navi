@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lumen_config::{CaptureConfig, PrivacyConfig};
-use lumen_platform::{
+use lumen_context::{
     bgra_to_gray, gray_distance, DisplayEnumerator, DisplayInfo, FrontmostApp, FrontmostAppProbe,
     ScreenCapturer, ScreenLockProbe, ScreenshotFrame,
 };
@@ -302,8 +302,6 @@ impl CaptureOrchestrator {
         let elapsed = last.elapsed();
         let min = if reason.is_churn() {
             Duration::from_millis(self.capture.debounce_churn_ms)
-        } else if reason.forces_full_capture() {
-            Duration::from_millis(self.capture.debounce_default_ms)
         } else {
             Duration::from_millis(self.capture.debounce_default_ms)
         };
@@ -341,7 +339,7 @@ impl CaptureOrchestrator {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use lumen_platform::{
+    use lumen_context::{
         DisplayId, DisplayInfo, FrontmostApp, PlatformError, RawFrame, ScreenCapturer,
         ScreenshotFrame,
     };

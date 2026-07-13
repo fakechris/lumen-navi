@@ -5,22 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "macOS implementations of lumen-platform ports"
 
-[build-dependencies]
-cc = "1"
-
 [dependencies]
 async-trait = { workspace = true }
 cpal = { workspace = true }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+lumen-context = { workspace = true }
 lumen-platform = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = "0.10"
-core-graphics = "0.24"
-foreign-types = "0.5"
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3", features = ["NSString"] }

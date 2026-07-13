@@ -1,7 +1,7 @@
 //! Screen lock detection.
 
+use crate::{PlatformError, ScreenLockProbe};
 use async_trait::async_trait;
-use lumen_platform::{PlatformError, ScreenLockProbe};
 
 pub struct MacScreenLock;
 
@@ -24,12 +24,10 @@ pub fn is_screen_locked() -> bool {
             let key = cfstr("CGSSessionScreenIsLocked");
             let mut value: *const std::ffi::c_void = std::ptr::null();
             let found = CFDictionaryGetValueIfPresent(dict, key, &mut value);
+            let locked = found != 0 && !value.is_null() && CFBooleanGetValue(value as *const _);
+            CFRelease(key);
             CFRelease(dict as *const _);
-            if found == 0 || value.is_null() {
-                return false;
-            }
-            // CFBoolean
-            CFBooleanGetValue(value as *const _)
+            locked
         }
     }
     #[cfg(not(target_os = "macos"))]

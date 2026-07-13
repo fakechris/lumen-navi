@@ -4,20 +4,24 @@
 
 mod control_server;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use lumen_api::{HealthResponse, SourceStatus};
 use lumen_config::{AudioConfig, Config, PrivacyConfig};
-use lumen_platform::{MicCapturer, MicOpenConfig, OcrEngine, PermissionProbe};
-use lumen_platform_macos::{
-    request_screen_recording, MacDisplays, MacFrontmost, MacMicCapturer, MacPermissions,
-    MacScreenCapturer, MacScreenLock, MacVisionOcr,
+use lumen_context::{
+    macos::{MacDisplays, MacFrontmost, MacScreenCapturer, MacScreenLock, MacVisionOcr},
+    BrowserSnapshotProvider, CaptureId, CaptureProfile, CaptureRequest, CaptureTrigger,
+    ContextCollector, ContextConfig, ContextSealer, HelperVisionOcr, NativeBrowserBridgeConfig,
+    NativeBrowserProvider, OcrEngine, PrivacyPolicy, SourceSelection, TriggerKind,
 };
+use lumen_platform::{MicCapturer, MicOpenConfig, PermissionProbe};
+use lumen_platform_macos::{request_screen_recording, MacMicCapturer, MacPermissions};
 use lumen_process::{OcrWorker, OcrWorkerConfig};
 use lumen_sources_media::{AudioOrchestrator, CaptureOrchestrator, CapturedBatch};
-use lumen_store::{EventStore, SCHEMA_VERSION, SqliteStore};
+use lumen_store::{EventStore, SqliteStore, SCHEMA_VERSION};
 use lumen_types::{SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
@@ -55,6 +59,69 @@ async fn main() -> Result<()> {
 
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
+
+    let context_snapshot_deadline =
+        Duration::from_millis(config.browser.snapshot_deadline_ms.clamp(1, 60_000));
+    let mut context_collector = if config.sources.browser {
+        if config.browser.extension_origins.is_empty() {
+            warn!("browser source enabled without an extension origin allowlist");
+            None
+        } else {
+            let bridge_root = config.browser.bridge_root(&config.data_dir);
+            let bridge = NativeBrowserBridgeConfig::new(
+                "lumen-navi",
+                bridge_root.join("bridge.sock"),
+                bridge_root.join("bridge.token"),
+                config.browser.extension_origins.clone(),
+            );
+            let safari_host_config = bridge_root.join("browser-host.json");
+            let provider = bridge
+                .write_host_config(&lumen_config::default_browser_host_config_path())
+                .and_then(|_| bridge.write_host_config(&safari_host_config))
+                .map(|_| bridge)
+                .map_err(|error| error.to_string());
+            match provider {
+                Ok(bridge) => match NativeBrowserProvider::bind(bridge).await {
+                    Ok(provider) => {
+                        let provider: Arc<dyn BrowserSnapshotProvider> = Arc::new(provider);
+                        let collector = ContextCollector::new(
+                            ContextConfig {
+                                browser_timeout_ms: config.browser.timeout_ms.clamp(1, 60_000),
+                                browser_max_chars: config.browser.max_chars.max(1),
+                                browser_max_nodes: config.browser.max_nodes.max(1),
+                                ..ContextConfig::default()
+                            },
+                            Some(provider),
+                        )?;
+                        Some(Arc::new(collector))
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "browser context bridge initialization failed");
+                        None
+                    }
+                },
+                Err(error) => {
+                    warn!(error = %error, "browser context host config installation failed");
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
+    let context_sealer = if context_collector.is_some() {
+        match ContextSealer::from_macos_keychain("com.lumen.navi.context", "capture-key-v1") {
+            Ok(sealer) => Some(Arc::new(sealer)),
+            Err(error) => {
+                warn!(error = %error, "context encryption key initialization failed");
+                context_collector = None;
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let context_generation = Arc::new(AtomicU64::new(0));
 
     let store = Arc::new(
         SqliteStore::open(&config.data_dir)
@@ -99,9 +166,20 @@ async fn main() -> Result<()> {
     // --- OCR worker ---
     let (ocr_cancel_tx, ocr_cancel_rx) = watch::channel(false);
     let ocr_handle = if config.ocr.enabled {
-        let engine = Arc::new(MacVisionOcr::with_max_image_bytes(
-            config.ocr.max_image_bytes as usize,
-        ));
+        let helper_path =
+            resolve_helper_path(&config.ocr.helper_path, "lumen-navi-context-ocr-helper");
+        let engine: Arc<dyn OcrEngine> = if let Some(path) = helper_path {
+            Arc::new(HelperVisionOcr::new(
+                path,
+                Duration::from_millis(config.ocr.timeout_ms.clamp(1, 300_000)),
+                config.ocr.max_image_bytes as usize,
+            ))
+        } else {
+            warn!("OCR helper unavailable; using in-process Vision fallback");
+            Arc::new(MacVisionOcr::with_max_image_bytes(
+                config.ocr.max_image_bytes as usize,
+            ))
+        };
         if engine.is_supported() {
             let worker = Arc::new(OcrWorker::new(
                 Arc::clone(&store),
@@ -270,6 +348,14 @@ async fn main() -> Result<()> {
                         match orch.capture_tick(reason).await {
                             Ok(Some(batch)) => {
                                 full_ticks += 1;
+                                spawn_context_snapshot(
+                                    context_collector.clone(),
+                                    context_sealer.clone(),
+                                    Arc::clone(&store),
+                                    &batch,
+                                    context_generation.fetch_add(1, Ordering::SeqCst) + 1,
+                                    context_snapshot_deadline,
+                                );
                                 if tx.try_send(batch).is_err() {
                                     orch.note_backpressure_drop();
                                     warn!("backpressure: drop capture batch");
@@ -291,6 +377,14 @@ async fn main() -> Result<()> {
                     match orch.capture_tick(TriggerReason::Interval).await {
                         Ok(Some(batch)) => {
                             full_ticks += 1;
+                            spawn_context_snapshot(
+                                context_collector.clone(),
+                                context_sealer.clone(),
+                                Arc::clone(&store),
+                                &batch,
+                                context_generation.fetch_add(1, Ordering::SeqCst) + 1,
+                                context_snapshot_deadline,
+                            );
                             if tx.try_send(batch).is_err() {
                                 orch.note_backpressure_drop();
                                 warn!("backpressure: drop capture batch");
@@ -331,7 +425,10 @@ async fn main() -> Result<()> {
         info!("Ctrl+C");
     } else if config.sources.audio && config.audio.ticks > 0 {
         // Finite audio smoke without screen: wait for audio task / cancel after grace.
-        let wait_ms = config.audio.chunk_ms.saturating_mul(config.audio.ticks.saturating_add(2));
+        let wait_ms = config
+            .audio
+            .chunk_ms
+            .saturating_mul(config.audio.ticks.saturating_add(2));
         tokio::time::sleep(Duration::from_millis(wait_ms.max(2_000))).await;
     }
 
@@ -404,10 +501,7 @@ async fn main() -> Result<()> {
         );
         tokio::signal::ctrl_c().await?;
         info!("Ctrl+C");
-    } else if config.api.enabled
-        && !expect_long
-        && !config.sources.screen
-        && !config.sources.audio
+    } else if config.api.enabled && !expect_long && !config.sources.screen && !config.sources.audio
     {
         info!(
             bind = %config.api.bind,
@@ -430,6 +524,104 @@ async fn main() -> Result<()> {
         "health"
     );
     Ok(())
+}
+
+fn spawn_context_snapshot(
+    collector: Option<Arc<ContextCollector>>,
+    sealer: Option<Arc<ContextSealer>>,
+    store: Arc<SqliteStore>,
+    batch: &CapturedBatch,
+    target_generation: u64,
+    deadline: Duration,
+) {
+    let Some(collector) = collector else {
+        return;
+    };
+    let Some(sealer) = sealer else {
+        return;
+    };
+    let now = chrono::Utc::now();
+    let trigger = match batch.reason {
+        TriggerReason::Interval => TriggerKind::Interval,
+        TriggerReason::FocusChange => TriggerKind::FocusChange,
+        TriggerReason::TitleChange => TriggerKind::TitleChange,
+        TriggerReason::Manual | TriggerReason::SessionOpen => TriggerKind::Manual,
+    };
+    let session = match collector.begin(CaptureRequest {
+        capture_id: CaptureId(batch.capture_id),
+        consumer_session_id: batch.session_id,
+        target_generation,
+        profile: CaptureProfile::Visible,
+        sources: SourceSelection::from_sources([
+            lumen_context::SourceKind::Target,
+            lumen_context::SourceKind::EditorAx,
+            lumen_context::SourceKind::AxVisible,
+            lumen_context::SourceKind::Browser,
+            lumen_context::SourceKind::VisibleTextFusion,
+        ]),
+        trigger: CaptureTrigger {
+            kind: trigger,
+            pressed_at: now,
+            released_at: None,
+        },
+        requested_at: now,
+        target_hint: None,
+        privacy_policy: PrivacyPolicy {
+            capture_screenshots: false,
+            ..PrivacyPolicy::default()
+        },
+    }) {
+        Ok(session) => session,
+        Err(error) => {
+            warn!(error = %error, "Navi context capture start failed");
+            return;
+        }
+    };
+    tokio::spawn(async move {
+        let snapshot = session.snapshot(std::time::Instant::now() + deadline).await;
+        let manifest = match serde_json::to_vec(&snapshot.manifest) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                warn!(error = %error, "Navi context manifest serialization failed");
+                return;
+            }
+        };
+        let aad = format!(
+            "lumen-context:v1:{}:manifest:{}",
+            snapshot.manifest.capture_id, snapshot.manifest.revision
+        );
+        let envelope = match sealer.seal(&manifest, aad.as_bytes()) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                warn!(error = %error, "Navi context manifest encryption failed");
+                return;
+            }
+        };
+        let payload = json!({
+            "capture_id": snapshot.manifest.capture_id,
+            "revision": snapshot.manifest.revision,
+            "schema_version": snapshot.manifest.schema_version,
+            "encryption": "chacha20_poly1305",
+            "envelope": envelope,
+        });
+        let event = SourceEvent::new(
+            SourceKind::Other("context".to_owned()),
+            "context.snapshot.v1",
+            payload,
+        );
+        if let Err(error) = store.append(vec![event]).await {
+            warn!(error = %error, "Navi context manifest persistence failed");
+        }
+    });
+}
+
+fn resolve_helper_path(configured: &str, sibling_name: &str) -> Option<std::path::PathBuf> {
+    if !configured.trim().is_empty() {
+        let path = std::path::PathBuf::from(configured);
+        return path.is_file().then_some(path);
+    }
+    let sibling = std::env::current_exe().ok()?.parent()?.join(sibling_name);
+    sibling.is_file().then_some(sibling)
 }
 
 async fn run_audio_loop(

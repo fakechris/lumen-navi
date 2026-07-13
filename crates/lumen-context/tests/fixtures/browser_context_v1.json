@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "request_id": "1f7d5bf8-5328-4abc-b3c0-ea7d5e3275bd",
+  "capture_id": "3883ccdb-ef77-4db0-9825-0af2f547dc60",
+  "target_generation": 12,
+  "started_tab_id": 41,
+  "completed_tab_id": 41,
+  "started_navigation_id": "nav-2026-07-12-1",
+  "completed_navigation_id": "nav-2026-07-12-1",
+  "started_document_id": "doc-main-1",
+  "completed_document_id": "doc-main-1",
+  "context": {
+    "browser": "chromium",
+    "browser_bundle_id": "com.example.browser",
+    "browser_pid": 731,
+    "profile": "Default",
+    "incognito": false,
+    "window_id": 8,
+    "tab_id": 41,
+    "frame_id": 0,
+    "title": "Context fixture",
+    "url": "https://docs.example.test/editor",
+    "origin": "https://docs.example.test",
+    "domain": "docs.example.test",
+    "navigation_id": "nav-2026-07-12-1",
+    "document_id": "doc-main-1",
+    "page_language": "en",
+    "selection_text": "selected words",
+    "focused_element": {
+      "tag": "textarea",
+      "input_type": null,
+      "role": "textbox",
+      "aria_label": "Message",
+      "name": "message",
+      "id": "composer",
+      "classes": ["editor"],
+      "placeholder": "Write a message",
+      "value": "before selected words after",
+      "selection_start": 7,
+      "selection_end": 21,
+      "contenteditable": false,
+      "disabled": false,
+      "readonly": false,
+      "bounding_rect": {"x": 20.0, "y": 80.0, "width": 600.0, "height": 120.0},
+      "labels": ["Message"],
+      "ancestor_path": ["main", "form"],
+      "sibling_before": "Instructions",
+      "sibling_after": "Send"
+    },
+    "nearby_before": "before ",
+    "nearby_after": " after",
+    "viewport": {
+      "width": 1280.0,
+      "height": 720.0,
+      "scroll_x": 0.0,
+      "scroll_y": 320.0,
+      "device_pixel_ratio": 2.0
+    },
+    "viewport_text_blocks": [
+      {
+        "text": "Visible fixture text",
+        "source_refs": ["dom:main:0"],
+        "global_bounds": {"x": 20.0, "y": 30.0, "width": 300.0, "height": 24.0},
+        "semantic_role": "paragraph",
+        "order": 0,
+        "confidence": 1.0,
+        "duplicate_group_id": null,
+        "conflict_group_id": null
+      }
+    ],
+    "captured_at": "2026-07-12T12:00:00Z",
+    "permission_scope": "origin",
+    "truncated": false
+  },
+  "frame_status": [
+    {
+      "frame_id": 0,
+      "document_id": "doc-main-1",
+      "origin": "https://docs.example.test",
+      "captured": true,
+      "reason": null
+    }
+  ],
+  "captured_at": "2026-07-12T12:00:00Z",
+  "extension_version": "0.1.0"
+}

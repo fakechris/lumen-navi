@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lumen site access</title>
+  <style>
+    body { box-sizing: border-box; width: 300px; margin: 0; padding: 16px; color: #171717; font: 13px/1.45 system-ui, sans-serif; }
+    h1 { margin: 0 0 8px; font-size: 15px; }
+    p { margin: 0 0 12px; overflow-wrap: anywhere; color: #555; }
+    button { width: 100%; border: 0; border-radius: 8px; padding: 9px 12px; color: white; background: #1f6feb; font-weight: 600; cursor: pointer; }
+    button:disabled { color: #777; background: #e5e5e5; cursor: default; }
+    #status { margin-top: 10px; color: #333; }
+  </style>
+  <body>
+    <h1>Browser context access</h1>
+    <p id="site">Checking the current site…</p>
+    <button id="grant" disabled>Allow this site</button>
+    <p id="status" role="status"></p>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

@@ -172,8 +172,8 @@ int lumen_ocr_recognize_boxes_json(const uint8_t *data, int len,
             }
 
             VNRecognizeTextRequest *req = [[VNRecognizeTextRequest alloc] init];
-            req.recognitionLevel = VNRequestTextRecognitionLevelFast;
-            req.usesLanguageCorrection = YES;
+            req.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
+            req.usesLanguageCorrection = NO;
             if (@available(macOS 13.0, *)) {
                 req.automaticallyDetectsLanguage = YES;
             }

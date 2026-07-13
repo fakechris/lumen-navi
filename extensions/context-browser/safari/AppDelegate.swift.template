@@ -1,0 +1,226 @@
+import Cocoa
+import Darwin
+import SafariServices
+
+@main
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let relay = SafariContextRelay()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--probe-extension-state") {
+            SFSafariExtensionManager.getStateOfSafariExtension(
+                withIdentifier: "__EXTENSION_IDENTIFIER__"
+            ) { state, error in
+                if let error {
+                    print("EXTENSION_STATE_ERROR:\(error.localizedDescription)")
+                    exit(3)
+                }
+                print(state?.isEnabled == true ? "EXTENSION_ENABLED" : "EXTENSION_DISABLED")
+                exit(state?.isEnabled == true ? 0 : 2)
+            }
+            return
+        }
+        if CommandLine.arguments.contains("--probe-app-group") {
+            let available = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: "__APP_GROUP__"
+            ) != nil
+            print(available ? "APP_GROUP_OK" : "APP_GROUP_UNAVAILABLE")
+            exit(available ? 0 : 2)
+        }
+        relay.start()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+}
+
+private struct BridgeConfig: Decodable {
+    let owner: String
+    let socket_path: String
+    let token_path: String
+    let allowed_origins: [String]
+    let max_message_bytes: Int
+}
+
+private enum RelayError: Error {
+    case invalidConfiguration
+    case io(String)
+}
+
+private final class SafariContextRelay {
+    private let appGroup = "__APP_GROUP__"
+    private let extensionIdentifier = "__EXTENSION_IDENTIFIER__"
+    private let origin = "__ORIGIN__"
+    private let queue = DispatchQueue(label: "org.lumen.context.safari-relay", qos: .userInitiated)
+
+    func start() {
+        queue.async { [self] in
+            while true {
+                do {
+                    try runConnection()
+                } catch {
+                    Thread.sleep(forTimeInterval: 0.5)
+                }
+            }
+        }
+    }
+
+    private func runConnection() throws {
+        guard let groupRoot = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: appGroup
+        ) else {
+            throw RelayError.invalidConfiguration
+        }
+        let configURL = groupRoot.appendingPathComponent("browser-host.json")
+        let config = try JSONDecoder().decode(BridgeConfig.self, from: Data(contentsOf: configURL))
+        guard config.allowed_origins.contains(origin),
+              config.max_message_bytes > 0,
+              config.max_message_bytes <= 64 * 1024 * 1024 else {
+            throw RelayError.invalidConfiguration
+        }
+        let socketURL = URL(fileURLWithPath: config.socket_path).standardizedFileURL
+        let tokenURL = URL(fileURLWithPath: config.token_path).standardizedFileURL
+        let rootPath = groupRoot.standardizedFileURL.path + "/"
+        guard socketURL.path.hasPrefix(rootPath), tokenURL.path.hasPrefix(rootPath) else {
+            throw RelayError.invalidConfiguration
+        }
+        let token = try String(contentsOf: tokenURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { throw RelayError.invalidConfiguration }
+
+        let descriptor = try connectUnixSocket(path: socketURL.path)
+        defer { Darwin.close(descriptor) }
+        let hello: [String: Any] = [
+            "kind": "hello",
+            "protocol_version": 1,
+            "owner": config.owner,
+            "origin": origin,
+            "token": token
+        ]
+        try writeFrame(JSONSerialization.data(withJSONObject: hello), to: descriptor, limit: config.max_message_bytes)
+        let acknowledgement = try JSONSerialization.jsonObject(
+            with: readFrame(from: descriptor, limit: config.max_message_bytes)
+        ) as? [String: Any]
+        guard acknowledgement?["kind"] as? String == "hello_ack",
+              acknowledgement?["ok"] as? Bool == true else {
+            throw RelayError.invalidConfiguration
+        }
+
+        let resultDirectory = groupRoot.appendingPathComponent("BrowserResults", isDirectory: true)
+        try FileManager.default.createDirectory(at: resultDirectory, withIntermediateDirectories: true)
+        while true {
+            let commandData = try readFrame(from: descriptor, limit: config.max_message_bytes)
+            guard let command = try JSONSerialization.jsonObject(with: commandData) as? [String: Any],
+                  let requestID = command["request_id"] as? String else {
+                continue
+            }
+            let result = dispatchAndAwait(
+                command: command,
+                requestID: requestID,
+                directory: resultDirectory
+            )
+            try writeFrame(result, to: descriptor, limit: config.max_message_bytes)
+        }
+    }
+
+    private func dispatchAndAwait(
+        command: [String: Any],
+        requestID: String,
+        directory: URL
+    ) -> Data {
+        let resultURL = directory.appendingPathComponent("\(requestID).json")
+        try? FileManager.default.removeItem(at: resultURL)
+        SFSafariApplication.dispatchMessage(
+            withName: "capture",
+            toExtensionWithIdentifier: extensionIdentifier,
+            userInfo: ["command": command]
+        ) { _ in }
+
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if let result = try? Data(contentsOf: resultURL) {
+                try? FileManager.default.removeItem(at: resultURL)
+                return result
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        let failure: [String: Any] = [
+            "kind": "capture_result",
+            "request_id": requestID,
+            "ok": false,
+            "error": [
+                "code": "safari_relay_timeout",
+                "message": "Safari extension did not return context before the relay deadline",
+                "retryable": true
+            ]
+        ]
+        return (try? JSONSerialization.data(withJSONObject: failure)) ?? Data("{}".utf8)
+    }
+}
+
+private func connectUnixSocket(path: String) throws -> Int32 {
+    let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+    guard descriptor >= 0 else { throw RelayError.io("socket") }
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    let bytes = Array(path.utf8CString)
+    guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else {
+        Darwin.close(descriptor)
+        throw RelayError.invalidConfiguration
+    }
+    withUnsafeMutableBytes(of: &address.sun_path) { destination in
+        destination.initializeMemory(as: UInt8.self, repeating: 0)
+        bytes.withUnsafeBytes { source in
+            destination.copyBytes(from: source)
+        }
+    }
+    let status = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
+    }
+    guard status == 0 else {
+        Darwin.close(descriptor)
+        throw RelayError.io("connect")
+    }
+    return descriptor
+}
+
+private func readFrame(from descriptor: Int32, limit: Int) throws -> Data {
+    let header = try readExactly(4, from: descriptor)
+    let length = header.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+    guard length > 0, Int(length) <= limit else { throw RelayError.invalidConfiguration }
+    return try readExactly(Int(length), from: descriptor)
+}
+
+private func writeFrame(_ data: Data, to descriptor: Int32, limit: Int) throws {
+    guard !data.isEmpty, data.count <= limit else { throw RelayError.invalidConfiguration }
+    var length = UInt32(data.count).bigEndian
+    try withUnsafeBytes(of: &length) { try writeExactly(Data($0), to: descriptor) }
+    try writeExactly(data, to: descriptor)
+}
+
+private func readExactly(_ count: Int, from descriptor: Int32) throws -> Data {
+    var data = Data(count: count)
+    var offset = 0
+    while offset < count {
+        let amount = data.withUnsafeMutableBytes { buffer in
+            Darwin.read(descriptor, buffer.baseAddress!.advanced(by: offset), count - offset)
+        }
+        guard amount > 0 else { throw RelayError.io("read") }
+        offset += amount
+    }
+    return data
+}
+
+private func writeExactly(_ data: Data, to descriptor: Int32) throws {
+    var offset = 0
+    while offset < data.count {
+        let amount = data.withUnsafeBytes { buffer in
+            Darwin.write(descriptor, buffer.baseAddress!.advanced(by: offset), data.count - offset)
+        }
+        guard amount > 0 else { throw RelayError.io("write") }
+        offset += amount
+    }
+}

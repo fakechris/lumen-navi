@@ -7,5 +7,5 @@ description = "OS capability ports for capture and permissions"
 
 [dependencies]
 async-trait = { workspace = true }
+lumen-context = { workspace = true }
 serde = { workspace = true }
-thiserror = { workspace = true }
