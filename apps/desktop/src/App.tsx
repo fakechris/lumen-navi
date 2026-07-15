@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
 import { Onboarding } from "./Onboarding";
 import type {
+  AsrModelStatus,
   ConfigSummary,
   Health,
   ObserveStatus,
@@ -73,21 +74,24 @@ export default function App() {
   const [statusNote, setStatusNote] = useState<string | null>(null);
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const [summaryText, setSummaryText] = useState<string | null>(null);
+  const [asrModels, setAsrModels] = useState<AsrModelStatus | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [h, p, c, o, ob] = await Promise.all([
+      const [h, p, c, o, ob, models] = await Promise.all([
         api.getHealth(),
         api.getPermissions(),
         api.getConfigSummary(),
         api.observeStatus(),
         api.getOnboarding(),
+        api.checkAsrModelStatus(),
       ]);
       setHealth(h);
       setPerms(p);
       setCfg(c);
       setObserve(o);
       setOnboarding(ob);
+      setAsrModels(models);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -649,6 +653,51 @@ export default function App() {
                   {(cfg?.asr_engine === "sensevoice" ||
                     cfg?.asr_engine === "whisper") && (
                     <>
+                      {asrModels && (
+                        <div className="onboard-status">
+                          <div className="meta">Lumen 共享模型目录</div>
+                          <p
+                            className="meta mono"
+                            style={{ wordBreak: "break-all", marginTop: 4 }}
+                          >
+                            {asrModels.models_root}
+                          </p>
+                          {asrModels.candidates
+                            .filter(
+                              (candidate) =>
+                                candidate.ready && candidate.engine === cfg?.asr_engine,
+                            )
+                            .map((candidate) => (
+                              <div
+                                key={`${candidate.engine}:${candidate.path}`}
+                                className="onboard-candidate"
+                              >
+                                <span className="meta" style={{ wordBreak: "break-all" }}>
+                                  {candidate.label}
+                                </span>
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  disabled={busy}
+                                  onClick={() => {
+                                    setBusy(true);
+                                    void api
+                                      .useExistingAsrModel(candidate.path, candidate.engine)
+                                      .then((status) => {
+                                        setAsrModels(status);
+                                        return api.getConfigSummary();
+                                      })
+                                      .then((config) => setCfg(config))
+                                      .catch((err) => setError(String(err)))
+                                      .finally(() => setBusy(false));
+                                  }}
+                                >
+                                  使用
+                                </button>
+                              </div>
+                            ))}
+                        </div>
+                      )}
                       <label className="field">
                         <span className="meta">本地模型目录（可空=自动）</span>
                         <input
@@ -661,18 +710,51 @@ export default function App() {
                               prev ? { ...prev, asr_model_dir } : prev,
                             );
                           }}
-                          onBlur={() => {
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy || !(cfg?.asr_model_dir ?? "").trim()}
+                        onClick={() => {
+                          setBusy(true);
+                          void api
+                            .useExistingAsrModel(
+                              (cfg?.asr_model_dir ?? "").trim(),
+                              cfg?.asr_engine,
+                            )
+                            .then((status) => {
+                              setAsrModels(status);
+                              return api.getConfigSummary();
+                            })
+                            .then((config) => setCfg(config))
+                            .catch((err) => setError(String(err)))
+                            .finally(() => setBusy(false));
+                        }}
+                      >
+                        验证并使用此目录
+                      </button>
+                      {!!cfg?.asr_model_dir && (
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={busy}
+                          onClick={() => {
                             setBusy(true);
                             void api
-                              .updateSourcesConfig({
-                                asr_model_dir: cfg?.asr_model_dir ?? "",
+                              .updateSourcesConfig({ asr_model_dir: "" })
+                              .then((config) => {
+                                setCfg(config);
+                                return api.checkAsrModelStatus();
                               })
-                              .then((c) => setCfg(c))
+                              .then((status) => setAsrModels(status))
                               .catch((err) => setError(String(err)))
                               .finally(() => setBusy(false));
                           }}
-                        />
-                      </label>
+                        >
+                          恢复自动发现
+                        </button>
+                      )}
                       {cfg?.asr_engine === "sensevoice" && (
                         <div className="row">
                           <button
@@ -683,6 +765,7 @@ export default function App() {
                               void api
                                 .checkAsrModelStatus()
                                 .then((s) => {
+                                  setAsrModels(s);
                                   setStatusNote(
                                     s.sensevoice_ready
                                       ? `SenseVoice 就绪 · ${s.sensevoice_dir}`
@@ -715,6 +798,7 @@ export default function App() {
                               void api
                                 .startAsrModelDownload()
                                 .then((s) => {
+                                  setAsrModels(s);
                                   setStatusNote(
                                     s.sensevoice_ready
                                       ? `SenseVoice 已安装 · ${s.sensevoice_dir}`

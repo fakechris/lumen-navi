@@ -409,4 +409,17 @@ mod tests {
         assert_eq!(c.asr.engine, "sensevoice");
         assert!(c.asr.fallback_speech);
     }
+
+    #[test]
+    fn asr_model_selection_survives_toml_roundtrip() {
+        let mut config = Config::default();
+        config.asr.engine = "whisper".into();
+        config.asr.model_dir = "/models/custom-whisper".into();
+
+        let encoded = toml::to_string_pretty(&config).unwrap();
+        let decoded: Config = toml::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded.asr.engine, "whisper");
+        assert_eq!(decoded.asr.model_dir, "/models/custom-whisper");
+    }
 }

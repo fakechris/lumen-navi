@@ -288,10 +288,6 @@ pub async fn start_asr_model_download(app: AppHandle) -> Result<AsrModelStatus, 
             let mut cfg = state.load_config().map_err(|e| e.to_string())?;
             cfg.asr.engine = "sensevoice".into();
             cfg.asr.model_dir = dir.display().to_string();
-            // Persist resolved shared root if user had none (makes multi-app sharing explicit).
-            if cfg.asr.models_root.trim().is_empty() {
-                cfg.asr.models_root = root.display().to_string();
-            }
             cfg.asr.enabled = true;
             state.save_config(&cfg).map_err(|e| e.to_string())?;
             tracing::info!(

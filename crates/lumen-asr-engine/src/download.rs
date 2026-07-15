@@ -3,9 +3,12 @@
 //! Uses system `curl` + `tar` (macOS-friendly, same approach as lumen-asr).
 
 use crate::paths::{lumen_models_dir, sensevoice_ready};
+use crate::ModelInstallLock;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 /// Official int8 SenseVoice package (zh/en/ja/ko/yue).
 pub const SENSEVOICE_ARCHIVE_URL: &str =
@@ -31,8 +34,6 @@ pub fn download_sensevoice_package(
     mut on_progress: impl FnMut(DownloadProgress),
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(models_root).map_err(|e| e.to_string())?;
-    let archive_path = models_root.join(SENSEVOICE_ARCHIVE_NAME);
-    let extract_tmp = models_root.join("sensevoice-extract-tmp");
     let final_dir = models_root.join("sensevoice");
 
     if sensevoice_ready(&final_dir) {
@@ -45,9 +46,45 @@ pub fn download_sensevoice_package(
         return Ok(final_dir);
     }
 
+    let mut announced_wait = false;
+    let _install_lock = loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("download cancelled".into());
+        }
+        match ModelInstallLock::try_acquire(models_root).map_err(|error| error.to_string())? {
+            Some(lock) => break lock,
+            None => {
+                if !announced_wait {
+                    on_progress(DownloadProgress {
+                        phase: "waiting".into(),
+                        message: "Another Lumen app is installing SenseVoice…".into(),
+                        bytes: 0,
+                        total: None,
+                    });
+                    announced_wait = true;
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
+        }
+    };
+    if sensevoice_ready(&final_dir) {
+        on_progress(DownloadProgress {
+            phase: "done".into(),
+            message: "SenseVoice installed by another Lumen app".into(),
+            bytes: 0,
+            total: None,
+        });
+        return Ok(final_dir);
+    }
+
     if cancel.load(Ordering::SeqCst) {
         return Err("download cancelled".into());
     }
+
+    let process_id = std::process::id();
+    let archive_path = models_root.join(format!(".{SENSEVOICE_ARCHIVE_NAME}.{process_id}.part"));
+    let extract_tmp = models_root.join(format!(".sensevoice-extract-{process_id}"));
+    let _scratch = DownloadScratch::new(archive_path.clone(), extract_tmp.clone());
 
     on_progress(DownloadProgress {
         phase: "downloading".into(),
@@ -59,15 +96,27 @@ pub fn download_sensevoice_package(
     let archive_str = archive_path
         .to_str()
         .ok_or_else(|| "bad archive path".to_string())?;
-    let status = Command::new("curl")
-        .args(["-fL", "--progress-bar", "-o", archive_str, SENSEVOICE_ARCHIVE_URL])
-        .status()
+    let mut child = Command::new("curl")
+        .args([
+            "-fL",
+            "--progress-bar",
+            "-o",
+            archive_str,
+            SENSEVOICE_ARCHIVE_URL,
+        ])
+        .spawn()
         .map_err(|e| format!("curl failed to start: {e}"))?;
-
-    if cancel.load(Ordering::SeqCst) {
-        let _ = std::fs::remove_file(&archive_path);
-        return Err("download cancelled".into());
-    }
+    let status = loop {
+        if cancel.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("download cancelled".into());
+        }
+        match child.try_wait().map_err(|error| error.to_string())? {
+            Some(status) => break status,
+            None => thread::sleep(Duration::from_millis(100)),
+        }
+    };
     if !status.success() {
         return Err(format!(
             "download failed (curl exit {:?}). Check network or place model under {}",
@@ -86,7 +135,6 @@ pub fn download_sensevoice_package(
         total: Some(bytes),
     });
 
-    let _ = std::fs::remove_dir_all(&extract_tmp);
     std::fs::create_dir_all(&extract_tmp).map_err(|e| e.to_string())?;
 
     let extract_str = extract_tmp
@@ -107,14 +155,8 @@ pub fn download_sensevoice_package(
     if final_dir.exists() {
         let _ = std::fs::remove_dir_all(&final_dir);
     }
-    std::fs::rename(&found, &final_dir).or_else(|_| {
-        copy_dir_recursive(&found, &final_dir)?;
-        let _ = std::fs::remove_dir_all(&found);
-        Ok::<(), String>(())
-    })?;
-
-    let _ = std::fs::remove_dir_all(&extract_tmp);
-    let _ = std::fs::remove_file(&archive_path);
+    std::fs::rename(&found, &final_dir)
+        .map_err(|error| format!("publish model atomically: {error}"))?;
 
     if !sensevoice_ready(&final_dir) {
         return Err("model installed but validation failed".into());
@@ -127,6 +169,29 @@ pub fn download_sensevoice_package(
         total: Some(bytes),
     });
     Ok(final_dir)
+}
+
+struct DownloadScratch {
+    archive: PathBuf,
+    extract_dir: PathBuf,
+}
+
+impl DownloadScratch {
+    fn new(archive: PathBuf, extract_dir: PathBuf) -> Self {
+        let _ = std::fs::remove_file(&archive);
+        let _ = std::fs::remove_dir_all(&extract_dir);
+        Self {
+            archive,
+            extract_dir,
+        }
+    }
+}
+
+impl Drop for DownloadScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.archive);
+        let _ = std::fs::remove_dir_all(&self.extract_dir);
+    }
 }
 
 /// Default install root: shared `…/Lumen/models` (cluster-wide).
@@ -152,20 +217,6 @@ fn find_sensevoice_dir(root: &Path) -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
-    for e in std::fs::read_dir(src).map_err(|e| e.to_string())? {
-        let e = e.map_err(|e| e.to_string())?;
-        let to = dst.join(e.file_name());
-        if e.path().is_dir() {
-            copy_dir_recursive(&e.path(), &to)?;
-        } else {
-            std::fs::copy(e.path(), to).map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@
 //! | `openai_audio` / `qwen` | OpenAI-compatible HTTP (`/audio/transcriptions`) |
 
 mod download;
+mod install_lock;
 mod openai_http;
 mod paths;
 mod sensevoice;
@@ -21,12 +22,14 @@ pub use download::{
     default_models_root, download_sensevoice_package, DownloadProgress, SENSEVOICE_ARCHIVE_NAME,
     SENSEVOICE_ARCHIVE_URL,
 };
+pub use install_lock::ModelInstallLock;
 pub use openai_http::{OpenAiAudioAsr, OpenAiAudioConfig};
 pub use paths::{
     app_models_dir, default_sensevoice_dir, default_sensevoice_dir_with_root, default_whisper_dir,
-    default_whisper_dir_with_root, lumen_models_dir, lumen_models_dir_with_override,
-    scan_model_candidates, scan_model_candidates_with_root, sensevoice_ready, shared_sensevoice_dir,
-    shared_whisper_dir, whisper_ready, ModelCandidate, ENV_LUMEN_MODELS_DIR,
+    default_whisper_dir_with_root, legacy_model_roots, lumen_models_dir,
+    lumen_models_dir_with_override, scan_model_candidates, scan_model_candidates_with_root,
+    sensevoice_ready, shared_sensevoice_dir, shared_whisper_dir, user_home_dir, whisper_ready,
+    ModelCandidate, ENV_LUMEN_MODELS_DIR,
 };
 pub use sensevoice::SenseVoiceSherpaAsr;
 pub use wav::{
@@ -153,11 +156,8 @@ pub fn engine_status_with_root(
 ) -> EngineStatus {
     match kind {
         EngineKind::SenseVoice => {
-            let dir = if let Some(d) = model_dir.filter(|s| !s.is_empty()) {
-                PathBuf::from(d)
-            } else {
-                default_sensevoice_dir_with_root(models_root)
-            };
+            let configured = model_dir.map(PathBuf::from).unwrap_or_default();
+            let dir = resolve_sensevoice_model_dir(&configured, models_root);
             let ready = sensevoice_ready(&dir);
             EngineStatus {
                 kind: kind.as_str().into(),
@@ -174,11 +174,8 @@ pub fn engine_status_with_root(
             }
         }
         EngineKind::Whisper => {
-            let dir = if let Some(d) = model_dir.filter(|s| !s.is_empty()) {
-                PathBuf::from(d)
-            } else {
-                default_whisper_dir_with_root(models_root)
-            };
+            let configured = model_dir.map(PathBuf::from).unwrap_or_default();
+            let dir = resolve_whisper_model_dir(&configured, models_root);
             let ready = whisper_ready(&dir);
             EngineStatus {
                 kind: kind.as_str().into(),
@@ -213,11 +210,7 @@ pub fn build_engine(cfg: &EngineBuildConfig) -> Result<Option<Arc<dyn AsrEngine>
     match cfg.kind {
         EngineKind::Speech => Ok(None),
         EngineKind::SenseVoice => {
-            let dir = if cfg.model_dir.as_os_str().is_empty() {
-                default_sensevoice_dir_with_root(root)
-            } else {
-                cfg.model_dir.clone()
-            };
+            let dir = resolve_sensevoice_model_dir(&cfg.model_dir, root);
             let eng = SenseVoiceSherpaAsr::new(dir.clone())
                 .with_language(sensevoice_language_from_locale(&cfg.locale))
                 .with_max_audio_bytes(cfg.max_audio_bytes);
@@ -231,11 +224,7 @@ pub fn build_engine(cfg: &EngineBuildConfig) -> Result<Option<Arc<dyn AsrEngine>
             Ok(Some(Arc::new(eng)))
         }
         EngineKind::Whisper => {
-            let dir = if cfg.model_dir.as_os_str().is_empty() {
-                default_whisper_dir_with_root(root)
-            } else {
-                cfg.model_dir.clone()
-            };
+            let dir = resolve_whisper_model_dir(&cfg.model_dir, root);
             let lang = whisper_language_from_locale(&cfg.locale);
             let eng = WhisperAsr::new(dir.clone())
                 .with_language(lang)
@@ -280,6 +269,22 @@ pub fn build_engine(cfg: &EngineBuildConfig) -> Result<Option<Arc<dyn AsrEngine>
             tracing::info!(base = %base, model = %model, "ASR engine: openai_audio");
             Ok(Some(Arc::new(eng)))
         }
+    }
+}
+
+fn resolve_sensevoice_model_dir(configured: &Path, models_root: Option<&Path>) -> PathBuf {
+    if !configured.as_os_str().is_empty() && sensevoice_ready(configured) {
+        configured.to_path_buf()
+    } else {
+        default_sensevoice_dir_with_root(models_root)
+    }
+}
+
+fn resolve_whisper_model_dir(configured: &Path, models_root: Option<&Path>) -> PathBuf {
+    if !configured.as_os_str().is_empty() && whisper_ready(configured) {
+        configured.to_path_buf()
+    } else {
+        default_whisper_dir_with_root(models_root)
     }
 }
 
@@ -328,9 +333,15 @@ mod tests {
 
     #[test]
     fn parse_engines() {
-        assert_eq!(EngineKind::parse("sensevoice"), Some(EngineKind::SenseVoice));
+        assert_eq!(
+            EngineKind::parse("sensevoice"),
+            Some(EngineKind::SenseVoice)
+        );
         assert_eq!(EngineKind::parse("qwen"), Some(EngineKind::OpenAiAudio));
-        assert_eq!(EngineKind::parse("qwen_asr_0.8b"), Some(EngineKind::OpenAiAudio));
+        assert_eq!(
+            EngineKind::parse("qwen_asr_0.8b"),
+            Some(EngineKind::OpenAiAudio)
+        );
         assert_eq!(EngineKind::parse("speech"), Some(EngineKind::Speech));
         assert_eq!(EngineKind::parse("whisper"), Some(EngineKind::Whisper));
         assert_eq!(EngineKind::parse("nope"), None);
@@ -349,5 +360,34 @@ mod tests {
         cfg.kind = EngineKind::OpenAiAudio;
         cfg.http_base_url = String::new();
         assert!(build_engine(&cfg).is_err());
+    }
+
+    #[test]
+    fn invalid_selected_model_falls_back_to_ready_shared_model() {
+        let root = std::env::temp_dir().join(format!(
+            "lumen-navi-invalid-selected-model-{}",
+            std::process::id()
+        ));
+        let shared = root.join("sensevoice");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("model.int8.onnx"), b"model").unwrap();
+        std::fs::write(shared.join("tokens.txt"), b"tokens").unwrap();
+
+        let selected = root.join("deleted-custom-model");
+        assert_eq!(resolve_sensevoice_model_dir(&selected, Some(&root)), shared);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shared_model_contract_matches_cluster_v1() {
+        let bytes = include_bytes!("../../../docs/SHARED_MODELS_CONTRACT.md");
+        assert_eq!(fnv1a64(bytes), 0xc877_89f4_de20_5e71);
+    }
+
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
     }
 }
