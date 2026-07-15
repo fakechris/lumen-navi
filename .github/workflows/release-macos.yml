@@ -66,9 +66,7 @@ jobs:
           scripts/macos/prepare-daemon-binary.sh "${{ matrix.target }}"
 
       - name: Build ad-hoc signed DMG
-        run: |
-          chmod +x scripts/macos/*.sh
-          npm run tauri -- build --target "${{ matrix.target }}" --bundles dmg
+        run: npm run tauri -- build --target "${{ matrix.target }}" --bundles dmg
         working-directory: apps/desktop
 
       - name: Verify and name release asset
