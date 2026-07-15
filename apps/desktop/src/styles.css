@@ -304,3 +304,29 @@ mark {
   border-radius: 3px;
   padding: 0 2px;
 }
+
+.timeline-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.timeline-body {
+  min-width: 0;
+  flex: 1;
+}
+.thumb {
+  width: 72px;
+  height: 54px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--sidebar);
+  flex-shrink: 0;
+}
+.thumb.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 12px;
+}

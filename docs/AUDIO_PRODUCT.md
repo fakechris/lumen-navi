@@ -114,6 +114,7 @@ drop_silent_chunks = false
 max_audio_bytes = 8388608
 device = ""
 enqueue_transcribe = true
+system_audio = false         # reserved (ScreenCaptureKit); mic-only for now
 
 [asr]
 enabled = true
@@ -157,9 +158,14 @@ curl -s 'http://127.0.0.1:7420/v1/ocr/search?q=会议&limit=10' | jq .
 | Stuck jobs | Reclaim `running` older than `stale_running_ms` |
 | Privacy pause | No new audio while `privacy.paused` |
 
+## System audio (P1 reserved)
+
+`audio.system_audio = true` is accepted in config / desktop settings but **not captured yet**.  
+Planned path: ScreenCaptureKit shareable content (macOS 13+), independent of mic stream.
+
 ## Non-goals (this ship)
 
-- System audio / BlackHole / ScreenCaptureKit audio  
+- BlackHole / third-party loopback drivers  
 - Dictation hotkey / inject (Lumen ASR)  
 - Cloud ASR  
 - Speaker diarization  

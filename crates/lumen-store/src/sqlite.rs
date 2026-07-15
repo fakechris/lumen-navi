@@ -24,6 +24,39 @@ pub struct OcrSearchHit {
     pub text_preview: String,
 }
 
+/// Timeline list filters (product UI / control API).
+#[derive(Debug, Clone, Default)]
+pub struct TimelineQuery {
+    pub limit: usize,
+    /// Substring match on kind (e.g. `screenshot`, `audio_chunk`). Empty = all.
+    pub kind_contains: String,
+    /// Case-insensitive match against payload app_name / text preview.
+    pub app_contains: String,
+    /// Only events at or after this timestamp (RFC3339).
+    pub since: Option<DateTime<Utc>>,
+    /// Only events at or before this timestamp.
+    pub until: Option<DateTime<Utc>>,
+}
+
+/// One row for timeline UI (enriched preview, no full blobs).
+#[derive(Debug, Clone)]
+pub struct TimelineItem {
+    pub id: Uuid,
+    pub source: String,
+    pub kind: String,
+    pub ts: DateTime<Utc>,
+    pub session_id: Option<Uuid>,
+    pub app_name: Option<String>,
+    pub window_title: Option<String>,
+    /// From ocr.v1 or transcript.v1 when present.
+    pub text_preview: Option<String>,
+    pub text_kind: Option<String>,
+    pub media_type: Option<String>,
+    /// Relative blob path under data_dir (for thumbnail fetch).
+    pub artifact_path: Option<String>,
+    pub artifact_bytes: Option<u64>,
+}
+
 /// On-disk store: `$data_dir/meta/navi.db` + `$data_dir/blobs/...`.
 pub struct SqliteStore {
     data_dir: PathBuf,
@@ -311,8 +344,8 @@ impl SqliteStore {
             id
         };
 
-        // Index OCR + ASR transcripts into the same FTS surface.
-        if kind == "ocr.v1" || kind == "transcript.v1" {
+        // Index OCR + ASR + rule summaries into the same FTS surface.
+        if kind == "ocr.v1" || kind == "transcript.v1" || kind == "summary.v1" {
             upsert_ocr_doc_tx(&tx, event_id, &body)?;
         }
         tx.commit().map_err(StoreError::db)?;
@@ -451,7 +484,7 @@ impl SqliteStore {
             let mut stmt = conn
                 .prepare(
                     r#"SELECT event_id, body FROM derived
-                       WHERE kind IN ('ocr.v1', 'transcript.v1')"#,
+                       WHERE kind IN ('ocr.v1', 'transcript.v1', 'summary.v1')"#,
                 )
                 .map_err(StoreError::db)?;
             let rows = stmt
@@ -537,6 +570,233 @@ impl SqliteStore {
             out.push((parse_uuid(id)?, kind, body));
         }
         Ok(out)
+    }
+
+    /// Enriched timeline for product UI (newest first).
+    pub fn list_timeline(&self, q: TimelineQuery) -> Result<Vec<TimelineItem>, StoreError> {
+        let limit = q.limit.clamp(1, 500);
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut sql = String::from(
+            r#"SELECT e.id, e.source, e.kind, e.ts, e.session_id, e.payload,
+                      a.media_type, a.path, a.bytes,
+                      d.kind AS dkind, d.body AS dbody
+               FROM events e
+               LEFT JOIN artifacts a ON a.event_id = e.id AND a.ordinal = 0
+               LEFT JOIN derived d ON d.event_id = e.id
+                 AND d.kind IN ('ocr.v1', 'transcript.v1', 'summary.v1')
+               WHERE 1=1"#,
+        );
+        let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(since) = q.since {
+            sql.push_str(" AND e.ts >= ?");
+            binds.push(Box::new(since.to_rfc3339()));
+        }
+        if let Some(until) = q.until {
+            sql.push_str(" AND e.ts <= ?");
+            binds.push(Box::new(until.to_rfc3339()));
+        }
+        if !q.kind_contains.trim().is_empty() {
+            sql.push_str(" AND e.kind LIKE ?");
+            binds.push(Box::new(format!("%{}%", q.kind_contains.trim())));
+        }
+        sql.push_str(" ORDER BY e.ts DESC, e.rowid DESC LIMIT ?");
+        binds.push(Box::new(limit as i64));
+
+        // Prefer ocr/transcript over picking arbitrary derived when multiple — query may return
+        // multiple rows per event; collapse in Rust.
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            binds.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql).map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map(params_ref.as_slice(), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                ))
+            })
+            .map_err(StoreError::db)?;
+
+        use std::collections::HashMap;
+        let mut by_id: HashMap<String, TimelineItem> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+
+        for r in rows {
+            let (
+                id_s,
+                source_json,
+                kind,
+                ts_s,
+                session_s,
+                payload_s,
+                media,
+                path,
+                bytes,
+                dkind,
+                dbody,
+            ) = r.map_err(StoreError::db)?;
+            if !by_id.contains_key(&id_s) {
+                order.push(id_s.clone());
+                let source: String = serde_json::from_str(&source_json)
+                    .map(|v: serde_json::Value| match v {
+                        serde_json::Value::String(s) => s,
+                        other => other.to_string().trim_matches('"').to_string(),
+                    })
+                    .unwrap_or(source_json);
+                let payload: serde_json::Value =
+                    serde_json::from_str(&payload_s).unwrap_or(serde_json::json!({}));
+                let app_name = payload
+                    .get("app_name")
+                    .or_else(|| payload.get("app"))
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
+                let window_title = payload
+                    .get("window_title")
+                    .or_else(|| payload.get("title"))
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
+                by_id.insert(
+                    id_s.clone(),
+                    TimelineItem {
+                        id: parse_uuid(&id_s)?,
+                        source,
+                        kind,
+                        ts: parse_ts(&ts_s)?,
+                        session_id: session_s.and_then(|s| Uuid::parse_str(&s).ok()),
+                        app_name,
+                        window_title,
+                        text_preview: None,
+                        text_kind: None,
+                        media_type: media,
+                        artifact_path: path,
+                        artifact_bytes: bytes.map(|b| b as u64),
+                    },
+                );
+            }
+            if let (Some(dk), Some(body)) = (dkind, dbody) {
+                if let Some(item) = by_id.get_mut(&id_s) {
+                    // Prefer ocr/transcript; summary only if nothing else.
+                    let prefer = matches!(dk.as_str(), "ocr.v1" | "transcript.v1")
+                        || item.text_preview.is_none();
+                    if prefer {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                            if let Some(t) = v.get("text").and_then(|x| x.as_str()) {
+                                let preview = preview_text(t, 280);
+                                if !preview.is_empty() {
+                                    item.text_preview = Some(preview);
+                                    item.text_kind = Some(dk);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let app_filter = q.app_contains.trim().to_lowercase();
+        let mut out: Vec<TimelineItem> = order
+            .into_iter()
+            .filter_map(|id| by_id.remove(&id))
+            .filter(|item| {
+                if app_filter.is_empty() {
+                    return true;
+                }
+                let app = item.app_name.as_deref().unwrap_or("").to_lowercase();
+                let title = item.window_title.as_deref().unwrap_or("").to_lowercase();
+                let text = item.text_preview.as_deref().unwrap_or("").to_lowercase();
+                app.contains(&app_filter) || title.contains(&app_filter) || text.contains(&app_filter)
+            })
+            .collect();
+        // Already newest-first from SQL; re-sort after filter keep order
+        Ok(out.drain(..).take(limit).collect())
+    }
+
+    /// Absolute path for a relative artifact path under data_dir.
+    pub fn resolve_artifact_path(&self, relative: &str) -> std::path::PathBuf {
+        self.data_dir.join(relative)
+    }
+
+    /// Build a simple day summary from stored events (rule-based, no LLM).
+    pub fn build_day_summary_body(&self, day: &str) -> Result<String, StoreError> {
+        // day = YYYY-MM-DD
+        let since = format!("{day}T00:00:00+00:00");
+        let until = format!("{day}T23:59:59.999999999+00:00");
+        let since_dt = DateTime::parse_from_rfc3339(&since)
+            .map(|d| d.with_timezone(&Utc))
+            .map_err(|e| StoreError::Other(format!("day: {e}")))?;
+        let until_dt = DateTime::parse_from_rfc3339(&until)
+            .map(|d| d.with_timezone(&Utc))
+            .map_err(|e| StoreError::Other(format!("day: {e}")))?;
+        let items = self.list_timeline(TimelineQuery {
+            limit: 500,
+            since: Some(since_dt),
+            until: Some(until_dt),
+            ..Default::default()
+        })?;
+        let mut shots = 0usize;
+        let mut audio = 0usize;
+        let mut apps: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        let mut samples: Vec<String> = Vec::new();
+        for it in &items {
+            if it.kind.contains("screenshot") {
+                shots += 1;
+            }
+            if it.kind.contains("audio") {
+                audio += 1;
+            }
+            if let Some(app) = &it.app_name {
+                *apps.entry(app.clone()).or_default() += 1;
+            }
+            if let Some(t) = &it.text_preview {
+                if samples.len() < 8 && t.chars().count() > 8 {
+                    samples.push(t.clone());
+                }
+            }
+        }
+        let top_apps: Vec<String> = {
+            let mut v: Vec<_> = apps.into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            v.into_iter()
+                .take(8)
+                .map(|(k, n)| format!("{k} ({n})"))
+                .collect()
+        };
+        let text = format!(
+            "Day {day}\nEvents: {}\nScreenshots: {shots}\nAudio chunks: {audio}\nTop apps: {}\n\nText samples:\n{}",
+            items.len(),
+            if top_apps.is_empty() {
+                "—".into()
+            } else {
+                top_apps.join(", ")
+            },
+            if samples.is_empty() {
+                "—".into()
+            } else {
+                samples
+                    .into_iter()
+                    .map(|s| format!("- {s}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        );
+        Ok(serde_json::json!({
+            "payload_version": 1,
+            "kind": "day",
+            "day": day,
+            "text": text,
+            "event_count": items.len(),
+            "screenshots": shots,
+            "audio_chunks": audio,
+        })
+        .to_string())
     }
 
     /// Load first artifact bytes for an event (relative path under data_dir).
@@ -1326,6 +1586,49 @@ mod tests {
         let store = SqliteStore::open(dir.path()).unwrap();
         assert!(store.search_ocr("   ", 10).unwrap().is_empty());
         assert!(store.search_ocr("!!!", 10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_timeline_includes_text_and_artifact() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let mut event = SourceEvent::new(
+            SourceKind::Screen,
+            event_kind::SCREENSHOT_V1,
+            json!({"app_name": "Safari", "window_title": "Example"}),
+        );
+        let art = store.blobs().put_bytes("image/jpeg", b"fake-jpeg").unwrap();
+        event.artifacts.push(art);
+        let eid = event.id;
+        store.append(vec![event]).await.unwrap();
+        store
+            .insert_derived(
+                eid,
+                "ocr.v1",
+                r#"{"text":"hello timeline preview text","confidence":0.5}"#,
+            )
+            .unwrap();
+        let items = store
+            .list_timeline(TimelineQuery {
+                limit: 10,
+                app_contains: "Safari".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, eid);
+        assert_eq!(items[0].app_name.as_deref(), Some("Safari"));
+        assert!(items[0]
+            .text_preview
+            .as_deref()
+            .unwrap_or("")
+            .contains("timeline"));
+        assert_eq!(items[0].media_type.as_deref(), Some("image/jpeg"));
+        assert!(items[0].artifact_path.is_some());
+
+        let body = store.build_day_summary_body(&Utc::now().format("%Y-%m-%d").to_string());
+        assert!(body.is_ok());
+        assert!(body.unwrap().contains("Screenshots"));
     }
 
     #[test]

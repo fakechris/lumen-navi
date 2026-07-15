@@ -4,13 +4,13 @@ import { api } from "./api";
 import { Onboarding } from "./Onboarding";
 import type {
   ConfigSummary,
-  EventSummary,
   Health,
   ObserveStatus,
   OnboardingState,
   Permissions,
   SearchHit,
   TabId,
+  TimelineItem,
 } from "./types";
 
 const NAV: { id: TabId; label: string; title: string; blurb: string }[] = [
@@ -29,14 +29,14 @@ const NAV: { id: TabId; label: string; title: string; blurb: string }[] = [
   {
     id: "activity",
     label: "活动",
-    title: "最近事件",
-    blurb: "截图 / 音频 chunk / daemon 事件时间线",
+    title: "时间线",
+    blurb: "缩略图 · OCR/转写预览 · 按类型/应用过滤",
   },
   {
     id: "settings",
     label: "设置",
     title: "设置",
-    blurb: "隐私暂停 · 数据目录 · 引擎开关（只读摘要）",
+    blurb: "源开关 · 隐私 · 日摘要 · 数据目录",
   },
 ];
 
@@ -62,13 +62,17 @@ export default function App() {
   const [perms, setPerms] = useState<Permissions | null>(null);
   const [cfg, setCfg] = useState<ConfigSummary | null>(null);
   const [observe, setObserve] = useState<ObserveStatus | null>(null);
-  const [events, setEvents] = useState<EventSummary[]>([]);
+  const [timeline, setTimeline] = useState<TimelineItem[]>([]);
+  const [thumbs, setThumbs] = useState<Record<string, string>>({});
+  const [kindFilter, setKindFilter] = useState("");
+  const [appFilter, setAppFilter] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [statusNote, setStatusNote] = useState<string | null>(null);
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
+  const [summaryText, setSummaryText] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -96,14 +100,39 @@ export default function App() {
     return () => clearInterval(t);
   }, [refresh]);
 
+  const loadTimeline = useCallback(async () => {
+    try {
+      const items = await api.listTimeline({
+        limit: 60,
+        kindContains: kindFilter || undefined,
+        appContains: appFilter || undefined,
+      });
+      setTimeline(items);
+      setError(null);
+      // Lazy-load a few image thumbs
+      const need = items.filter((i) => i.has_image).slice(0, 12);
+      const next: Record<string, string> = {};
+      await Promise.all(
+        need.map(async (i) => {
+          try {
+            const url = await api.getEventImageDataUrl(i.id);
+            if (url) next[i.id] = url;
+          } catch {
+            /* ignore */
+          }
+        }),
+      );
+      setThumbs((prev) => ({ ...prev, ...next }));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [kindFilter, appFilter]);
+
   useEffect(() => {
     if (tab === "activity") {
-      void api
-        .listEvents(80)
-        .then(setEvents)
-        .catch((e) => setError(String(e)));
+      void loadTimeline();
     }
-  }, [tab]);
+  }, [tab, loadTimeline]);
 
   const nav = NAV.find((n) => n.id === tab)!;
 
@@ -344,19 +373,96 @@ export default function App() {
           )}
 
           {tab === "activity" && (
-            <div className="list">
-              {events.length === 0 && <div className="meta">暂无事件。启动 Observe 后会持续写入。</div>}
-              {events.map((e) => (
-                <div className="list-item" key={e.id}>
-                  <div className="title">
-                    {e.kind} <span className="meta">· {e.source}</span>
-                  </div>
-                  <div className="meta">
-                    <span>{fmtTime(e.ts)}</span>
-                    <span className="mono">{e.id.slice(0, 8)}</span>
-                  </div>
+            <div className="stack">
+              <div className="row">
+                <select
+                  value={kindFilter}
+                  onChange={(e) => setKindFilter(e.target.value)}
+                  style={{ height: 34, borderRadius: 9, border: "1px solid var(--border)", background: "var(--card)", color: "var(--text)", padding: "0 8px" }}
+                >
+                  <option value="">全部类型</option>
+                  <option value="screenshot">screenshot</option>
+                  <option value="audio_chunk">audio_chunk</option>
+                  <option value="summary">summary</option>
+                  <option value="daemon">daemon</option>
+                </select>
+                <input
+                  type="text"
+                  placeholder="过滤应用 / 标题 / 文本…"
+                  value={appFilter}
+                  onChange={(e) => setAppFilter(e.target.value)}
+                />
+                <button className="btn" disabled={busy} onClick={() => void loadTimeline()}>
+                  刷新
+                </button>
+                <button
+                  className="btn primary"
+                  disabled={busy}
+                  onClick={() => {
+                    setBusy(true);
+                    void api
+                      .generateDaySummary()
+                      .then((body) => {
+                        try {
+                          const v = JSON.parse(body) as { text?: string };
+                          setSummaryText(v.text ?? body);
+                        } catch {
+                          setSummaryText(body);
+                        }
+                        return loadTimeline();
+                      })
+                      .catch((e) => setError(String(e)))
+                      .finally(() => setBusy(false));
+                  }}
+                >
+                  生成今日摘要
+                </button>
+              </div>
+              {summaryText && (
+                <div className="card">
+                  <h3>Day summary</h3>
+                  <pre className="meta mt" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+                    {summaryText}
+                  </pre>
                 </div>
-              ))}
+              )}
+              <div className="list">
+                {timeline.length === 0 && (
+                  <div className="meta">暂无事件。启动 Observe 后会持续写入。</div>
+                )}
+                {timeline.map((e) => (
+                  <div className="list-item timeline-row" key={e.id}>
+                    {e.has_image && thumbs[e.id] ? (
+                      <img className="thumb" src={thumbs[e.id]} alt="" />
+                    ) : e.has_image ? (
+                      <div className="thumb placeholder">img</div>
+                    ) : e.kind.includes("audio") ? (
+                      <div className="thumb placeholder">♪</div>
+                    ) : (
+                      <div className="thumb placeholder">·</div>
+                    )}
+                    <div className="timeline-body">
+                      <div className="title">
+                        {e.app_name || e.kind}
+                        <span className="meta">
+                          {" "}
+                          · {e.kind}
+                          {e.window_title ? ` · ${e.window_title}` : ""}
+                        </span>
+                      </div>
+                      {e.text_preview && (
+                        <div className="snippet">{e.text_preview}</div>
+                      )}
+                      <div className="meta">
+                        <span>{fmtTime(e.ts)}</span>
+                        <span className="mono">{e.id.slice(0, 8)}</span>
+                        {e.text_kind && <span>{e.text_kind}</span>}
+                        {e.artifact_bytes != null && <span>{Math.round(e.artifact_bytes / 1024)} KB</span>}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
@@ -374,17 +480,68 @@ export default function App() {
               </div>
               <div className="card">
                 <h3>Sources / engines</h3>
-                <div className="meta mt">
-                  screen={String(cfg?.screen)} · audio={String(cfg?.audio)} · ocr=
-                  {String(cfg?.ocr)} · asr={String(cfg?.asr)}
+                <div className="stack mt">
+                  {(
+                    [
+                      ["screen", "屏幕截图", cfg?.screen],
+                      ["audio", "麦克风", cfg?.audio],
+                      ["ocr", "OCR", cfg?.ocr],
+                      ["asr", "ASR 转写", cfg?.asr],
+                    ] as const
+                  ).map(([key, label, val]) => (
+                    <label className="check" key={key}>
+                      <input
+                        type="checkbox"
+                        checked={!!val}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setBusy(true);
+                          void api
+                            .updateSourcesConfig({ [key]: checked })
+                            .then((c) => {
+                              setCfg(c);
+                              setStatusNote(
+                                "配置已写入。若 Observe 正在运行，请 Stop 再 Start 以生效。",
+                              );
+                            })
+                            .catch((err) => setError(String(err)))
+                            .finally(() => setBusy(false));
+                        }}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={!!cfg?.system_audio}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setBusy(true);
+                        void api
+                          .updateSourcesConfig({ system_audio: checked })
+                          .then((c) => {
+                            setCfg(c);
+                            setStatusNote(
+                              checked
+                                ? "system_audio 已标记（ScreenCaptureKit 捕获尚未实现，仅配置位）。"
+                                : "system_audio 已关闭。",
+                            );
+                          })
+                          .catch((err) => setError(String(err)))
+                          .finally(() => setBusy(false));
+                      }}
+                    />
+                    系统音频（预留，未实现）
+                  </label>
                 </div>
-                <div className="meta">
+                <div className="meta mt">
                   api={cfg?.api_bind} · chunk={cfg?.audio_chunk_ms}ms · locale=
                   {cfg?.asr_locale}
                 </div>
                 <p className="meta mt">
-                  详细开关请编辑 <span className="mono">navi.toml</span>
-                  。桌面壳负责控制与检索；采集逻辑由 <span className="mono">lumen-daemon</span> 执行。
+                  开关写入 <span className="mono">navi.toml</span>
+                  。采集进程需重启后读取新配置。
                 </p>
               </div>
               <div className="card">

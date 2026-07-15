@@ -50,6 +50,31 @@ export interface ConfigSummary {
   api_bind: string;
   audio_chunk_ms: number;
   asr_locale: string;
+  system_audio: boolean;
+}
+
+export interface SourcesUpdate {
+  screen?: boolean;
+  audio?: boolean;
+  ocr?: boolean;
+  asr?: boolean;
+  paused?: boolean;
+  system_audio?: boolean;
+}
+
+export interface TimelineItem {
+  id: string;
+  source: string;
+  kind: string;
+  ts: string;
+  session_id: string | null;
+  app_name: string | null;
+  window_title: string | null;
+  text_preview: string | null;
+  text_kind: string | null;
+  media_type: string | null;
+  has_image: boolean;
+  artifact_bytes: number | null;
 }
 
 export interface ObserveStatus {

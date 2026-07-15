@@ -63,6 +63,9 @@ pub struct AudioConfig {
     pub device: String,
     /// Enqueue `transcribe_audio` jobs after each stored chunk.
     pub enqueue_transcribe: bool,
+    /// Capture system/loopback audio (ScreenCaptureKit). **Not implemented yet** —
+    /// reserved flag for P1; mic path remains default.
+    pub system_audio: bool,
 }
 
 impl Default for AudioConfig {
@@ -82,6 +85,7 @@ impl Default for AudioConfig {
             max_audio_bytes: 8 * 1024 * 1024,
             device: String::new(),
             enqueue_transcribe: true,
+            system_audio: false,
         }
     }
 }

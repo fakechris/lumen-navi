@@ -56,6 +56,8 @@ pub mod event_kind {
     pub const AUDIO_SESSION_V1: &str = "audio_session.v1";
     pub const VIDEO_SEGMENT_V1: &str = "video_segment.v1";
     pub const PAGE_VISIT_V1: &str = "page_visit.v1";
+    /// Lightweight day/session rollup (rule or LLM later).
+    pub const SUMMARY_V1: &str = "summary.v1";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

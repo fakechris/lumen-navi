@@ -12,6 +12,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow = { workspace = true }
+base64 = "0.22"
 chrono = { workspace = true }
 lumen-api = { workspace = true }
 lumen-config = { workspace = true }

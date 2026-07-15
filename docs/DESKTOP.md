@@ -88,8 +88,8 @@ Granted via System Settings after first use; the Overview tab shows probe status
 
 1. **概览** — health counts, sources, start/stop Observe, privacy pause  
 2. **搜索** — OCR + transcript FTS (same index as control API)  
-3. **活动** — recent events timeline  
-4. **设置** — data dir, engine flags, launch-on-start, re-run onboarding  
+3. **活动** — timeline with thumbnails, text preview, kind/app filters, day summary  
+4. **设置** — live source toggles (restart Observe to apply), data dir, launch-on-start
 
 ## Tray
 

@@ -7,6 +7,8 @@ import type {
   OnboardingState,
   Permissions,
   SearchHit,
+  SourcesUpdate,
+  TimelineItem,
 } from "./types";
 
 export const api = {
@@ -16,8 +18,28 @@ export const api = {
     invoke<SearchHit[]>("search_text", { query, limit }),
   listEvents: (limit = 50) =>
     invoke<EventSummary[]>("list_events", { limit }),
+  listTimeline: (opts: {
+    limit?: number;
+    kindContains?: string;
+    appContains?: string;
+    since?: string;
+    until?: string;
+  } = {}) =>
+    invoke<TimelineItem[]>("list_timeline", {
+      limit: opts.limit,
+      kindContains: opts.kindContains,
+      appContains: opts.appContains,
+      since: opts.since,
+      until: opts.until,
+    }),
+  getEventImageDataUrl: (eventId: string) =>
+    invoke<string | null>("get_event_image_data_url", { eventId }),
   reindexSearch: () => invoke<number>("reindex_search"),
   getConfigSummary: () => invoke<ConfigSummary>("get_config_summary"),
+  updateSourcesConfig: (update: SourcesUpdate) =>
+    invoke<ConfigSummary>("update_sources_config", { update }),
+  generateDaySummary: (day?: string) =>
+    invoke<string>("generate_day_summary", { day: day ?? null }),
   setPrivacyPaused: (paused: boolean) =>
     invoke<void>("set_privacy_paused", { paused }),
   observeStatus: () => invoke<ObserveStatus>("observe_status"),

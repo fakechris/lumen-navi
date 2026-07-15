@@ -163,8 +163,8 @@ https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 
 ## Next actions
 
-1. ~~S0–S4 + audio ASR + desktop shell MVP + tray/onboarding~~  
-2. ~~Tag → GitHub Release DMG workflow~~  
-3. Manual soak: screen + audio 1h  
-4. Optional: Developer ID notarization  
-5. S4.1 OCR helper isolation (optional)
+1. ~~S0–S4 + desktop MVP + DMG release (`v0.1.0` assets live)~~  
+2. ~~P0 timeline (thumbs/text/filter) + soak doc; P1 config toggles + day summary + system_audio flag~~  
+3. Manual soak: `docs/SOAK.md`  
+4. System audio capture (ScreenCaptureKit)  
+5. Optional: notarization · OCR helper isolation

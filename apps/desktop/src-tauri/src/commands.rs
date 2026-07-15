@@ -3,12 +3,16 @@
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use chrono::{DateTime, Utc};
 use lumen_api::{EventSummary, HealthResponse, OcrSearchHitDto, SourceStatus, API_VERSION};
 use lumen_platform::PermissionProbe;
 use lumen_platform_macos::MacPermissions;
-use lumen_store::{EventStore, SCHEMA_VERSION};
-use serde::Serialize;
+use lumen_store::{EventStore, SCHEMA_VERSION, TimelineQuery};
+use lumen_types::event_kind;
+use serde::{Deserialize, Serialize};
 use tauri::State;
+use uuid::Uuid;
 
 use crate::state::AppState;
 
@@ -31,6 +35,33 @@ pub struct ConfigSummary {
     pub api_bind: String,
     pub audio_chunk_ms: u64,
     pub asr_locale: String,
+    pub system_audio: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SourcesUpdate {
+    pub screen: Option<bool>,
+    pub audio: Option<bool>,
+    pub ocr: Option<bool>,
+    pub asr: Option<bool>,
+    pub paused: Option<bool>,
+    pub system_audio: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TimelineItemDto {
+    pub id: String,
+    pub source: String,
+    pub kind: String,
+    pub ts: String,
+    pub session_id: Option<String>,
+    pub app_name: Option<String>,
+    pub window_title: Option<String>,
+    pub text_preview: Option<String>,
+    pub text_kind: Option<String>,
+    pub media_type: Option<String>,
+    pub has_image: bool,
+    pub artifact_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,7 +187,144 @@ pub fn get_config_summary(state: State<'_, AppState>) -> Result<ConfigSummary, S
         api_bind: cfg.api.bind.clone(),
         audio_chunk_ms: cfg.audio.chunk_ms,
         asr_locale: cfg.asr.locale.clone(),
+        system_audio: cfg.audio.system_audio,
     })
+}
+
+#[tauri::command]
+pub fn list_timeline(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+    kind_contains: Option<String>,
+    app_contains: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+) -> Result<Vec<TimelineItemDto>, String> {
+    let since = parse_opt_ts(since)?;
+    let until = parse_opt_ts(until)?;
+    let items = state
+        .store
+        .list_timeline(TimelineQuery {
+            limit: limit.unwrap_or(80),
+            kind_contains: kind_contains.unwrap_or_default(),
+            app_contains: app_contains.unwrap_or_default(),
+            since,
+            until,
+        })
+        .map_err(err)?;
+    Ok(items
+        .into_iter()
+        .map(|it| {
+            let has_image = it
+                .media_type
+                .as_deref()
+                .map(|m| m.starts_with("image/"))
+                .unwrap_or(false);
+            TimelineItemDto {
+                id: it.id.to_string(),
+                source: it.source,
+                kind: it.kind,
+                ts: it.ts.to_rfc3339(),
+                session_id: it.session_id.map(|s| s.to_string()),
+                app_name: it.app_name,
+                window_title: it.window_title,
+                text_preview: it.text_preview,
+                text_kind: it.text_kind,
+                media_type: it.media_type,
+                has_image,
+                artifact_bytes: it.artifact_bytes,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn get_event_image_data_url(
+    state: State<'_, AppState>,
+    event_id: String,
+) -> Result<Option<String>, String> {
+    let id = Uuid::parse_str(&event_id).map_err(|e| e.to_string())?;
+    let Some((media, bytes)) = state.store.load_first_artifact_bytes(id).map_err(err)? else {
+        return Ok(None);
+    };
+    if !media.starts_with("image/") {
+        return Ok(None);
+    }
+    // Cap thumbnail payload (~1.5MB base64 ~ 2MB string).
+    if bytes.len() > 1_500_000 {
+        return Ok(None);
+    }
+    Ok(Some(format!("data:{media};base64,{}", B64.encode(&bytes))))
+}
+
+#[tauri::command]
+pub fn update_sources_config(
+    state: State<'_, AppState>,
+    update: SourcesUpdate,
+) -> Result<ConfigSummary, String> {
+    let mut cfg = state.load_config().map_err(err)?;
+    if let Some(v) = update.screen {
+        cfg.sources.screen = v;
+    }
+    if let Some(v) = update.audio {
+        cfg.sources.audio = v;
+    }
+    if let Some(v) = update.ocr {
+        cfg.ocr.enabled = v;
+    }
+    if let Some(v) = update.asr {
+        cfg.asr.enabled = v;
+    }
+    if let Some(v) = update.paused {
+        cfg.privacy.paused = v;
+        *state.paused.lock().map_err(err)? = v;
+    }
+    if let Some(v) = update.system_audio {
+        cfg.audio.system_audio = v;
+    }
+    state.save_config(&cfg).map_err(err)?;
+    // Observe child must be restarted to pick up source flags.
+    get_config_summary(state)
+}
+
+#[tauri::command]
+pub fn generate_day_summary(
+    state: State<'_, AppState>,
+    day: Option<String>,
+) -> Result<String, String> {
+    let day = day.unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
+    let body = state.store.build_day_summary_body(&day).map_err(err)?;
+    // Synthetic event so it appears on timeline / search.
+    let event = lumen_types::SourceEvent::new(
+        lumen_types::SourceKind::Other("summary".into()),
+        event_kind::SUMMARY_V1,
+        serde_json::json!({ "day": day, "kind": "day" }),
+    );
+    let eid = event.id;
+    tauri::async_runtime::block_on(async {
+        state.store.append(vec![event]).await.map_err(err)
+    })?;
+    state
+        .store
+        .insert_derived(eid, "summary.v1", body.clone())
+        .map_err(err)?;
+    Ok(body)
+}
+
+fn parse_opt_ts(s: Option<String>) -> Result<Option<DateTime<Utc>>, String> {
+    match s {
+        None => Ok(None),
+        Some(raw) if raw.trim().is_empty() => Ok(None),
+        Some(raw) => DateTime::parse_from_rfc3339(raw.trim())
+            .map(|d| Some(d.with_timezone(&Utc)))
+            .or_else(|_| {
+                // Accept date-only YYYY-MM-DD as start-of-day UTC.
+                let padded = format!("{raw}T00:00:00Z");
+                DateTime::parse_from_rfc3339(&padded)
+                    .map(|d| Some(d.with_timezone(&Utc)))
+                    .map_err(|e| e.to_string())
+            }),
+    }
 }
 
 #[tauri::command]
