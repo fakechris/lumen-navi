@@ -4,6 +4,7 @@ import type {
   EventSummary,
   Health,
   ObserveStatus,
+  OnboardingState,
   Permissions,
   SearchHit,
 } from "./types";
@@ -23,4 +24,16 @@ export const api = {
   observeStart: () => invoke<ObserveStatus>("observe_start"),
   observeStop: () => invoke<ObserveStatus>("observe_stop"),
   openDataDir: () => invoke<void>("open_data_dir"),
+  getOnboarding: () => invoke<OnboardingState>("get_onboarding"),
+  setOnboardingStep: (step: number) =>
+    invoke<OnboardingState>("set_onboarding_step", { step }),
+  completeOnboarding: (launchObserve: boolean) =>
+    invoke<OnboardingState>("complete_onboarding", { launchObserve }),
+  skipOnboarding: () => invoke<OnboardingState>("skip_onboarding"),
+  reopenOnboarding: () => invoke<OnboardingState>("reopen_onboarding"),
+  setLaunchObserve: (enabled: boolean) =>
+    invoke<void>("set_launch_observe", { enabled }),
+  requestScreenPermission: () => invoke<boolean>("request_screen_permission"),
+  openPrivacySettings: (kind: string) =>
+    invoke<void>("open_privacy_settings", { kind }),
 };

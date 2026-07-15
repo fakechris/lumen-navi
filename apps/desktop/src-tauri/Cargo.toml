@@ -21,7 +21,7 @@ lumen-store = { workspace = true }
 lumen-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-shell = "2"
 tokio = { workspace = true }
 toml = { workspace = true }

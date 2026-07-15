@@ -56,3 +56,11 @@ export interface ObserveStatus {
   running: boolean;
   pid: number | null;
 }
+
+export interface OnboardingState {
+  needs_onboarding: boolean;
+  completed: boolean;
+  skipped: boolean;
+  step: number;
+  launch_observe: boolean;
+}

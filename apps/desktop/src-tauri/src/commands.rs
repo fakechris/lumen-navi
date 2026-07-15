@@ -39,6 +39,15 @@ pub struct ObserveStatus {
     pub pid: Option<u32>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct OnboardingState {
+    pub needs_onboarding: bool,
+    pub completed: bool,
+    pub skipped: bool,
+    pub step: u32,
+    pub launch_observe: bool,
+}
+
 #[tauri::command]
 pub async fn get_health(state: State<'_, AppState>) -> Result<HealthResponse, String> {
     let store = &state.store;
@@ -179,20 +188,19 @@ pub fn observe_status(state: State<'_, AppState>) -> Result<ObserveStatus, Strin
     Ok(ObserveStatus { running, pid })
 }
 
-#[tauri::command]
-pub fn observe_start(state: State<'_, AppState>) -> Result<ObserveStatus, String> {
+/// Shared start logic for command + auto-launch + tray.
+pub fn observe_start_inner(state: &AppState) -> Result<ObserveStatus, String> {
     if state.observe_running() {
-        return observe_status(state);
+        let running = true;
+        let pid = state
+            .observe_child
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.id()));
+        return Ok(ObserveStatus { running, pid });
     }
     let cfg = state.load_config().map_err(err)?;
-    // Write runtime navi.toml next to data_dir so daemon picks product defaults.
-    let run_cfg_path = state.data_dir.join("navi.toml");
-    // Also keep Application Support config in sync.
     state.save_config(&cfg).map_err(err)?;
-    if run_cfg_path != state.config_path {
-        let raw = std::fs::read_to_string(&state.config_path).map_err(err)?;
-        std::fs::write(&run_cfg_path, raw).map_err(err)?;
-    }
 
     let daemon = resolve_daemon_binary().ok_or_else(|| {
         String::from(
@@ -224,6 +232,11 @@ pub fn observe_start(state: State<'_, AppState>) -> Result<ObserveStatus, String
 }
 
 #[tauri::command]
+pub fn observe_start(state: State<'_, AppState>) -> Result<ObserveStatus, String> {
+    observe_start_inner(&state)
+}
+
+#[tauri::command]
 pub fn observe_stop(state: State<'_, AppState>) -> Result<ObserveStatus, String> {
     let mut guard = state.observe_child.lock().map_err(err)?;
     if let Some(mut child) = guard.take() {
@@ -240,18 +253,137 @@ pub fn observe_stop(state: State<'_, AppState>) -> Result<ObserveStatus, String>
 #[tauri::command]
 pub fn open_data_dir(state: State<'_, AppState>) -> Result<(), String> {
     let dir = state.data_dir.display().to_string();
+    open_path(&dir)
+}
+
+#[tauri::command]
+pub fn get_onboarding(state: State<'_, AppState>) -> Result<OnboardingState, String> {
+    let shell = state.shell.lock().map_err(err)?;
+    Ok(OnboardingState {
+        needs_onboarding: shell.needs_onboarding(),
+        completed: shell.onboarding_completed,
+        skipped: shell.onboarding_skipped,
+        step: shell.onboarding_step,
+        launch_observe: shell.launch_observe,
+    })
+}
+
+#[tauri::command]
+pub fn set_onboarding_step(state: State<'_, AppState>, step: u32) -> Result<OnboardingState, String> {
+    {
+        let mut shell = state.shell.lock().map_err(err)?;
+        shell.onboarding_step = step.min(4);
+    }
+    state.save_shell().map_err(err)?;
+    get_onboarding(state)
+}
+
+#[tauri::command]
+pub fn complete_onboarding(
+    state: State<'_, AppState>,
+    launch_observe: bool,
+) -> Result<OnboardingState, String> {
+    {
+        let mut shell = state.shell.lock().map_err(err)?;
+        shell.onboarding_completed = true;
+        shell.onboarding_skipped = false;
+        shell.launch_observe = launch_observe;
+        shell.onboarding_step = 4;
+    }
+    state.save_shell().map_err(err)?;
+    get_onboarding(state)
+}
+
+#[tauri::command]
+pub fn skip_onboarding(state: State<'_, AppState>) -> Result<OnboardingState, String> {
+    {
+        let mut shell = state.shell.lock().map_err(err)?;
+        shell.onboarding_skipped = true;
+        shell.onboarding_completed = false;
+    }
+    state.save_shell().map_err(err)?;
+    get_onboarding(state)
+}
+
+#[tauri::command]
+pub fn reopen_onboarding(state: State<'_, AppState>) -> Result<OnboardingState, String> {
+    {
+        let mut shell = state.shell.lock().map_err(err)?;
+        shell.onboarding_completed = false;
+        shell.onboarding_skipped = false;
+        shell.onboarding_step = 0;
+    }
+    state.save_shell().map_err(err)?;
+    get_onboarding(state)
+}
+
+#[tauri::command]
+pub fn set_launch_observe(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    {
+        let mut shell = state.shell.lock().map_err(err)?;
+        shell.launch_observe = enabled;
+    }
+    state.save_shell().map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn request_screen_permission() -> Result<bool, String> {
+    Ok(lumen_platform_macos::request_screen_recording())
+}
+
+#[tauri::command]
+pub fn open_privacy_settings(kind: String) -> Result<(), String> {
+    let url = match kind.as_str() {
+        "screen" => {
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture"
+        }
+        "microphone" => {
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone"
+        }
+        "speech" => {
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_SpeechRecognition"
+        }
+        "accessibility" => {
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility"
+        }
+        _ => {
+            return Err(format!("unknown privacy pane: {kind}"));
+        }
+    };
+    open_url(url)
+}
+
+fn open_path(path: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         Command::new("open")
-            .arg(&dir)
+            .arg(path)
             .spawn()
             .map_err(|e| e.to_string())?;
+        Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = dir;
+        let _ = path;
+        Err("open path only supported on macOS".into())
     }
-    Ok(())
+}
+
+fn open_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = url;
+        Err("open url only supported on macOS".into())
+    }
 }
 
 fn resolve_daemon_binary() -> Option<PathBuf> {

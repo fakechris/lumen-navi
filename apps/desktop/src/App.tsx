@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
+import { Onboarding } from "./Onboarding";
 import type {
   ConfigSummary,
   EventSummary,
   Health,
   ObserveStatus,
+  OnboardingState,
   Permissions,
   SearchHit,
   TabId,
@@ -65,19 +68,22 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [statusNote, setStatusNote] = useState<string | null>(null);
+  const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [h, p, c, o] = await Promise.all([
+      const [h, p, c, o, ob] = await Promise.all([
         api.getHealth(),
         api.getPermissions(),
         api.getConfigSummary(),
         api.observeStatus(),
+        api.getOnboarding(),
       ]);
       setHealth(h);
       setPerms(p);
       setCfg(c);
       setObserve(o);
+      setOnboarding(ob);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -101,20 +107,7 @@ export default function App() {
 
   const nav = NAV.find((n) => n.id === tab)!;
 
-  async function onSearch() {
-    setBusy(true);
-    try {
-      const r = await api.searchText(query.trim(), 40);
-      setHits(r);
-      setError(null);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function startObserve() {
+  const startObserve = useCallback(async () => {
     setBusy(true);
     setStatusNote(null);
     try {
@@ -131,9 +124,9 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }
+  }, [refresh]);
 
-  async function stopObserve() {
+  const stopObserve = useCallback(async () => {
     setBusy(true);
     try {
       const o = await api.observeStop();
@@ -145,14 +138,44 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }
+  }, [refresh]);
 
-  async function togglePause() {
+  const togglePause = useCallback(async () => {
     if (!cfg) return;
     setBusy(true);
     try {
       await api.setPrivacyPaused(!cfg.paused);
       await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [cfg, refresh]);
+
+  // Tray menu → UI actions
+  useEffect(() => {
+    const unsubs: Array<() => void> = [];
+    void listen("tray://observe-start", () => {
+      void startObserve();
+    }).then((u) => unsubs.push(u));
+    void listen("tray://observe-stop", () => {
+      void stopObserve();
+    }).then((u) => unsubs.push(u));
+    void listen("tray://toggle-pause", () => {
+      void togglePause();
+    }).then((u) => unsubs.push(u));
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }, [startObserve, stopObserve, togglePause]);
+
+  async function onSearch() {
+    setBusy(true);
+    try {
+      const r = await api.searchText(query.trim(), 40);
+      setHits(r);
+      setError(null);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -175,6 +198,9 @@ export default function App() {
 
   return (
     <div className="app">
+      {onboarding?.needs_onboarding && (
+        <Onboarding initial={onboarding} onDone={() => void refresh()} />
+      )}
       <aside className="sidebar">
         <div className="brand">
           Lumen <span>Navi</span>
@@ -362,6 +388,29 @@ export default function App() {
                 </p>
               </div>
               <div className="card">
+                <h3>Shell</h3>
+                <label className="check mt">
+                  <input
+                    type="checkbox"
+                    checked={!!onboarding?.launch_observe}
+                    onChange={(e) => {
+                      void api
+                        .setLaunchObserve(e.target.checked)
+                        .then(() => refresh());
+                    }}
+                  />
+                  启动应用时自动开始 Observe
+                </label>
+                <div className="row mt">
+                  <button
+                    className="btn"
+                    onClick={() => void api.reopenOnboarding().then(() => refresh())}
+                  >
+                    重新打开首次引导
+                  </button>
+                </div>
+              </div>
+              <div className="card">
                 <h3>Related</h3>
                 <p className="meta mt">
                   听写/热键注入 →{" "}
@@ -370,6 +419,7 @@ export default function App() {
                   </a>
                   （独立产品，不合并 monorepo）
                 </p>
+                <p className="meta">菜单栏托盘可 Start/Stop Observe、暂停与退出。</p>
               </div>
             </div>
           )}

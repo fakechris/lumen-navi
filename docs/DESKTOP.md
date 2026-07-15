@@ -58,7 +58,28 @@ Granted via System Settings after first use; the Overview tab shows probe status
 1. **概览** — health counts, sources, start/stop Observe, privacy pause  
 2. **搜索** — OCR + transcript FTS (same index as control API)  
 3. **活动** — recent events timeline  
-4. **设置** — data dir, engine flags (read from `navi.toml`)
+4. **设置** — data dir, engine flags, launch-on-start, re-run onboarding  
+
+## Tray
+
+Menu bar icon:
+
+- Show window  
+- Start / Stop Observe  
+- Toggle privacy pause  
+- Quit (stops child daemon)
+
+## First-run onboarding
+
+Stored in `shell.toml` (desktop-only; not product `navi.toml`):
+
+| Field | Meaning |
+|-------|---------|
+| `onboarding_completed` / `skipped` | Wizard done |
+| `onboarding_step` | Resume mid-wizard |
+| `launch_observe` | Auto-start daemon on app launch |
+
+Wizard covers Screen Recording + Microphone/Speech settings links.
 
 ## Relationship to Lumen ASR desktop
 
@@ -68,5 +89,6 @@ Patterns borrowed (not code-coupled):
 - Application Support data dir  
 - macOS Info.plist usage strings  
 - Warm light design tokens  
+- Tray + first-run onboarding flow  
 
 **Not** borrowed: hotkey dictation, inject, dictionary, capsule overlay.

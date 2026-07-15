@@ -120,7 +120,9 @@ Product: [`docs/DESKTOP.md`](DESKTOP.md)
 - [x] Search: OCR + transcript FTS  
 - [x] Activity: recent events  
 - [x] Settings: data dir + engine summary  
-- [ ] Polish: tray icon, signed DMG, onboarding wizard (ASR-style)  
+- [x] Tray icon (start/stop/pause/quit)  
+- [x] First-run onboarding (permissions + launch Observe)  
+- [ ] Signed DMG / codesign distribution  
 - [ ] Optional bridge: ingest from / export to [Lumen ASR](https://github.com/fakechris/lumen-asr)  
 - [ ] Coding-agent transcript adapters  
 

@@ -253,3 +253,54 @@ input:focus {
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .stack { display: flex; flex-direction: column; gap: 12px; }
 .mt { margin-top: 14px; }
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.onboard-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.38);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  backdrop-filter: blur(6px);
+}
+.onboard-card {
+  width: min(520px, 100%);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  padding: 22px 24px 18px;
+}
+.onboard-card h2 {
+  margin: 4px 0 10px;
+  font-size: 20px;
+  letter-spacing: -0.03em;
+}
+.onboard-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.onboard-kicker {
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+mark {
+  background: var(--warm-dim);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 2px;
+}

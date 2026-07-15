@@ -1,4 +1,4 @@
-//! Shared app state: durable store + optional observe daemon child.
+//! Shared app state: durable store + optional observe daemon child + shell prefs.
 
 use std::path::{Path, PathBuf};
 use std::process::Child;
@@ -8,11 +8,14 @@ use anyhow::{Context, Result};
 use lumen_config::Config;
 use lumen_store::SqliteStore;
 
+use crate::shell::{self, ShellConfig};
+
 pub struct AppState {
     pub data_dir: PathBuf,
     pub config_path: PathBuf,
     pub store: SqliteStore,
     pub paused: Mutex<bool>,
+    pub shell: Mutex<ShellConfig>,
     /// Child `lumen-daemon` when Observe is running from the shell.
     pub observe_child: Mutex<Option<Child>>,
 }
@@ -22,8 +25,10 @@ impl AppState {
         let data_dir = default_data_dir();
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("create data_dir {}", data_dir.display()))?;
+        let _ = std::fs::create_dir_all(data_dir.join("logs"));
         let config_path = data_dir.join("navi.toml");
         let config = load_or_write_config(&config_path, &data_dir)?;
+        let shell_cfg = shell::load_shell(&data_dir)?;
         let store = SqliteStore::open(&config.data_dir)
             .with_context(|| format!("open store {}", config.data_dir.display()))?;
         Ok(Self {
@@ -31,6 +36,7 @@ impl AppState {
             config_path,
             store,
             paused: Mutex::new(config.privacy.paused),
+            shell: Mutex::new(shell_cfg),
             observe_child: Mutex::new(None),
         })
     }
@@ -44,6 +50,11 @@ impl AppState {
         std::fs::write(&self.config_path, raw)
             .with_context(|| format!("write {}", self.config_path.display()))?;
         Ok(())
+    }
+
+    pub fn save_shell(&self) -> Result<()> {
+        let guard = self.shell.lock().map_err(|_| anyhow::anyhow!("shell lock"))?;
+        shell::save_shell(&self.data_dir, &guard)
     }
 
     pub fn observe_running(&self) -> bool {
@@ -82,7 +93,6 @@ fn load_or_write_config(path: &Path, data_dir: &Path) -> Result<Config> {
     if path.exists() {
         let raw = std::fs::read_to_string(path)?;
         let mut cfg: Config = toml::from_str(&raw)?;
-        // Keep store under app support unless user overrode.
         if cfg.data_dir.as_os_str().is_empty() || cfg.data_dir == PathBuf::from("data") {
             cfg.data_dir = data_dir.to_path_buf();
         }
@@ -90,7 +100,6 @@ fn load_or_write_config(path: &Path, data_dir: &Path) -> Result<Config> {
     }
     let mut cfg = Config::default();
     cfg.data_dir = data_dir.to_path_buf();
-    // Desktop defaults: continuous observe, API on loopback for health.
     cfg.api.enabled = true;
     cfg.api.bind = "127.0.0.1:7420".into();
     cfg.capture.screen_ticks = 0;
