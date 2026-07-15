@@ -28,7 +28,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · roadmap: [`docs
 |-------|--------|
 | S0–S1 skeleton + store | ✅ |
 | S2 screen Observe | ✅ (manual soak open) |
-| S3 audio + Observe ASR | ✅ (16 kHz / 3s chunks; Speech → `transcript.v1`) |
+| S3 audio + Observe ASR | ✅ (16 kHz / 3s; SenseVoice default + Whisper/Speech/Qwen HTTP) |
 | S4 Vision OCR + FTS API | ✅ |
 | **U1 Tauri Mac app** | ✅ shell (control + search + start/stop daemon) |
 | S4.1 OCR helper isolation | optional later |
@@ -52,7 +52,11 @@ cargo test
 cargo run -p lumen-daemon
 ```
 
-Requires Rust stable (edition 2021+). Grant **Screen Recording** / **Microphone** / **Speech Recognition** as needed.
+Requires Rust stable (edition 2021+). Grant **Screen Recording** / **Microphone** (and **Speech Recognition** if using `asr.engine = speech` or Speech fallback).
+
+Default continuous ASR is **SenseVoice** (local sherpa-onnx). Place models under  
+`~/Library/Application Support/LumenNavi/models/sensevoice/` or set `asr.model_dir` / `LUMEN_SENSEVOICE_DIR`.  
+Optional: `whisper`, `speech`, or OpenAI-compatible HTTP (`qwen` / `openai_audio`, e.g. Qwen ASR 0.8B). See [`docs/AUDIO_PRODUCT.md`](docs/AUDIO_PRODUCT.md).
 
 ```bash
 # search while daemon is up

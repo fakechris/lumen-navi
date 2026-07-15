@@ -61,7 +61,9 @@ Product: [`docs/AUDIO_PRODUCT.md`](AUDIO_PRODUCT.md)
 - [x] Timing aligned to reference: 16 kHz mono, 3s chunks, 1.2s silence, 10m max session  
 - [x] Continuous + session (VAD/RMS) modes; size / duration hard caps  
 - [x] `audio_chunk.v1` + WAV CA blobs; independent `sources.audio`  
-- [x] Async `transcribe_audio` → `transcript.v1` (Speech.framework; OCR-parity job machine)  
+- [x] Async `transcribe_audio` → `transcript.v1` (SenseVoice default; Whisper / Speech / OpenAI-compat Qwen; OCR-parity job machine)  
+- [x] `lumen-asr-engine` crate (patterns from lumen-asr; Navi-owned WAV→text port)  
+
 - [x] Transcripts indexed into same FTS as OCR  
 - [x] Concurrent with screen; privacy pause; bounded backpressure  
 - [x] Unit tests with synthetic PCM + StubAsr (no live mic/Speech required)  

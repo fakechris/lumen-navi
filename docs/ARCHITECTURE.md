@@ -110,10 +110,11 @@ Act plane ──► open-source cua-driver (MIT)
 | `lumen-types` | `SourceKind`, `SourceEvent`, `ArtifactRef`, job/derived types |
 | `lumen-config` | Config load, feature flags, retention defaults |
 | `lumen-platform` | Ports: permissions, frontmost app, screen/audio capturers |
-| `lumen-platform-macos` | macOS implementations |
+| `lumen-platform-macos` | macOS implementations (mic, Speech ASR, Vision OCR) |
+| `lumen-asr-engine` | Observe ASR: SenseVoice/Whisper (sherpa), OpenAI-compat HTTP (Qwen) |
 | `lumen-intake` | `Source`, sink, supervisor, policy gate |
 | `lumen-store` | Event / blob / job persistence APIs |
-| `lumen-process` | Processors + job orchestration |
+| `lumen-process` | Processors + job orchestration (OCR + transcribe workers) |
 | `lumen-api` | Versioned local control/RPC schema |
 | `lumen-daemon` | Thin binary wiring |
 
@@ -124,9 +125,8 @@ Act plane ──► open-source cua-driver (MIT)
 | `lumen-sources-media` | **Now** — screen / audio / video |
 | `lumen-sources-browser` | Later |
 | `lumen-sources-agent` | Later |
-| `lumen-process-ocr` / `lumen-process-asr` | After media events exist |
 | `lumen-act` | Optional act via cua-driver |
-| `apps/desktop` | After media durability |
+| `apps/desktop` | **Now** — Tauri shell |
 
 ### Dependency direction
 
@@ -134,7 +134,8 @@ Act plane ──► open-source cua-driver (MIT)
 types ← config | platform | intake | store | process | api
 intake ← sources-media
 platform-macos → platform
-daemon → config, platform-*, intake, sources-media, store, process, api
+asr-engine → platform
+daemon → config, platform-*, asr-engine, intake, sources-media, store, process, api
 ```
 
 No cycles. Process depends on types (+ store APIs), **not** on sources.

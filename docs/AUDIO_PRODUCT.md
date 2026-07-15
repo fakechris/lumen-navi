@@ -1,6 +1,6 @@
 # Audio + Observe ASR — Product Spec (S3)
 
-> Product documentation only. Mic-first Observe intake + async transcription.
+> Product documentation only. Mic-first Observe intake + async multi-engine transcription.
 
 ## Goal
 
@@ -15,7 +15,7 @@ System audio loopback and **dictation UI** are out of scope.
 | **Lumen Navi** (this repo) | Continuous Observe: store audio + background ASR enrichment |
 | **[Lumen ASR](https://github.com/fakechris/lumen-asr)** | Separate dictation product (hotkey → correct → inject) |
 
-Do **not** merge monorepos. Navi may later share *patterns* (16 kHz mono, sherpa) but owns its `AsrEngine` port.
+Do **not** merge monorepos. Navi **reuses patterns** (16 kHz mono, sherpa SenseVoice/Whisper, OpenAI-compatible HTTP) via crate `lumen-asr-engine`, and owns its `AsrEngine` port (`WAV → text`).
 
 ## Timing alignment (reference)
 
@@ -44,6 +44,8 @@ mic (cpal stream on audio thread)
   enqueue job transcribe_audio (deduped if open)
         ↓
   TranscribeWorker (async, never on capture path)
+        ↓
+  AsrEngine (sensevoice | whisper | speech | openai_audio/qwen)
         ↓
   derived transcript.v1 → ocr_docs FTS (searchable)
 ```
@@ -87,11 +89,13 @@ Artifact: `audio/wav` (mono s16le + RIFF header).
   "text": "...",
   "confidence": 0.0,
   "language": "zh-CN",
-  "engine": "speech",
+  "engine": "sensevoice",
   "audio_bytes": 12345,
   "audio_blake3": "..."
 }
 ```
+
+`engine` values: `sensevoice` | `whisper` | `speech` | `openai_audio` | `qwen_asr` | `stub`.
 
 ## Config
 
@@ -118,7 +122,16 @@ system_audio = false         # reserved (ScreenCaptureKit); mic-only for now
 
 [asr]
 enabled = true
+# sensevoice | whisper | speech | openai_audio | qwen
+engine = "sensevoice"
+model_dir = ""               # empty = auto-resolve
 locale = "zh-CN"
+fallback_speech = true       # if offline model missing → Speech.framework
+# --- HTTP engines (openai_audio / qwen) ---
+http_base_url = ""           # e.g. https://dashscope.aliyuncs.com/compatible-mode/v1
+http_api_key = ""            # or env LUMEN_NAVI_ASR_API_KEY / OPENAI_API_KEY
+http_model = "qwen3-asr-0.8b"
+http_engine_label = ""       # empty = auto (qwen_asr if dashscope/qwen)
 poll_interval_ms = 1500
 batch_size = 1
 max_attempts = 5
@@ -131,13 +144,51 @@ max_text_chars = 200000
 shutdown_drain_ms = 30000
 ```
 
-## Engine
+## Engines
 
-Default: **macOS Speech.framework** (`MacSpeechAsr`) — file-based recognition, serialized, size-guarded.
+Default: **SenseVoice** (local sherpa-onnx) — same model family as Lumen ASR.
 
-- Fail soft: raw audio is kept even if ASR fails.
-- Authorization: system Speech Recognition permission (separate from mic).
-- Tests use `StubAsr` (no live mic / Speech).
+| Engine | Backend | When to use |
+|--------|---------|-------------|
+| `sensevoice` | sherpa-onnx SenseVoice | Default continuous Observe (zh/en/ja/ko/yue) |
+| `whisper` | sherpa-onnx Whisper | English-heavy offline |
+| `speech` | macOS Speech.framework | No local model; Apple permission |
+| `openai_audio` / `qwen` | HTTP `POST …/audio/transcriptions` | Qwen ASR 0.8B, Whisper API, local OpenAI-compat server |
+
+### Model paths (SenseVoice / Whisper)
+
+Resolution order:
+
+1. `asr.model_dir` if set  
+2. `LUMEN_NAVI_SENSEVOICE_DIR` / `LUMEN_SENSEVOICE_DIR` (or Whisper equivalents)  
+3. `~/Library/Application Support/LumenNavi/models/sensevoice`  
+4. Shared caches: LumenAsr app models, `~/.coli/models/sherpa-onnx-sense-voice-…`
+
+SenseVoice package (int8, from sherpa releases):
+
+```
+https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
+```
+
+Unpack so the directory contains `model.int8.onnx` (or `model.onnx`) + `tokens.txt`.
+
+### Qwen ASR 0.8B (HTTP)
+
+There is no sherpa-onnx Qwen port in-tree. Use an **OpenAI-compatible** transcription endpoint:
+
+```toml
+[asr]
+engine = "qwen"   # or openai_audio
+http_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+http_model = "qwen3-asr-0.8b"   # or your server's model id
+# http_api_key via config or LUMEN_NAVI_ASR_API_KEY
+```
+
+Any server that implements `POST /v1/audio/transcriptions` (multipart file + model) works — including a local process wrapping Qwen ASR 0.8B.
+
+### Fallback
+
+If `engine = sensevoice|whisper` and the model is missing, `fallback_speech = true` (default) starts **macOS Speech** so continuous capture still produces transcripts.
 
 ## Search
 
@@ -152,7 +203,7 @@ curl -s 'http://127.0.0.1:7420/v1/ocr/search?q=会议&limit=10' | jq .
 | Property | Behavior |
 |----------|----------|
 | Non-blocking screen | Audio + ASR on own tasks / threads |
-| Non-blocking capture | Capture only enqueues; never calls Speech |
+| Non-blocking capture | Capture only enqueues; never calls ASR engine |
 | Idempotency | One open `transcribe_audio` job per event; one `transcript.v1` |
 | Retry | Exponential backoff via `available_at` |
 | Stuck jobs | Reclaim `running` older than `stale_running_ms` |
@@ -167,13 +218,14 @@ Planned path: ScreenCaptureKit shareable content (macOS 13+), independent of mic
 
 - BlackHole / third-party loopback drivers  
 - Dictation hotkey / inject (Lumen ASR)  
-- Cloud ASR  
 - Speaker diarization  
+- Bundling multi-hundred-MB models inside the DMG  
 
 ## Exit criteria
 
 - Mic chunks land as `audio_chunk.v1` + WAV blobs  
 - Chunks enqueue `transcribe_audio`; worker writes `transcript.v1`  
+- Engine selectable: SenseVoice (default) / Whisper / Speech / OpenAI-compatible (Qwen)  
 - Transcripts appear in FTS search  
 - Screen + audio + OCR + ASR can run together without blocking  
 - Unit tests cover VAD/session, WAV framing, and ASR job path without live Speech  

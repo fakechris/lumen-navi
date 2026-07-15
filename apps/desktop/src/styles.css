@@ -262,6 +262,31 @@ input:focus {
   font-size: 13px;
 }
 
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.field .meta {
+  font-size: 11.5px;
+}
+.input,
+select.input {
+  width: 100%;
+  min-height: 34px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  padding: 6px 12px;
+  font: inherit;
+}
+.input:focus,
+select.input:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 1px;
+}
+
 .onboard-backdrop {
   position: fixed;
   inset: 0;

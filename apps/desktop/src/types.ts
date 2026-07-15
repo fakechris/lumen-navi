@@ -50,6 +50,11 @@ export interface ConfigSummary {
   api_bind: string;
   audio_chunk_ms: number;
   asr_locale: string;
+  asr_engine: string;
+  asr_model_dir: string;
+  asr_http_base_url: string;
+  asr_http_model: string;
+  asr_fallback_speech: boolean;
   system_audio: boolean;
 }
 
@@ -60,6 +65,12 @@ export interface SourcesUpdate {
   asr?: boolean;
   paused?: boolean;
   system_audio?: boolean;
+  asr_engine?: string;
+  asr_model_dir?: string;
+  asr_http_base_url?: string;
+  asr_http_model?: string;
+  asr_locale?: string;
+  asr_fallback_speech?: boolean;
 }
 
 export interface TimelineItem {

@@ -35,6 +35,11 @@ pub struct ConfigSummary {
     pub api_bind: String,
     pub audio_chunk_ms: u64,
     pub asr_locale: String,
+    pub asr_engine: String,
+    pub asr_model_dir: String,
+    pub asr_http_base_url: String,
+    pub asr_http_model: String,
+    pub asr_fallback_speech: bool,
     pub system_audio: bool,
 }
 
@@ -46,6 +51,12 @@ pub struct SourcesUpdate {
     pub asr: Option<bool>,
     pub paused: Option<bool>,
     pub system_audio: Option<bool>,
+    pub asr_engine: Option<String>,
+    pub asr_model_dir: Option<String>,
+    pub asr_http_base_url: Option<String>,
+    pub asr_http_model: Option<String>,
+    pub asr_locale: Option<String>,
+    pub asr_fallback_speech: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,6 +198,11 @@ pub fn get_config_summary(state: State<'_, AppState>) -> Result<ConfigSummary, S
         api_bind: cfg.api.bind.clone(),
         audio_chunk_ms: cfg.audio.chunk_ms,
         asr_locale: cfg.asr.locale.clone(),
+        asr_engine: cfg.asr.engine.clone(),
+        asr_model_dir: cfg.asr.model_dir.clone(),
+        asr_http_base_url: cfg.asr.http_base_url.clone(),
+        asr_http_model: cfg.asr.http_model.clone(),
+        asr_fallback_speech: cfg.asr.fallback_speech,
         system_audio: cfg.audio.system_audio,
     })
 }
@@ -281,6 +297,30 @@ pub fn update_sources_config(
     }
     if let Some(v) = update.system_audio {
         cfg.audio.system_audio = v;
+    }
+    if let Some(v) = update.asr_engine {
+        let t = v.trim().to_ascii_lowercase();
+        if !t.is_empty() {
+            cfg.asr.engine = t;
+        }
+    }
+    if let Some(v) = update.asr_model_dir {
+        cfg.asr.model_dir = v;
+    }
+    if let Some(v) = update.asr_http_base_url {
+        cfg.asr.http_base_url = v;
+    }
+    if let Some(v) = update.asr_http_model {
+        cfg.asr.http_model = v;
+    }
+    if let Some(v) = update.asr_locale {
+        let t = v.trim();
+        if !t.is_empty() {
+            cfg.asr.locale = t.to_string();
+        }
+    }
+    if let Some(v) = update.asr_fallback_speech {
+        cfg.asr.fallback_speech = v;
     }
     state.save_config(&cfg).map_err(err)?;
     // Observe child must be restarted to pick up source flags.

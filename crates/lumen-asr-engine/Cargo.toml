@@ -1,0 +1,27 @@
+[package]
+name = "lumen-asr-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Observe ASR engines (SenseVoice/Whisper via sherpa, OpenAI-compatible HTTP)"
+repository.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+lumen-platform = { workspace = true }
+parking_lot = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+# Offline SenseVoice / Whisper (prebuilt static lib on first build)
+sherpa-onnx = { version = "1.13.4", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[features]
+default = ["sherpa"]
+sherpa = ["dep:sherpa-onnx"]

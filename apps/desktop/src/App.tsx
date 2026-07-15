@@ -309,7 +309,10 @@ export default function App() {
                   <div className="value" style={{ fontSize: 16 }}>
                     {cfg?.audio ? (cfg.asr ? "摄入+转写" : "仅摄入") : "关闭"}
                   </div>
-                  <div className="meta">{cfg?.asr_locale ?? ""} · {cfg?.audio_chunk_ms ?? "—"}ms</div>
+                  <div className="meta">
+                    {cfg?.asr_engine ?? "sensevoice"} · {cfg?.asr_locale ?? ""} ·{" "}
+                    {cfg?.audio_chunk_ms ?? "—"}ms
+                  </div>
                 </div>
               </div>
 
@@ -535,9 +538,168 @@ export default function App() {
                     系统音频（预留，未实现）
                   </label>
                 </div>
+                <div className="stack mt">
+                  <label className="field">
+                    <span className="meta">持续 ASR 引擎</span>
+                    <select
+                      className="input"
+                      value={cfg?.asr_engine ?? "sensevoice"}
+                      onChange={(e) => {
+                        const asr_engine = e.target.value;
+                        setBusy(true);
+                        void api
+                          .updateSourcesConfig({ asr_engine })
+                          .then((c) => {
+                            setCfg(c);
+                            setStatusNote(
+                              `ASR 引擎 → ${asr_engine}。Stop/Start Observe 后生效。`,
+                            );
+                          })
+                          .catch((err) => setError(String(err)))
+                          .finally(() => setBusy(false));
+                      }}
+                    >
+                      <option value="sensevoice">SenseVoice（本地 sherpa，默认）</option>
+                      <option value="whisper">Whisper（本地 sherpa）</option>
+                      <option value="speech">macOS Speech</option>
+                      <option value="openai_audio">OpenAI 兼容 HTTP</option>
+                      <option value="qwen">Qwen ASR（HTTP，如 0.8B）</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span className="meta">ASR locale</span>
+                    <input
+                      className="input"
+                      value={cfg?.asr_locale ?? "zh-CN"}
+                      onChange={(e) => {
+                        const asr_locale = e.target.value;
+                        setCfg((prev) =>
+                          prev ? { ...prev, asr_locale } : prev,
+                        );
+                      }}
+                      onBlur={() => {
+                        if (!cfg?.asr_locale) return;
+                        setBusy(true);
+                        void api
+                          .updateSourcesConfig({ asr_locale: cfg.asr_locale })
+                          .then((c) => setCfg(c))
+                          .catch((err) => setError(String(err)))
+                          .finally(() => setBusy(false));
+                      }}
+                    />
+                  </label>
+                  {(cfg?.asr_engine === "openai_audio" ||
+                    cfg?.asr_engine === "qwen") && (
+                    <>
+                      <label className="field">
+                        <span className="meta">HTTP base URL（…/v1）</span>
+                        <input
+                          className="input"
+                          placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1"
+                          value={cfg?.asr_http_base_url ?? ""}
+                          onChange={(e) => {
+                            const asr_http_base_url = e.target.value;
+                            setCfg((prev) =>
+                              prev ? { ...prev, asr_http_base_url } : prev,
+                            );
+                          }}
+                          onBlur={() => {
+                            setBusy(true);
+                            void api
+                              .updateSourcesConfig({
+                                asr_http_base_url: cfg?.asr_http_base_url ?? "",
+                              })
+                              .then((c) => setCfg(c))
+                              .catch((err) => setError(String(err)))
+                              .finally(() => setBusy(false));
+                          }}
+                        />
+                      </label>
+                      <label className="field">
+                        <span className="meta">HTTP model</span>
+                        <input
+                          className="input"
+                          placeholder="qwen3-asr-0.8b"
+                          value={cfg?.asr_http_model ?? ""}
+                          onChange={(e) => {
+                            const asr_http_model = e.target.value;
+                            setCfg((prev) =>
+                              prev ? { ...prev, asr_http_model } : prev,
+                            );
+                          }}
+                          onBlur={() => {
+                            setBusy(true);
+                            void api
+                              .updateSourcesConfig({
+                                asr_http_model: cfg?.asr_http_model ?? "",
+                              })
+                              .then((c) => setCfg(c))
+                              .catch((err) => setError(String(err)))
+                              .finally(() => setBusy(false));
+                          }}
+                        />
+                      </label>
+                      <p className="meta">
+                        API key 写入 <span className="mono">navi.toml</span> 的{" "}
+                        <span className="mono">asr.http_api_key</span>，或环境变量{" "}
+                        <span className="mono">LUMEN_NAVI_ASR_API_KEY</span>。
+                      </p>
+                    </>
+                  )}
+                  {(cfg?.asr_engine === "sensevoice" ||
+                    cfg?.asr_engine === "whisper") && (
+                    <label className="field">
+                      <span className="meta">本地模型目录（可空=自动）</span>
+                      <input
+                        className="input"
+                        placeholder="~/Library/Application Support/LumenNavi/models/sensevoice"
+                        value={cfg?.asr_model_dir ?? ""}
+                        onChange={(e) => {
+                          const asr_model_dir = e.target.value;
+                          setCfg((prev) =>
+                            prev ? { ...prev, asr_model_dir } : prev,
+                          );
+                        }}
+                        onBlur={() => {
+                          setBusy(true);
+                          void api
+                            .updateSourcesConfig({
+                              asr_model_dir: cfg?.asr_model_dir ?? "",
+                            })
+                            .then((c) => setCfg(c))
+                            .catch((err) => setError(String(err)))
+                            .finally(() => setBusy(false));
+                        }}
+                      />
+                    </label>
+                  )}
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={cfg?.asr_fallback_speech ?? true}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setBusy(true);
+                        void api
+                          .updateSourcesConfig({ asr_fallback_speech: checked })
+                          .then((c) => {
+                            setCfg(c);
+                            setStatusNote(
+                              checked
+                                ? "本地模型不可用时回退 macOS Speech。"
+                                : "已关闭 Speech 回退。",
+                            );
+                          })
+                          .catch((err) => setError(String(err)))
+                          .finally(() => setBusy(false));
+                      }}
+                    />
+                    本地引擎不可用时回退 Speech
+                  </label>
+                </div>
                 <div className="meta mt">
-                  api={cfg?.api_bind} · chunk={cfg?.audio_chunk_ms}ms · locale=
-                  {cfg?.asr_locale}
+                  api={cfg?.api_bind} · chunk={cfg?.audio_chunk_ms}ms · engine=
+                  {cfg?.asr_engine ?? "—"} · locale={cfg?.asr_locale}
                 </div>
                 <p className="meta mt">
                   开关写入 <span className="mono">navi.toml</span>

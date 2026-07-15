@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use lumen_api::{HealthResponse, SourceStatus};
-use lumen_config::{AudioConfig, Config, PrivacyConfig};
+use lumen_asr_engine::{build_engine, engine_status, EngineBuildConfig, EngineKind};
+use lumen_config::{AsrConfig, AudioConfig, Config, PrivacyConfig};
 use lumen_platform::{AsrEngine, MicCapturer, MicOpenConfig, OcrEngine, PermissionProbe};
 use lumen_platform_macos::{
     request_screen_recording, MacDisplays, MacFrontmost, MacMicCapturer, MacPermissions,
@@ -50,6 +51,7 @@ async fn main() -> Result<()> {
         audio_silence_ms = config.audio.session_silence_ms,
         ocr = config.ocr.enabled,
         asr = config.asr.enabled,
+        asr_engine = %config.asr.engine,
         asr_locale = %config.asr.locale,
         ticks_screen = config.capture.screen_ticks,
         ticks_audio = config.audio.ticks,
@@ -147,41 +149,47 @@ async fn main() -> Result<()> {
     };
 
     // --- ASR worker (async; independent of capture) ---
+    // Continuous mic → audio_chunk → transcribe_audio jobs → engine (SenseVoice default).
     let (asr_cancel_tx, asr_cancel_rx) = watch::channel(false);
     let asr_handle = if config.asr.enabled {
-        let engine = Arc::new(MacSpeechAsr::with_max_audio_bytes(
-            config.asr.max_audio_bytes as usize,
-        ));
-        if engine.is_supported() {
-            let worker = Arc::new(TranscribeWorker::new(
-                Arc::clone(&store),
-                engine,
-                TranscribeWorkerConfig {
-                    locale: config.asr.locale.clone(),
-                    poll_interval: Duration::from_millis(config.asr.poll_interval_ms),
-                    batch_size: config.asr.batch_size.max(1),
-                    max_attempts: config.asr.max_attempts as i64,
-                    retry_base: Duration::from_millis(config.asr.retry_base_ms),
-                    retry_max: Duration::from_millis(config.asr.retry_max_ms),
-                    engine_timeout: Duration::from_millis(config.asr.timeout_ms),
-                    stale_running: Duration::from_millis(config.asr.stale_running_ms),
-                    max_audio_bytes: config.asr.max_audio_bytes as usize,
-                    max_text_chars: config.asr.max_text_chars as usize,
-                    shutdown_drain: Duration::from_millis(config.asr.shutdown_drain_ms),
-                },
-            ));
-            let _ = worker.reclaim_stale();
-            let w = Arc::clone(&worker);
-            let rx = asr_cancel_rx.clone();
-            Some((
-                worker,
-                tokio::spawn(async move {
-                    w.run_until_cancelled(rx).await;
-                }),
-            ))
-        } else {
-            warn!("Speech ASR not supported on this OS; worker not started");
-            None
+        match build_asr_engine(&config.asr) {
+            Ok(engine) => {
+                if engine.is_supported() {
+                    let worker = Arc::new(TranscribeWorker::new(
+                        Arc::clone(&store),
+                        engine,
+                        TranscribeWorkerConfig {
+                            locale: config.asr.locale.clone(),
+                            poll_interval: Duration::from_millis(config.asr.poll_interval_ms),
+                            batch_size: config.asr.batch_size.max(1),
+                            max_attempts: config.asr.max_attempts as i64,
+                            retry_base: Duration::from_millis(config.asr.retry_base_ms),
+                            retry_max: Duration::from_millis(config.asr.retry_max_ms),
+                            engine_timeout: Duration::from_millis(config.asr.timeout_ms),
+                            stale_running: Duration::from_millis(config.asr.stale_running_ms),
+                            max_audio_bytes: config.asr.max_audio_bytes as usize,
+                            max_text_chars: config.asr.max_text_chars as usize,
+                            shutdown_drain: Duration::from_millis(config.asr.shutdown_drain_ms),
+                        },
+                    ));
+                    let _ = worker.reclaim_stale();
+                    let w = Arc::clone(&worker);
+                    let rx = asr_cancel_rx.clone();
+                    Some((
+                        worker,
+                        tokio::spawn(async move {
+                            w.run_until_cancelled(rx).await;
+                        }),
+                    ))
+                } else {
+                    warn!("ASR engine reports not supported; worker not started");
+                    None
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "ASR engine unavailable; worker not started");
+                None
+            }
         }
     } else {
         info!("ASR disabled in config");
@@ -596,6 +604,71 @@ async fn run_audio_loop(
     orch.force_close_session();
     stream.stop();
     Ok(orch.stats())
+}
+
+/// Resolve continuous Observe ASR engine from config.
+/// Default: SenseVoice (sherpa). Optional: Whisper, OpenAI-compatible HTTP (Qwen ASR), Speech.
+fn build_asr_engine(asr: &AsrConfig) -> Result<Arc<dyn AsrEngine>, String> {
+    let kind = EngineKind::parse(asr.engine_name()).unwrap_or_else(|| {
+        warn!(
+            engine = %asr.engine,
+            "unknown asr.engine; defaulting to sensevoice"
+        );
+        EngineKind::SenseVoice
+    });
+    let st = engine_status(
+        kind,
+        if asr.model_dir.is_empty() {
+            None
+        } else {
+            Some(asr.model_dir.as_str())
+        },
+    );
+    info!(
+        engine = %kind.as_str(),
+        ready = st.ready,
+        model_dir = %st.model_dir,
+        detail = %st.detail,
+        "ASR engine status"
+    );
+
+    let build_cfg = EngineBuildConfig {
+        kind,
+        model_dir: if asr.model_dir.is_empty() {
+            std::path::PathBuf::new()
+        } else {
+            std::path::PathBuf::from(&asr.model_dir)
+        },
+        locale: asr.locale.clone(),
+        max_audio_bytes: asr.max_audio_bytes as usize,
+        http_base_url: asr.http_base_url.clone(),
+        http_api_key: asr.effective_http_api_key(),
+        http_model: asr.http_model.clone(),
+        http_timeout_ms: asr.timeout_ms,
+        http_engine_label: asr.http_engine_label.clone(),
+    };
+
+    match kind {
+        EngineKind::Speech => Ok(speech_engine(asr)),
+        other => match build_engine(&build_cfg) {
+            Ok(Some(eng)) => Ok(eng),
+            Ok(None) => Err(format!("engine {other:?} unexpectedly returned none")),
+            Err(e) if asr.fallback_speech && other != EngineKind::OpenAiAudio => {
+                warn!(
+                    error = %e,
+                    "preferred ASR engine failed; falling back to macOS Speech"
+                );
+                Ok(speech_engine(asr))
+            }
+            Err(e) => Err(e),
+        },
+    }
+}
+
+fn speech_engine(asr: &AsrConfig) -> Arc<dyn AsrEngine> {
+    Arc::new(MacSpeechAsr::with_max_audio_bytes(
+        asr.max_audio_bytes as usize,
+    ))
 }
 
 #[inline]
