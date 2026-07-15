@@ -73,6 +73,7 @@ pub fn run() {
             asr_models::list_local_asr_models,
             asr_models::use_existing_asr_model,
             asr_models::set_asr_engine_preference,
+            asr_models::set_asr_models_root,
             asr_models::start_asr_model_download,
             asr_models::cancel_asr_model_download,
         ])

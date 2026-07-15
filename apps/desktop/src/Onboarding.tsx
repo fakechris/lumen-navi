@@ -25,7 +25,7 @@ const STEPS = [
   },
   {
     title: "本地 ASR 模型",
-    body: "默认 SenseVoice（sherpa-onnx）。可选用本机已有模型，或下载官方 int8 包。也可暂时用 Speech。",
+    body: "默认 SenseVoice。模型装在 Lumen 共享目录（navi / asr 等共用，只下一次）。可自选任意已有目录，或下载官方 int8 包。",
   },
   {
     title: "准备就绪",
@@ -223,6 +223,15 @@ export function Onboarding({
               </select>
             </div>
 
+            {asr?.models_root && (
+              <div className="onboard-status">
+                <div className="meta">Lumen 共享模型目录（全应用）</div>
+                <p className="meta mono" style={{ wordBreak: "break-all", marginTop: 4 }}>
+                  {asr.models_root}
+                </p>
+              </div>
+            )}
+
             {engineChoice === "sensevoice" && (
               <div className={`onboard-status ${asrReady ? "ok" : ""}`}>
                 <div className="row" style={{ justifyContent: "space-between" }}>
@@ -368,7 +377,7 @@ export function Onboarding({
                     })()
                   }
                 >
-                  {asrReady ? "已就绪" : "下载 SenseVoice"}
+                  {asrReady ? "已就绪" : "下载 SenseVoice（共享目录）"}
                 </button>
                 <button
                   type="button"

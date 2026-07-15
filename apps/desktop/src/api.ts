@@ -68,6 +68,8 @@ export const api = {
     }),
   setAsrEnginePreference: (engine: string) =>
     invoke<AsrModelStatus>("set_asr_engine_preference", { engine }),
+  setAsrModelsRoot: (modelsRoot: string) =>
+    invoke<AsrModelStatus>("set_asr_models_root", { modelsRoot }),
   startAsrModelDownload: () => invoke<AsrModelStatus>("start_asr_model_download"),
   cancelAsrModelDownload: () => invoke<void>("cancel_asr_model_download"),
 };

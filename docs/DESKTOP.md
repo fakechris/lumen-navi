@@ -118,11 +118,14 @@ Wizard steps:
 4. **Local ASR model** — choose engine, pick existing dir, or **download SenseVoice**  
 5. Ready / launch Observe  
 
-Model selection writes product `navi.toml` (`asr.engine`, `asr.model_dir`). Download installs to  
-`~/Library/Application Support/LumenNavi/models/sensevoice/` (same sherpa package as Lumen ASR).
+Model selection writes product `navi.toml` (`asr.engine`, `asr.model_dir`, optional `asr.models_root`).  
+**Download installs to the shared cluster path**  
+`~/Library/Application Support/Lumen/models/sensevoice/` (shared with Lumen ASR / future apps).  
+Users may pick any ready directory (shared, legacy per-app, or custom).
 
-Commands: `check_asr_model_status`, `use_existing_asr_model`, `start_asr_model_download`,  
-`cancel_asr_model_download`, `set_asr_engine_preference`. Event: `asr-download-progress`.
+Commands: `check_asr_model_status`, `use_existing_asr_model`, `set_asr_models_root`,  
+`start_asr_model_download`, `cancel_asr_model_download`, `set_asr_engine_preference`.  
+Event: `asr-download-progress`.
 
 ## Relationship to Lumen ASR desktop
 

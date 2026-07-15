@@ -2,7 +2,7 @@
 //!
 //! Uses system `curl` + `tar` (macOS-friendly, same approach as lumen-asr).
 
-use crate::paths::{app_models_dir, sensevoice_ready};
+use crate::paths::{lumen_models_dir, sensevoice_ready};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,9 +21,10 @@ pub struct DownloadProgress {
     pub total: Option<u64>,
 }
 
-/// Install SenseVoice under `models_root/sensevoice` (default: app models dir parent).
+/// Install SenseVoice under `models_root/sensevoice`.
 ///
-/// `models_root` is typically `…/LumenNavi/models` — final path is `{models_root}/sensevoice`.
+/// Default `models_root` is the **shared Lumen cluster** path
+/// (`…/Application Support/Lumen/models`) so navi / asr / future apps share one download.
 pub fn download_sensevoice_package(
     models_root: &Path,
     cancel: &AtomicBool,
@@ -128,9 +129,9 @@ pub fn download_sensevoice_package(
     Ok(final_dir)
 }
 
-/// Default install root: `…/LumenNavi/models`.
+/// Default install root: shared `…/Lumen/models` (cluster-wide).
 pub fn default_models_root() -> PathBuf {
-    app_models_dir()
+    lumen_models_dir()
 }
 
 fn find_sensevoice_dir(root: &Path) -> Option<PathBuf> {

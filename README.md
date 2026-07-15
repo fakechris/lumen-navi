@@ -54,9 +54,9 @@ cargo run -p lumen-daemon
 
 Requires Rust stable (edition 2021+). Grant **Screen Recording** / **Microphone** (and **Speech Recognition** if using `asr.engine = speech` or Speech fallback).
 
-Default continuous ASR is **SenseVoice** (local sherpa-onnx). Place models under  
-`~/Library/Application Support/LumenNavi/models/sensevoice/` or set `asr.model_dir` / `LUMEN_SENSEVOICE_DIR`.  
-Optional: `whisper`, `speech`, or OpenAI-compatible HTTP (`qwen` / `openai_audio`, e.g. Qwen ASR 0.8B). See [`docs/AUDIO_PRODUCT.md`](docs/AUDIO_PRODUCT.md).
+Default continuous ASR is **SenseVoice** (local sherpa-onnx). Models live under the **shared Lumen cluster** path  
+`~/Library/Application Support/Lumen/models/` (override with `LUMEN_MODELS_DIR` / `asr.models_root`) so navi and asr share one download.  
+Pick any ready folder via `asr.model_dir` or onboarding. Optional engines: `whisper`, `speech`, OpenAI-compatible HTTP (`qwen`). See [`docs/AUDIO_PRODUCT.md`](docs/AUDIO_PRODUCT.md).
 
 ```bash
 # search while daemon is up

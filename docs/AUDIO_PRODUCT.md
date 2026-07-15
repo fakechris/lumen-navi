@@ -124,7 +124,8 @@ system_audio = false         # reserved (ScreenCaptureKit); mic-only for now
 enabled = true
 # sensevoice | whisper | speech | openai_audio | qwen
 engine = "sensevoice"
-model_dir = ""               # empty = auto-resolve
+models_root = ""             # empty = LUMEN_MODELS_DIR or …/Lumen/models (shared)
+model_dir = ""               # empty = auto under models_root / discovery; or pick any path
 locale = "zh-CN"
 fallback_speech = true       # if offline model missing → Speech.framework
 # --- HTTP engines (openai_audio / qwen) ---
@@ -155,22 +156,39 @@ Default: **SenseVoice** (local sherpa-onnx) — same model family as Lumen ASR.
 | `speech` | macOS Speech.framework | No local model; Apple permission |
 | `openai_audio` / `qwen` | HTTP `POST …/audio/transcriptions` | Qwen ASR 0.8B, Whisper API, local OpenAI-compat server |
 
-### Model paths (SenseVoice / Whisper)
+### Model paths (SenseVoice / Whisper) — shared Lumen cluster
 
-Resolution order:
+All Lumen apps (**navi**, **asr**, future) share one models root so downloads happen once:
 
-1. `asr.model_dir` if set  
-2. `LUMEN_NAVI_SENSEVOICE_DIR` / `LUMEN_SENSEVOICE_DIR` (or Whisper equivalents)  
-3. `~/Library/Application Support/LumenNavi/models/sensevoice`  
-4. Shared caches: LumenAsr app models, `~/.coli/models/sherpa-onnx-sense-voice-…`
+| Platform | Default shared root |
+|----------|---------------------|
+| macOS | `~/Library/Application Support/Lumen/models/` |
+| other | `~/.lumen/models/` |
+| env | `LUMEN_MODELS_DIR` |
+| config | `asr.models_root` (empty = env / default) |
+
+Layout:
+
+```
+…/Lumen/models/
+  sensevoice/     # model.int8.onnx + tokens.txt
+  whisper/        # encoder/decoder/tokens
+  <user dirs>/    # any extra ready folders are discovered
+```
+
+Resolution order for engine dir:
+
+1. `asr.model_dir` if set (user choice — any path)  
+2. `LUMEN_SENSEVOICE_DIR` / `LUMEN_WHISPER_DIR`  
+3. `{models_root}/sensevoice` or `…/whisper` if ready  
+4. Legacy discovery (still selectable): `LumenAsr/models`, `LumenNavi/models`, `~/.coli/models/…`  
+5. Default install target: `{models_root}/sensevoice` (shared)
 
 SenseVoice package (int8, from sherpa releases):
 
 ```
 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
 ```
-
-Unpack so the directory contains `model.int8.onnx` (or `model.onnx`) + `tokens.txt`.
 
 ### Desktop onboarding (model select / download)
 
@@ -179,9 +197,9 @@ First-run wizard includes a **本地 ASR 模型** step (after mic permission), p
 | Action | Effect |
 |--------|--------|
 | Choose engine | `sensevoice` / `whisper` / `speech` → written to `navi.toml` |
-| Pick detected candidate | Sets `asr.model_dir` + engine |
-| Paste path + validate | Same, after `model*.onnx` / Whisper layout check |
-| **下载 SenseVoice** | curl + tar into `~/Library/Application Support/LumenNavi/models/sensevoice/` |
+| Pick detected candidate | Sets `asr.model_dir` + engine (shared, legacy, or custom) |
+| Paste path + validate | Same — user can point at any ready folder |
+| **下载 SenseVoice** | curl + tar into **shared** `…/Lumen/models/sensevoice/` |
 | Skip | Continue without local model (`fallback_speech` still available) |
 
 Progress events: Tauri event `asr-download-progress`. Cancel via `cancel_asr_model_download`.

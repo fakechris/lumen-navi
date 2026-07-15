@@ -653,7 +653,7 @@ export default function App() {
                         <span className="meta">本地模型目录（可空=自动）</span>
                         <input
                           className="input"
-                          placeholder="~/Library/Application Support/LumenNavi/models/sensevoice"
+                          placeholder="~/Library/Application Support/Lumen/models/sensevoice"
                           value={cfg?.asr_model_dir ?? ""}
                           onChange={(e) => {
                             const asr_model_dir = e.target.value;

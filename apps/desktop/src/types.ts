@@ -114,6 +114,8 @@ export interface AsrModelStatus {
   sensevoice_dir: string;
   whisper_ready: boolean;
   whisper_dir: string;
+  /** Shared Lumen cluster models root (navi/asr/future apps). */
+  models_root: string;
   active_engine: string;
   active_model_dir: string;
   candidates: AsrModelCandidate[];

@@ -1,74 +1,127 @@
 //! Resolve offline ASR model directories (SenseVoice / Whisper).
 //!
-//! Pattern mirrors lumen-asr: env → app models dir → known local caches.
+//! **Shared cluster root** — all Lumen apps (navi, asr, future) install and
+//! discover models under one place so users do not re-download per product:
+//!
+//! - macOS: `~/Library/Application Support/Lumen/models/`
+//! - other: `~/.lumen/models/`
+//! - override: env `LUMEN_MODELS_DIR` or config `asr.models_root`
+//!
+//! Per-app legacy paths (`LumenAsr/models`, `LumenNavi/models`, coli caches)
+//! are still **discovered** and selectable; new downloads go to the shared root.
 
 use std::path::{Path, PathBuf};
 
-/// Product Application Support models root for Navi.
-pub fn app_models_dir() -> PathBuf {
+/// Env var for the shared Lumen models root (cluster-wide).
+pub const ENV_LUMEN_MODELS_DIR: &str = "LUMEN_MODELS_DIR";
+
+/// Shared models root for the Lumen app cluster.
+///
+/// Priority: `override_root` → `LUMEN_MODELS_DIR` → platform default
+/// (`…/Application Support/Lumen/models` on macOS).
+pub fn lumen_models_dir() -> PathBuf {
+    lumen_models_dir_with_override(None)
+}
+
+pub fn lumen_models_dir_with_override(override_root: Option<&Path>) -> PathBuf {
+    if let Some(p) = override_root {
+        if !p.as_os_str().is_empty() {
+            return p.to_path_buf();
+        }
+    }
+    if let Ok(p) = std::env::var(ENV_LUMEN_MODELS_DIR) {
+        let t = p.trim();
+        if !t.is_empty() {
+            return PathBuf::from(t);
+        }
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     #[cfg(target_os = "macos")]
     {
-        PathBuf::from(home).join("Library/Application Support/LumenNavi/models")
+        PathBuf::from(home).join("Library/Application Support/Lumen/models")
     }
     #[cfg(not(target_os = "macos"))]
     {
-        PathBuf::from(home).join(".lumen-navi/models")
+        PathBuf::from(home).join(".lumen/models")
     }
 }
 
-/// Prefer env, then Navi app dir, then shared LumenAsr / coli caches (dev machines).
+/// Canonical install / default lookup dir for SenseVoice under the cluster root.
+pub fn shared_sensevoice_dir(models_root: Option<&Path>) -> PathBuf {
+    lumen_models_dir_with_override(models_root).join("sensevoice")
+}
+
+/// Canonical install / default lookup dir for Whisper under the cluster root.
+pub fn shared_whisper_dir(models_root: Option<&Path>) -> PathBuf {
+    lumen_models_dir_with_override(models_root).join("whisper")
+}
+
+/// @deprecated Prefer [`lumen_models_dir`]. Alias kept for call sites.
+pub fn app_models_dir() -> PathBuf {
+    lumen_models_dir()
+}
+
+/// Prefer env → shared cluster → ready legacy locations → shared (install target).
 pub fn default_sensevoice_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("LUMEN_NAVI_SENSEVOICE_DIR") {
-        return PathBuf::from(p);
-    }
+    default_sensevoice_dir_with_root(None)
+}
+
+pub fn default_sensevoice_dir_with_root(models_root: Option<&Path>) -> PathBuf {
     if let Ok(p) = std::env::var("LUMEN_SENSEVOICE_DIR") {
-        return PathBuf::from(p);
-    }
-    let app = app_models_dir().join("sensevoice");
-    if sensevoice_ready(&app) {
-        return app;
-    }
-    // Reuse lumen-asr install if present
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let candidates = [
-        format!("{home}/Library/Application Support/LumenAsr/models/sensevoice"),
-        format!("{home}/.coli/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"),
-        format!("{home}/.coli/models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"),
-    ];
-    for c in candidates {
-        let p = PathBuf::from(&c);
-        if sensevoice_ready(&p) {
-            return p;
+        let t = p.trim();
+        if !t.is_empty() {
+            return PathBuf::from(t);
         }
     }
-    app
+    if let Ok(p) = std::env::var("LUMEN_NAVI_SENSEVOICE_DIR") {
+        let t = p.trim();
+        if !t.is_empty() {
+            return PathBuf::from(t);
+        }
+    }
+
+    let shared = shared_sensevoice_dir(models_root);
+    if sensevoice_ready(&shared) {
+        return shared;
+    }
+
+    for (path, _) in sensevoice_discovery_paths(models_root) {
+        if path != shared && sensevoice_ready(&path) {
+            return path;
+        }
+    }
+    // Empty shared path = default download / config target (one place for all apps).
+    shared
 }
 
 pub fn default_whisper_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("LUMEN_NAVI_WHISPER_DIR") {
-        return PathBuf::from(p);
-    }
+    default_whisper_dir_with_root(None)
+}
+
+pub fn default_whisper_dir_with_root(models_root: Option<&Path>) -> PathBuf {
     if let Ok(p) = std::env::var("LUMEN_WHISPER_DIR") {
-        return PathBuf::from(p);
-    }
-    let app = app_models_dir().join("whisper");
-    if whisper_ready(&app) {
-        return app;
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let candidates = [
-        format!("{home}/Library/Application Support/LumenAsr/models/whisper"),
-        format!("{home}/.coli/models/sherpa-onnx-whisper-tiny.en"),
-        format!("{home}/.coli/models/sherpa-onnx-whisper-base.en"),
-    ];
-    for c in candidates {
-        let p = PathBuf::from(&c);
-        if whisper_ready(&p) {
-            return p;
+        let t = p.trim();
+        if !t.is_empty() {
+            return PathBuf::from(t);
         }
     }
-    app
+    if let Ok(p) = std::env::var("LUMEN_NAVI_WHISPER_DIR") {
+        let t = p.trim();
+        if !t.is_empty() {
+            return PathBuf::from(t);
+        }
+    }
+
+    let shared = shared_whisper_dir(models_root);
+    if whisper_ready(&shared) {
+        return shared;
+    }
+    for (path, _) in whisper_discovery_paths(models_root) {
+        if path != shared && whisper_ready(&path) {
+            return path;
+        }
+    }
+    shared
 }
 
 pub fn sensevoice_ready(dir: &Path) -> bool {
@@ -81,24 +134,108 @@ pub fn whisper_ready(dir: &Path) -> bool {
         && whisper_tokens_path(dir).is_some()
 }
 
-/// Scan known locations for ready (or placeholder app) model dirs.
+/// (path, source label) for SenseVoice discovery — shared first, then legacy.
+fn sensevoice_discovery_paths(models_root: Option<&Path>) -> Vec<(PathBuf, &'static str)> {
+    let mut out = Vec::new();
+    let shared_root = lumen_models_dir_with_override(models_root);
+    out.push((shared_root.join("sensevoice"), "lumen-shared"));
+
+    // Any ready subdir under shared models root (user-managed layouts)
+    if let Ok(rd) = std::fs::read_dir(&shared_root) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name == "sensevoice" || name.contains("extract") {
+                    continue;
+                }
+                if sensevoice_ready(&p) {
+                    out.push((p, "lumen-shared"));
+                }
+            }
+        }
+    }
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let h = PathBuf::from(&home);
+    out.push((
+        h.join("Library/Application Support/LumenAsr/models/sensevoice"),
+        "legacy-lumen-asr",
+    ));
+    out.push((
+        h.join("Library/Application Support/LumenNavi/models/sensevoice"),
+        "legacy-lumen-navi",
+    ));
+    for name in [
+        "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+        "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+    ] {
+        out.push((h.join(".coli/models").join(name), "coli-cache"));
+    }
+    out
+}
+
+fn whisper_discovery_paths(models_root: Option<&Path>) -> Vec<(PathBuf, &'static str)> {
+    let mut out = Vec::new();
+    let shared_root = lumen_models_dir_with_override(models_root);
+    out.push((shared_root.join("whisper"), "lumen-shared"));
+
+    if let Ok(rd) = std::fs::read_dir(&shared_root) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name == "whisper" || name.contains("extract") {
+                    continue;
+                }
+                if whisper_ready(&p) {
+                    out.push((p, "lumen-shared"));
+                }
+            }
+        }
+    }
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let h = PathBuf::from(&home);
+    out.push((
+        h.join("Library/Application Support/LumenAsr/models/whisper"),
+        "legacy-lumen-asr",
+    ));
+    out.push((
+        h.join("Library/Application Support/LumenNavi/models/whisper"),
+        "legacy-lumen-navi",
+    ));
+    for name in [
+        "sherpa-onnx-whisper-tiny.en",
+        "sherpa-onnx-whisper-base.en",
+    ] {
+        out.push((h.join(".coli/models").join(name), "coli-cache"));
+    }
+    out
+}
+
+/// Scan known locations for ready (or placeholder shared) model dirs.
+///
+/// Users can pick any ready path; new downloads land under the shared root.
 pub fn scan_model_candidates() -> Vec<ModelCandidate> {
+    scan_model_candidates_with_root(None)
+}
+
+pub fn scan_model_candidates_with_root(models_root: Option<&Path>) -> Vec<ModelCandidate> {
     let mut out = Vec::new();
     let mut push = |engine: &str, path: PathBuf, source: &str| {
-        if !path.exists() && source != "app" {
-            return;
-        }
         let ready = match engine {
             "sensevoice" => sensevoice_ready(&path),
             "whisper" => whisper_ready(&path),
             _ => false,
         };
-        if !ready && source != "app" {
+        let is_shared_target = source == "lumen-shared"
+            && (path.ends_with("sensevoice") || path.ends_with("whisper"));
+        if !ready && !is_shared_target {
             return;
         }
-        // Ensure parent exists listing for app target
-        if source == "app" && !path.exists() {
-            // still list planned install path
+        if !ready && is_shared_target {
+            // List planned install path even if missing.
         } else if !path.exists() {
             return;
         }
@@ -109,7 +246,7 @@ pub fn scan_model_candidates() -> Vec<ModelCandidate> {
         let label = if ready {
             format!("{name} · {source}")
         } else {
-            format!("{engine} ({source}) — 下载目标")
+            format!("{engine} · {source} — 下载目标（全 Lumen 应用共享）")
         };
         out.push(ModelCandidate {
             engine: engine.into(),
@@ -120,54 +257,45 @@ pub fn scan_model_candidates() -> Vec<ModelCandidate> {
         });
     };
 
-    let app_sv = app_models_dir().join("sensevoice");
-    push("sensevoice", app_sv, "app");
-    if let Ok(p) = std::env::var("LUMEN_NAVI_SENSEVOICE_DIR") {
-        push("sensevoice", PathBuf::from(p), "env");
-    }
     if let Ok(p) = std::env::var("LUMEN_SENSEVOICE_DIR") {
-        push("sensevoice", PathBuf::from(p), "env");
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let h = PathBuf::from(&home);
-    push(
-        "sensevoice",
-        h.join("Library/Application Support/LumenAsr/models/sensevoice"),
-        "lumen-asr",
-    );
-    for name in [
-        "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
-        "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
-    ] {
-        push(
-            "sensevoice",
-            h.join(".coli/models").join(name),
-            "coli-cache",
-        );
-    }
-
-    let app_wh = app_models_dir().join("whisper");
-    push("whisper", app_wh, "app");
-    if let Ok(p) = std::env::var("LUMEN_NAVI_WHISPER_DIR") {
-        push("whisper", PathBuf::from(p), "env");
+        if !p.trim().is_empty() {
+            push("sensevoice", PathBuf::from(p.trim()), "env");
+        }
     }
     if let Ok(p) = std::env::var("LUMEN_WHISPER_DIR") {
-        push("whisper", PathBuf::from(p), "env");
+        if !p.trim().is_empty() {
+            push("whisper", PathBuf::from(p.trim()), "env");
+        }
     }
-    push(
-        "whisper",
-        h.join("Library/Application Support/LumenAsr/models/whisper"),
-        "lumen-asr",
-    );
-    for name in [
-        "sherpa-onnx-whisper-tiny.en",
-        "sherpa-onnx-whisper-base.en",
-    ] {
-        push("whisper", h.join(".coli/models").join(name), "coli-cache");
+
+    for (path, source) in sensevoice_discovery_paths(models_root) {
+        push("sensevoice", path, source);
+    }
+    for (path, source) in whisper_discovery_paths(models_root) {
+        push("whisper", path, source);
     }
 
     let mut seen = std::collections::HashSet::new();
     out.retain(|c| seen.insert(c.path.clone()));
+    // Prefer ready shared first in UI: sort ready+lumen-shared first
+    out.sort_by(|a, b| {
+        let score = |c: &ModelCandidate| {
+            let mut s = 0i32;
+            if c.ready {
+                s += 10;
+            }
+            if c.source == "lumen-shared" {
+                s += 5;
+            }
+            if c.source == "env" {
+                s += 8;
+            }
+            -s // descending via reverse compare
+        };
+        score(a)
+            .cmp(&score(b))
+            .then_with(|| a.path.cmp(&b.path))
+    });
     out
 }
 
@@ -239,5 +367,33 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         assert!(!sensevoice_ready(&dir));
         assert!(!whisper_ready(&dir));
+    }
+
+    #[test]
+    fn shared_root_ends_with_models() {
+        let d = lumen_models_dir();
+        assert!(d.ends_with("models") || d.to_string_lossy().contains("models"));
+    }
+
+    #[test]
+    fn override_models_root_install_path() {
+        let root = std::env::temp_dir().join(format!(
+            "lumen-test-models-root-{}",
+            std::process::id()
+        ));
+        assert_eq!(
+            lumen_models_dir_with_override(Some(&root)),
+            root
+        );
+        assert_eq!(
+            shared_sensevoice_dir(Some(&root)),
+            root.join("sensevoice")
+        );
+        // Download target is always the shared subdir under models_root,
+        // even when legacy caches exist on the machine.
+        assert_eq!(
+            shared_whisper_dir(Some(&root)),
+            root.join("whisper")
+        );
     }
 }

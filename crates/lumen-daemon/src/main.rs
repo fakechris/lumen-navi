@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use lumen_api::{HealthResponse, SourceStatus};
-use lumen_asr_engine::{build_engine, engine_status, EngineBuildConfig, EngineKind};
+use lumen_asr_engine::{
+    build_engine, engine_status_with_root, EngineBuildConfig, EngineKind,
+};
 use lumen_config::{AsrConfig, AudioConfig, Config, PrivacyConfig};
 use lumen_platform::{AsrEngine, MicCapturer, MicOpenConfig, OcrEngine, PermissionProbe};
 use lumen_platform_macos::{
@@ -616,24 +618,31 @@ fn build_asr_engine(asr: &AsrConfig) -> Result<Arc<dyn AsrEngine>, String> {
         );
         EngineKind::SenseVoice
     });
-    let st = engine_status(
+    let models_root = asr.models_root_path();
+    let st = engine_status_with_root(
         kind,
         if asr.model_dir.is_empty() {
             None
         } else {
             Some(asr.model_dir.as_str())
         },
+        models_root.as_deref(),
     );
     info!(
         engine = %kind.as_str(),
         ready = st.ready,
         model_dir = %st.model_dir,
+        models_root = %models_root
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(shared Lumen default)".into()),
         detail = %st.detail,
         "ASR engine status"
     );
 
     let build_cfg = EngineBuildConfig {
         kind,
+        models_root: models_root.clone().unwrap_or_default(),
         model_dir: if asr.model_dir.is_empty() {
             std::path::PathBuf::new()
         } else {

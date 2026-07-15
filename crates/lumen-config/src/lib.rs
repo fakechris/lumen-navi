@@ -115,7 +115,12 @@ pub struct AsrConfig {
     pub enabled: bool,
     /// `sensevoice` | `whisper` | `speech` | `openai_audio` | `qwen`
     pub engine: String,
-    /// Offline model directory (SenseVoice/Whisper). Empty = auto-resolve.
+    /// Shared Lumen cluster models root (sensevoice/whisper install + scan).
+    /// Empty = `LUMEN_MODELS_DIR` or `~/Library/Application Support/Lumen/models`.
+    /// All Lumen apps (navi, asr, …) should share this so models download once.
+    pub models_root: String,
+    /// Specific engine model directory. Empty = auto under `models_root` / discovery.
+    /// User may point at any ready folder (shared, legacy, or custom).
     pub model_dir: String,
     /// BCP-47 locale (Speech / language hints), e.g. `zh-CN`, `en-US`.
     pub locale: String,
@@ -146,6 +151,7 @@ impl Default for AsrConfig {
         Self {
             enabled: true,
             engine: "sensevoice".into(),
+            models_root: String::new(),
             model_dir: String::new(),
             locale: "zh-CN".into(),
             fallback_speech: true,
@@ -171,6 +177,16 @@ impl AsrConfig {
     /// Normalized engine name (lowercase).
     pub fn engine_name(&self) -> &str {
         self.engine.trim()
+    }
+
+    /// Shared cluster models root if configured; `None` → engine default resolution.
+    pub fn models_root_path(&self) -> Option<std::path::PathBuf> {
+        let t = self.models_root.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(t))
+        }
     }
 
     /// Effective API key: env override then config.

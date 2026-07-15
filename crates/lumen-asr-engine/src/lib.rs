@@ -23,8 +23,10 @@ pub use download::{
 };
 pub use openai_http::{OpenAiAudioAsr, OpenAiAudioConfig};
 pub use paths::{
-    app_models_dir, default_sensevoice_dir, default_whisper_dir, scan_model_candidates,
-    sensevoice_ready, whisper_ready, ModelCandidate,
+    app_models_dir, default_sensevoice_dir, default_sensevoice_dir_with_root, default_whisper_dir,
+    default_whisper_dir_with_root, lumen_models_dir, lumen_models_dir_with_override,
+    scan_model_candidates, scan_model_candidates_with_root, sensevoice_ready, shared_sensevoice_dir,
+    shared_whisper_dir, whisper_ready, ModelCandidate, ENV_LUMEN_MODELS_DIR,
 };
 pub use sensevoice::SenseVoiceSherpaAsr;
 pub use wav::{
@@ -35,7 +37,7 @@ pub use whisper::WhisperAsr;
 
 use lumen_platform::AsrEngine;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -90,7 +92,9 @@ impl Default for EngineKind {
 #[derive(Debug, Clone)]
 pub struct EngineBuildConfig {
     pub kind: EngineKind,
-    /// Override model dir; empty → auto-resolve for SenseVoice/Whisper.
+    /// Shared cluster models root override; empty → `LUMEN_MODELS_DIR` / default Lumen/models.
+    pub models_root: PathBuf,
+    /// Override model dir; empty → auto-resolve under models_root / discovery.
     pub model_dir: PathBuf,
     pub locale: String,
     pub max_audio_bytes: usize,
@@ -106,6 +110,7 @@ impl Default for EngineBuildConfig {
     fn default() -> Self {
         Self {
             kind: EngineKind::SenseVoice,
+            models_root: PathBuf::new(),
             model_dir: PathBuf::new(),
             locale: "zh-CN".into(),
             max_audio_bytes: 8 * 1024 * 1024,
@@ -114,6 +119,16 @@ impl Default for EngineBuildConfig {
             http_model: "whisper-1".into(),
             http_timeout_ms: 120_000,
             http_engine_label: "openai_audio".into(),
+        }
+    }
+}
+
+impl EngineBuildConfig {
+    fn models_root_opt(&self) -> Option<&Path> {
+        if self.models_root.as_os_str().is_empty() {
+            None
+        } else {
+            Some(self.models_root.as_path())
         }
     }
 }
@@ -128,12 +143,20 @@ pub struct EngineStatus {
 
 /// Status probe for settings UI / logs (does not load models).
 pub fn engine_status(kind: EngineKind, model_dir: Option<&str>) -> EngineStatus {
+    engine_status_with_root(kind, model_dir, None)
+}
+
+pub fn engine_status_with_root(
+    kind: EngineKind,
+    model_dir: Option<&str>,
+    models_root: Option<&Path>,
+) -> EngineStatus {
     match kind {
         EngineKind::SenseVoice => {
             let dir = if let Some(d) = model_dir.filter(|s| !s.is_empty()) {
                 PathBuf::from(d)
             } else {
-                default_sensevoice_dir()
+                default_sensevoice_dir_with_root(models_root)
             };
             let ready = sensevoice_ready(&dir);
             EngineStatus {
@@ -143,7 +166,10 @@ pub fn engine_status(kind: EngineKind, model_dir: Option<&str>) -> EngineStatus 
                 detail: if ready {
                     "SenseVoice model ready".into()
                 } else {
-                    "missing model*.onnx + tokens.txt (see docs/AUDIO_PRODUCT.md)".into()
+                    format!(
+                        "missing model*.onnx + tokens.txt under {} (shared Lumen models)",
+                        dir.display()
+                    )
                 },
             }
         }
@@ -151,7 +177,7 @@ pub fn engine_status(kind: EngineKind, model_dir: Option<&str>) -> EngineStatus 
             let dir = if let Some(d) = model_dir.filter(|s| !s.is_empty()) {
                 PathBuf::from(d)
             } else {
-                default_whisper_dir()
+                default_whisper_dir_with_root(models_root)
             };
             let ready = whisper_ready(&dir);
             EngineStatus {
@@ -183,11 +209,12 @@ pub fn engine_status(kind: EngineKind, model_dir: Option<&str>) -> EngineStatus 
 /// Build a local/HTTP engine. Returns `None` for [`EngineKind::Speech`]
 /// (caller uses `MacSpeechAsr`).
 pub fn build_engine(cfg: &EngineBuildConfig) -> Result<Option<Arc<dyn AsrEngine>>, String> {
+    let root = cfg.models_root_opt();
     match cfg.kind {
         EngineKind::Speech => Ok(None),
         EngineKind::SenseVoice => {
             let dir = if cfg.model_dir.as_os_str().is_empty() {
-                default_sensevoice_dir()
+                default_sensevoice_dir_with_root(root)
             } else {
                 cfg.model_dir.clone()
             };
@@ -196,7 +223,7 @@ pub fn build_engine(cfg: &EngineBuildConfig) -> Result<Option<Arc<dyn AsrEngine>
                 .with_max_audio_bytes(cfg.max_audio_bytes);
             if !eng.is_ready() {
                 return Err(format!(
-                    "SenseVoice model not ready under {} (set asr.model_dir or LUMEN_SENSEVOICE_DIR)",
+                    "SenseVoice model not ready under {} (set asr.model_dir, asr.models_root, or LUMEN_MODELS_DIR)",
                     dir.display()
                 ));
             }
@@ -205,7 +232,7 @@ pub fn build_engine(cfg: &EngineBuildConfig) -> Result<Option<Arc<dyn AsrEngine>
         }
         EngineKind::Whisper => {
             let dir = if cfg.model_dir.as_os_str().is_empty() {
-                default_whisper_dir()
+                default_whisper_dir_with_root(root)
             } else {
                 cfg.model_dir.clone()
             };
@@ -215,7 +242,7 @@ pub fn build_engine(cfg: &EngineBuildConfig) -> Result<Option<Arc<dyn AsrEngine>
                 .with_max_audio_bytes(cfg.max_audio_bytes);
             if !eng.is_ready() {
                 return Err(format!(
-                    "Whisper model not ready under {} (set asr.model_dir or LUMEN_WHISPER_DIR)",
+                    "Whisper model not ready under {} (set asr.model_dir, asr.models_root, or LUMEN_MODELS_DIR)",
                     dir.display()
                 ));
             }
