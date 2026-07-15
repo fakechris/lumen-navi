@@ -11,6 +11,7 @@ members = [
   "crates/lumen-process",
   "crates/lumen-api",
   "crates/lumen-daemon",
+  "apps/desktop/src-tauri",
 ]
 default-members = [
   "crates/lumen-types",
@@ -44,7 +45,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "signal", "net"] }
-toml = "0.8"
+toml = { version = "0.8", features = ["parse", "display"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }

@@ -1,0 +1,34 @@
+[package]
+name = "lumen-navi-desktop"
+default-run = "lumen-navi-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lumen Navi desktop shell (Tauri) — Observe control + search UI"
+repository.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+lumen-api = { workspace = true }
+lumen-config = { workspace = true }
+lumen-platform = { workspace = true }
+lumen-platform-macos = { workspace = true }
+lumen-store = { workspace = true }
+lumen-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tokio = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

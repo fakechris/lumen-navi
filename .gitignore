@@ -37,3 +37,8 @@ MEMORY.md
 **/*DEEP*.md
 **/IDA_*.md
 **/*REVERSE*.md
+
+# Desktop frontend
+apps/desktop/node_modules/
+apps/desktop/dist/
+apps/desktop/src-tauri/target/

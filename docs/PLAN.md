@@ -111,11 +111,20 @@ Product: [`docs/OCR_PRODUCT.md`](OCR_PRODUCT.md)
 
 ---
 
-## Phase U1 — Surfaces
+## Phase U1 — Surfaces (desktop shell) ✅ MVP
 
-- Local timeline / search UI  
-- Optional bridge: ingest from / export to [Lumen ASR](https://github.com/fakechris/lumen-asr)  
-- Coding-agent transcript adapters  
+Product: [`docs/DESKTOP.md`](DESKTOP.md)
+
+- [x] Tauri 2 + React Mac app (`apps/desktop`)  
+- [x] Overview: permissions probe, start/stop Observe (`lumen-daemon` child), privacy pause  
+- [x] Search: OCR + transcript FTS  
+- [x] Activity: recent events  
+- [x] Settings: data dir + engine summary  
+- [ ] Polish: tray icon, signed DMG, onboarding wizard (ASR-style)  
+- [ ] Optional bridge: ingest from / export to [Lumen ASR](https://github.com/fakechris/lumen-asr)  
+- [ ] Coding-agent transcript adapters  
+
+**Exit (MVP):** shippable Mac shell that can run Observe and search local context without CLI.
 
 ---
 
@@ -143,15 +152,15 @@ https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 | Hash | BLAKE3 |
 | Image | JPEG default (q=75) |
 | Screen trigger | 2–5s interval + focus change |
-| Mic | Continuous chunks (default 5s); session+VAD optional |
+| Mic | Continuous chunks (default 3s @ 16 kHz); session+VAD optional |
 | System audio | After mic |
-| Desktop shell | After S3 |
+| Desktop shell | Tauri MVP (`apps/desktop`) |
 
 ---
 
 ## Next actions
 
-1. ~~S0 / S1 / S2 / S3 audio / S4 OCR + FTS~~  
-2. S4.1 OCR helper isolation (optional)  
-3. Manual soak: screen + audio 1h  
-4. U1 timeline / search UI (API ready)
+1. ~~S0–S4 + audio ASR + desktop shell MVP~~  
+2. Manual soak: screen + audio 1h  
+3. Desktop polish (tray, DMG, onboarding)  
+4. S4.1 OCR helper isolation (optional)

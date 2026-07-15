@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Lumen Navi needs the microphone to capture continuous context audio for local storage and on-device transcription.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Lumen Navi uses on-device speech recognition to turn captured audio into searchable text. Audio stays on this Mac.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Lumen Navi needs Screen Recording permission to capture your screen for local context memory.</string>
+</dict>
+</plist>

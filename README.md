@@ -16,33 +16,35 @@ Three planes:
 
 | Plane | Role | Status |
 |-------|------|--------|
-| **Observe** | Multi-source intake | Media-first (screen / audio / video) |
-| **Memory** | Durable store + async process | Core skeleton |
+| **Observe** | Multi-source intake | Screen + mic productized |
+| **Memory** | Durable store + async process | SQLite + FTS + jobs |
 | **Act** | Optional computer-use | Later, via open-source **cua-driver** (MIT) |
 
 Full write-up: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · roadmap: [`docs/PLAN.md`](docs/PLAN.md) · vision: [`docs/VISION.md`](docs/VISION.md)
+
+## Status (current)
+
+| Phase | Status |
+|-------|--------|
+| S0–S1 skeleton + store | ✅ |
+| S2 screen Observe | ✅ (manual soak open) |
+| S3 audio + Observe ASR | ✅ (16 kHz / 3s chunks; Speech → `transcript.v1`) |
+| S4 Vision OCR + FTS API | ✅ |
+| **U1 Tauri Mac app** | ✅ shell (control + search + start/stop daemon) |
+| S4.1 OCR helper isolation | optional later |
+| System audio / Chrome / Act | later |
 
 ## Workspace
 
 ```
 lumen-navi/
-├── crates/
-│   ├── lumen-types            # Event envelope & shared types
-│   ├── lumen-config           # Config / flags / retention defaults
-│   ├── lumen-platform         # OS capability ports
-│   ├── lumen-platform-macos   # macOS implementations
-│   ├── lumen-intake           # Source runtime, supervisor, policy
-│   ├── lumen-sources-media    # Screen / audio / video adapters (first)
-│   ├── lumen-store            # Events + blobs + jobs
-│   ├── lumen-process          # Enrichment jobs
-│   ├── lumen-api              # Versioned local control API schema
-│   └── lumen-daemon           # Long-running entrypoint
-├── apps/                      # Desktop later
-├── extensions/                # Chrome later
+├── crates/          # daemon + libraries
+├── apps/desktop/    # Tauri 2 Mac shell
+├── extensions/      # Chrome later
 └── docs/
 ```
 
-## Quick start
+## Quick start (daemon)
 
 ```bash
 cargo build
@@ -50,35 +52,39 @@ cargo test
 cargo run -p lumen-daemon
 ```
 
-Requires Rust stable (edition 2021+).
+Requires Rust stable (edition 2021+). Grant **Screen Recording** / **Microphone** / **Speech Recognition** as needed.
+
+```bash
+# search while daemon is up
+curl -s 'http://127.0.0.1:7420/v1/ocr/search?q=关键词&limit=5' | jq .
+```
+
+## Desktop (Mac app)
+
+```bash
+cargo build -p lumen-daemon --release
+cd apps/desktop && npm install && npm run build
+cargo run -p lumen-navi-desktop
+# or: cd apps/desktop && npx tauri dev
+```
+
+See [`docs/DESKTOP.md`](docs/DESKTOP.md).
 
 ## Related projects
 
 | Project | Link | Relationship |
 |---------|------|----------------|
-| **Lumen ASR** | https://github.com/fakechris/lumen-asr | Separate **voice dictation** product. May later become an intake source or share engine *patterns*; **not** merged into this monorepo. |
-| **cua-driver** | https://github.com/trycua/cua | Open-source **MIT** computer-use driver for the optional **Act** plane only. Observe/capture is Navi-owned. **Do not** use `cua-agent[omni]` (AGPL). |
+| **Lumen ASR** | https://github.com/fakechris/lumen-asr | Separate **voice dictation** product. Share patterns only; **not** merged. |
+| **cua-driver** | https://github.com/trycua/cua | Open-source **MIT** computer-use for optional **Act**. Never for Observe. |
 
-## Priority order
+## Config highlights
 
-1. Stable core skeleton (this phase)  
-2. Screen + audio durability  
-3. Light processing (OCR / ASR jobs)  
-4. Chrome extension & other edges  
-5. Optional Act via cua-driver · desktop UI  
+| Key | Default |
+|-----|---------|
+| `capture.*` | multi-display, probe, debounce — `docs/OBSERVE_CAPTURE.md` |
+| `audio.sample_rate` / `chunk_ms` | 16000 / 3000 |
+| `asr.enabled` / `locale` | true / `zh-CN` |
+| `ocr.enabled` | true |
+| `api.bind` | `127.0.0.1:7420` |
 
-## Status
-
-**S2 Observe + S4 OCR MVP.** Capture is productized; Vision OCR runs **async** on `ocr_screen` jobs → `derived`/`ocr.v1`.
-
-```bash
-cargo run -p lumen-daemon   # data/ · Ctrl+C to stop (screen_ticks=0 default)
-```
-
-| Config | Notes |
-|--------|--------|
-| `capture.*` | multi-display, probe, debounce — see `docs/OBSERVE_CAPTURE.md` |
-| `ocr.enabled` | default true; `ocr.languages` default `zh-Hans` + `en-US` |
-| `privacy.closed_eyes` | hard stop on screen capture |
-
-Grant **Screen Recording** if capture fails. **cua-driver is not used for capture/OCR.**
+**cua-driver is not used for capture/OCR/ASR.**
