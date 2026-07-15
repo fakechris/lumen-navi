@@ -70,6 +70,16 @@ cargo run -p lumen-navi-desktop
 
 See [`docs/DESKTOP.md`](docs/DESKTOP.md).
 
+### Release DMG
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+# → GitHub Actions builds arm64 + x64 DMGs and publishes a Release
+```
+
+Install notes: [`docs/MACOS_RELEASE_NOTES.md`](docs/MACOS_RELEASE_NOTES.md).
+
 ## Related projects
 
 | Project | Link | Relationship |

@@ -122,11 +122,12 @@ Product: [`docs/DESKTOP.md`](DESKTOP.md)
 - [x] Settings: data dir + engine summary  
 - [x] Tray icon (start/stop/pause/quit)  
 - [x] First-run onboarding (permissions + launch Observe)  
-- [ ] Signed DMG / codesign distribution  
+- [x] Tag-triggered GitHub Actions → ad-hoc arm64/x64 DMG + SHA256SUMS  
+- [ ] Apple Developer ID signed + notarized DMG (optional later)  
 - [ ] Optional bridge: ingest from / export to [Lumen ASR](https://github.com/fakechris/lumen-asr)  
 - [ ] Coding-agent transcript adapters  
 
-**Exit (MVP):** shippable Mac shell that can run Observe and search local context without CLI.
+**Exit (MVP):** shippable Mac shell that can run Observe and search local context without CLI; `v*` tags publish DMGs.
 
 ---
 
@@ -162,7 +163,8 @@ https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 
 ## Next actions
 
-1. ~~S0–S4 + audio ASR + desktop shell MVP~~  
-2. Manual soak: screen + audio 1h  
-3. Desktop polish (tray, DMG, onboarding)  
-4. S4.1 OCR helper isolation (optional)
+1. ~~S0–S4 + audio ASR + desktop shell MVP + tray/onboarding~~  
+2. ~~Tag → GitHub Release DMG workflow~~  
+3. Manual soak: screen + audio 1h  
+4. Optional: Developer ID notarization  
+5. S4.1 OCR helper isolation (optional)

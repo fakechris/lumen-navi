@@ -1,0 +1,166 @@
+name: Release macOS DMGs
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "12.0"
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset_arch }} DMG
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            asset_arch: arm64
+          - target: x86_64-apple-darwin
+            asset_arch: x64
+    runs-on: macos-15
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Set release version from tag
+        run: node scripts/release/set-tauri-version.mjs "$GITHUB_REF_NAME"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: "navi-macos-${{ matrix.target }}"
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: apps/desktop
+
+      - name: Prepare bundled lumen-daemon
+        run: |
+          chmod +x scripts/macos/*.sh scripts/release/*.mjs
+          scripts/macos/prepare-daemon-binary.sh "${{ matrix.target }}"
+
+      - name: Build ad-hoc signed DMG
+        run: |
+          chmod +x scripts/macos/*.sh
+          npm run tauri -- build --target "${{ matrix.target }}" --bundles dmg
+        working-directory: apps/desktop
+
+      - name: Verify and name release asset
+        run: >-
+          scripts/macos/collect-release-asset.sh
+          "${{ matrix.target }}"
+          "$GITHUB_REF_NAME"
+          "$CARGO_TARGET_DIR/${{ matrix.target }}/release/bundle"
+          release-assets
+
+      - name: Upload DMG for release job
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg-${{ matrix.asset_arch }}
+          path: release-assets/*.dmg
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out release metadata
+        uses: actions/checkout@v4
+
+      - name: Download both DMGs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: macos-dmg-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate and verify SHA-256 checksums
+        run: |
+          expected=(
+            "Lumen-Navi-${GITHUB_REF_NAME}-arm64.dmg"
+            "Lumen-Navi-${GITHUB_REF_NAME}-x64.dmg"
+          )
+          for asset in "${expected[@]}"; do
+            test -f "release-assets/$asset"
+          done
+          cd release-assets
+          sha256sum "${expected[@]}" > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+          ls -la
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          expected_assets=(
+            "Lumen-Navi-${GITHUB_REF_NAME}-arm64.dmg"
+            "Lumen-Navi-${GITHUB_REF_NAME}-x64.dmg"
+            "SHA256SUMS.txt"
+          )
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft')"
+            if [[ "$is_draft" != "true" ]]; then
+              existing_assets="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')"
+              for asset in "${expected_assets[@]}"; do
+                if ! grep -Fxq "$asset" <<<"$existing_assets"; then
+                  echo "Published release $GITHUB_REF_NAME is missing $asset" >&2
+                  exit 1
+                fi
+              done
+              echo "Release $GITHUB_REF_NAME already contains all expected assets."
+              exit 0
+            fi
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --draft \
+              --title "Lumen Navi $GITHUB_REF_NAME" \
+              --generate-notes \
+              --notes-file docs/MACOS_RELEASE_NOTES.md
+          fi
+
+          # Rebuilds are not byte-identical; replace the full draft asset set.
+          gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+
+          uploaded_assets="$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name')"
+          for asset in "${expected_assets[@]}"; do
+            if ! grep -Fxq "$asset" <<<"$uploaded_assets"; then
+              echo "Draft release $GITHUB_REF_NAME is missing $asset" >&2
+              exit 1
+            fi
+          done
+
+          gh release edit "$GITHUB_REF_NAME" --draft=false

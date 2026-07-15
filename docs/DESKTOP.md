@@ -41,7 +41,38 @@ npx tauri dev
 cargo run -p lumen-navi-desktop
 ```
 
-**Start Observe** in the app looks for `target/release/lumen-daemon` (then debug, then `PATH`).
+**Start Observe** resolves `lumen-daemon` in this order:
+
+1. Next to the app binary (bundled in DMG via Tauri `externalBin`)
+2. `target/release` / `target/debug` (dev workspace)
+3. `$PATH`
+
+## Release (GitHub Actions)
+
+Push a **stable SemVer tag** to trigger [`.github/workflows/release-macos.yml`](../.github/workflows/release-macos.yml):
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Produces:
+
+| Asset | Arch |
+|-------|------|
+| `Lumen-Navi-v0.1.0-arm64.dmg` | Apple Silicon |
+| `Lumen-Navi-v0.1.0-x64.dmg` | Intel |
+| `SHA256SUMS.txt` | checksums |
+
+Local DMG smoke (Apple Silicon example):
+
+```bash
+scripts/macos/prepare-daemon-binary.sh aarch64-apple-darwin
+# or for cargo check only: scripts/macos/ensure-daemon-binary-placeholder.sh
+cd apps/desktop && npm ci && npm run tauri -- build --target aarch64-apple-darwin --bundles dmg
+```
+
+Install notes: [`docs/MACOS_RELEASE_NOTES.md`](MACOS_RELEASE_NOTES.md).
 
 ## Permissions (macOS)
 

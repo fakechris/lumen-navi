@@ -42,3 +42,7 @@ MEMORY.md
 apps/desktop/node_modules/
 apps/desktop/dist/
 apps/desktop/src-tauri/target/
+
+# Tauri externalBin artifacts (CI places target-triple binaries here)
+apps/desktop/src-tauri/binaries/lumen-daemon*
+!apps/desktop/src-tauri/binaries/.gitkeep

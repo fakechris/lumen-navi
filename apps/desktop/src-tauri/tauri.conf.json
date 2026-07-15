@@ -30,7 +30,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg"],
+    "targets": [
+      "dmg"
+    ],
+    "externalBin": [
+      "binaries/lumen-daemon"
+    ],
     "icon": [
       "icons/icon.png",
       "icons/32x32.png",

@@ -387,26 +387,42 @@ fn open_url(url: &str) -> Result<(), String> {
 }
 
 fn resolve_daemon_binary() -> Option<PathBuf> {
-    // Prefer sibling release build in workspace.
-    let candidates = [
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../target/release/lumen-daemon"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../target/debug/lumen-daemon"),
-        PathBuf::from("lumen-daemon"),
-    ];
-    for c in candidates {
-        if c.exists() {
-            return Some(c);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // 1) Bundled next to the desktop binary (Tauri externalBin / DMG layout).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("lumen-daemon"));
+            // Some layouts keep helpers under ../Resources
+            if let Some(contents) = dir.parent() {
+                candidates.push(contents.join("Resources/lumen-daemon"));
+                candidates.push(contents.join("MacOS/lumen-daemon"));
+            }
         }
-        // PATH lookup for bare name
-        if c.file_name().is_some() && c.components().count() == 1 {
-            if let Ok(out) = Command::new("which").arg("lumen-daemon").output() {
-                if out.status.success() {
-                    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    if !p.is_empty() {
-                        return Some(PathBuf::from(p));
-                    }
+    }
+
+    // 2) Workspace builds during development.
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target/release/lumen-daemon"),
+    );
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target/debug/lumen-daemon"),
+    );
+
+    for c in &candidates {
+        if c.is_file() {
+            return Some(c.clone());
+        }
+    }
+
+    // 3) PATH
+    if let Ok(out) = Command::new("which").arg("lumen-daemon").output() {
+        if out.status.success() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !p.is_empty() {
+                let path = PathBuf::from(p);
+                if path.is_file() {
+                    return Some(path);
                 }
             }
         }
