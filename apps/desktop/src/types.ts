@@ -100,3 +100,30 @@ export interface OnboardingState {
   step: number;
   launch_observe: boolean;
 }
+
+export interface AsrModelCandidate {
+  engine: string;
+  path: string;
+  label: string;
+  ready: boolean;
+  source: string;
+}
+
+export interface AsrModelStatus {
+  sensevoice_ready: boolean;
+  sensevoice_dir: string;
+  whisper_ready: boolean;
+  whisper_dir: string;
+  active_engine: string;
+  active_model_dir: string;
+  candidates: AsrModelCandidate[];
+  download_url: string;
+}
+
+export interface AsrDownloadProgress {
+  phase: string;
+  message: string;
+  bytes: number;
+  total: number | null;
+  percent: number | null;
+}

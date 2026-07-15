@@ -10,15 +10,21 @@
 //! | `whisper` | Local sherpa-onnx Whisper |
 //! | `openai_audio` / `qwen` | OpenAI-compatible HTTP (`/audio/transcriptions`) |
 
+mod download;
 mod openai_http;
 mod paths;
 mod sensevoice;
 mod wav;
 mod whisper;
 
+pub use download::{
+    default_models_root, download_sensevoice_package, DownloadProgress, SENSEVOICE_ARCHIVE_NAME,
+    SENSEVOICE_ARCHIVE_URL,
+};
 pub use openai_http::{OpenAiAudioAsr, OpenAiAudioConfig};
 pub use paths::{
-    app_models_dir, default_sensevoice_dir, default_whisper_dir, sensevoice_ready, whisper_ready,
+    app_models_dir, default_sensevoice_dir, default_whisper_dir, scan_model_candidates,
+    sensevoice_ready, whisper_ready, ModelCandidate,
 };
 pub use sensevoice::SenseVoiceSherpaAsr;
 pub use wav::{

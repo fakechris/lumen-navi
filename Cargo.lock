@@ -2217,6 +2217,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "lumen-api",
+ "lumen-asr-engine",
  "lumen-config",
  "lumen-platform",
  "lumen-platform-macos",

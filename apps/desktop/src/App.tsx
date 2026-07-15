@@ -648,30 +648,90 @@ export default function App() {
                   )}
                   {(cfg?.asr_engine === "sensevoice" ||
                     cfg?.asr_engine === "whisper") && (
-                    <label className="field">
-                      <span className="meta">本地模型目录（可空=自动）</span>
-                      <input
-                        className="input"
-                        placeholder="~/Library/Application Support/LumenNavi/models/sensevoice"
-                        value={cfg?.asr_model_dir ?? ""}
-                        onChange={(e) => {
-                          const asr_model_dir = e.target.value;
-                          setCfg((prev) =>
-                            prev ? { ...prev, asr_model_dir } : prev,
-                          );
-                        }}
-                        onBlur={() => {
-                          setBusy(true);
-                          void api
-                            .updateSourcesConfig({
-                              asr_model_dir: cfg?.asr_model_dir ?? "",
-                            })
-                            .then((c) => setCfg(c))
-                            .catch((err) => setError(String(err)))
-                            .finally(() => setBusy(false));
-                        }}
-                      />
-                    </label>
+                    <>
+                      <label className="field">
+                        <span className="meta">本地模型目录（可空=自动）</span>
+                        <input
+                          className="input"
+                          placeholder="~/Library/Application Support/LumenNavi/models/sensevoice"
+                          value={cfg?.asr_model_dir ?? ""}
+                          onChange={(e) => {
+                            const asr_model_dir = e.target.value;
+                            setCfg((prev) =>
+                              prev ? { ...prev, asr_model_dir } : prev,
+                            );
+                          }}
+                          onBlur={() => {
+                            setBusy(true);
+                            void api
+                              .updateSourcesConfig({
+                                asr_model_dir: cfg?.asr_model_dir ?? "",
+                              })
+                              .then((c) => setCfg(c))
+                              .catch((err) => setError(String(err)))
+                              .finally(() => setBusy(false));
+                          }}
+                        />
+                      </label>
+                      {cfg?.asr_engine === "sensevoice" && (
+                        <div className="row">
+                          <button
+                            className="btn"
+                            disabled={busy}
+                            onClick={() => {
+                              setBusy(true);
+                              void api
+                                .checkAsrModelStatus()
+                                .then((s) => {
+                                  setStatusNote(
+                                    s.sensevoice_ready
+                                      ? `SenseVoice 就绪 · ${s.sensevoice_dir}`
+                                      : `SenseVoice 未就绪 · 可下载到 ${s.sensevoice_dir}`,
+                                  );
+                                  if (s.active_model_dir) {
+                                    setCfg((prev) =>
+                                      prev
+                                        ? {
+                                            ...prev,
+                                            asr_model_dir: s.active_model_dir,
+                                            asr_engine: s.active_engine,
+                                          }
+                                        : prev,
+                                    );
+                                  }
+                                })
+                                .catch((err) => setError(String(err)))
+                                .finally(() => setBusy(false));
+                            }}
+                          >
+                            检查模型
+                          </button>
+                          <button
+                            className="btn primary"
+                            disabled={busy}
+                            onClick={() => {
+                              setBusy(true);
+                              setStatusNote("正在下载 SenseVoice…");
+                              void api
+                                .startAsrModelDownload()
+                                .then((s) => {
+                                  setStatusNote(
+                                    s.sensevoice_ready
+                                      ? `SenseVoice 已安装 · ${s.sensevoice_dir}`
+                                      : "下载完成但未检测到模型",
+                                  );
+                                  return api.getConfigSummary();
+                                })
+                                .then((c) => setCfg(c))
+                                .catch((err) => setError(String(err)))
+                                .finally(() => setBusy(false));
+                            }}
+                          >
+                            下载 SenseVoice
+                          </button>
+                        </div>
+                      )}
+                    </>
                   )}
                   <label className="check">
                     <input

@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AsrModelCandidate,
+  AsrModelStatus,
   ConfigSummary,
   EventSummary,
   Health,
@@ -58,4 +60,14 @@ export const api = {
   requestScreenPermission: () => invoke<boolean>("request_screen_permission"),
   openPrivacySettings: (kind: string) =>
     invoke<void>("open_privacy_settings", { kind }),
+  checkAsrModelStatus: () => invoke<AsrModelStatus>("check_asr_model_status"),
+  listLocalAsrModels: () => invoke<AsrModelCandidate[]>("list_local_asr_models"),
+  useExistingAsrModel: (path: string, engine?: string) =>
+    invoke<AsrModelStatus>("use_existing_asr_model", {
+      input: { path, engine: engine ?? null },
+    }),
+  setAsrEnginePreference: (engine: string) =>
+    invoke<AsrModelStatus>("set_asr_engine_preference", { engine }),
+  startAsrModelDownload: () => invoke<AsrModelStatus>("start_asr_model_download"),
+  cancelAsrModelDownload: () => invoke<void>("cancel_asr_model_download"),
 };

@@ -172,6 +172,20 @@ https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-s
 
 Unpack so the directory contains `model.int8.onnx` (or `model.onnx`) + `tokens.txt`.
 
+### Desktop onboarding (model select / download)
+
+First-run wizard includes a **本地 ASR 模型** step (after mic permission), patterned after Lumen ASR:
+
+| Action | Effect |
+|--------|--------|
+| Choose engine | `sensevoice` / `whisper` / `speech` → written to `navi.toml` |
+| Pick detected candidate | Sets `asr.model_dir` + engine |
+| Paste path + validate | Same, after `model*.onnx` / Whisper layout check |
+| **下载 SenseVoice** | curl + tar into `~/Library/Application Support/LumenNavi/models/sensevoice/` |
+| Skip | Continue without local model (`fallback_speech` still available) |
+
+Progress events: Tauri event `asr-download-progress`. Cancel via `cancel_asr_model_download`.
+
 ### Qwen ASR 0.8B (HTTP)
 
 There is no sherpa-onnx Qwen port in-tree. Use an **OpenAI-compatible** transcription endpoint:

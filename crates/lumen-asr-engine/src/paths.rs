@@ -81,6 +81,105 @@ pub fn whisper_ready(dir: &Path) -> bool {
         && whisper_tokens_path(dir).is_some()
 }
 
+/// Scan known locations for ready (or placeholder app) model dirs.
+pub fn scan_model_candidates() -> Vec<ModelCandidate> {
+    let mut out = Vec::new();
+    let mut push = |engine: &str, path: PathBuf, source: &str| {
+        if !path.exists() && source != "app" {
+            return;
+        }
+        let ready = match engine {
+            "sensevoice" => sensevoice_ready(&path),
+            "whisper" => whisper_ready(&path),
+            _ => false,
+        };
+        if !ready && source != "app" {
+            return;
+        }
+        // Ensure parent exists listing for app target
+        if source == "app" && !path.exists() {
+            // still list planned install path
+        } else if !path.exists() {
+            return;
+        }
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let label = if ready {
+            format!("{name} · {source}")
+        } else {
+            format!("{engine} ({source}) — 下载目标")
+        };
+        out.push(ModelCandidate {
+            engine: engine.into(),
+            path: path.display().to_string(),
+            label,
+            ready,
+            source: source.into(),
+        });
+    };
+
+    let app_sv = app_models_dir().join("sensevoice");
+    push("sensevoice", app_sv, "app");
+    if let Ok(p) = std::env::var("LUMEN_NAVI_SENSEVOICE_DIR") {
+        push("sensevoice", PathBuf::from(p), "env");
+    }
+    if let Ok(p) = std::env::var("LUMEN_SENSEVOICE_DIR") {
+        push("sensevoice", PathBuf::from(p), "env");
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let h = PathBuf::from(&home);
+    push(
+        "sensevoice",
+        h.join("Library/Application Support/LumenAsr/models/sensevoice"),
+        "lumen-asr",
+    );
+    for name in [
+        "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+        "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+    ] {
+        push(
+            "sensevoice",
+            h.join(".coli/models").join(name),
+            "coli-cache",
+        );
+    }
+
+    let app_wh = app_models_dir().join("whisper");
+    push("whisper", app_wh, "app");
+    if let Ok(p) = std::env::var("LUMEN_NAVI_WHISPER_DIR") {
+        push("whisper", PathBuf::from(p), "env");
+    }
+    if let Ok(p) = std::env::var("LUMEN_WHISPER_DIR") {
+        push("whisper", PathBuf::from(p), "env");
+    }
+    push(
+        "whisper",
+        h.join("Library/Application Support/LumenAsr/models/whisper"),
+        "lumen-asr",
+    );
+    for name in [
+        "sherpa-onnx-whisper-tiny.en",
+        "sherpa-onnx-whisper-base.en",
+    ] {
+        push("whisper", h.join(".coli/models").join(name), "coli-cache");
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|c| seen.insert(c.path.clone()));
+    out
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModelCandidate {
+    pub engine: String,
+    pub path: String,
+    pub label: String,
+    pub ready: bool,
+    pub source: String,
+}
+
 pub fn sensevoice_model_path(dir: &Path) -> Option<PathBuf> {
     for name in ["model.int8.onnx", "model.onnx", "sensevoice.onnx"] {
         let p = dir.join(name);
