@@ -262,6 +262,31 @@ input:focus {
   font-size: 13px;
 }
 
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.field .meta {
+  font-size: 11.5px;
+}
+.input,
+select.input {
+  width: 100%;
+  min-height: 34px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  padding: 6px 12px;
+  font: inherit;
+}
+.input:focus,
+select.input:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 1px;
+}
+
 .onboard-backdrop {
   position: fixed;
   inset: 0;
@@ -297,6 +322,39 @@ input:focus {
   color: var(--accent);
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+.onboard-status {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--bg) 55%, var(--card));
+}
+.onboard-status.ok {
+  border-color: color-mix(in srgb, var(--ok) 40%, var(--border));
+  background: color-mix(in srgb, var(--ok) 8%, var(--card));
+}
+.onboard-candidate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.onboard-candidate:last-child {
+  border-bottom: 0;
+}
+.progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.2s ease;
 }
 mark {
   background: var(--warm-dim);

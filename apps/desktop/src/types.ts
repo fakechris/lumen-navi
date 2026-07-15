@@ -50,6 +50,11 @@ export interface ConfigSummary {
   api_bind: string;
   audio_chunk_ms: number;
   asr_locale: string;
+  asr_engine: string;
+  asr_model_dir: string;
+  asr_http_base_url: string;
+  asr_http_model: string;
+  asr_fallback_speech: boolean;
   system_audio: boolean;
 }
 
@@ -60,6 +65,12 @@ export interface SourcesUpdate {
   asr?: boolean;
   paused?: boolean;
   system_audio?: boolean;
+  asr_engine?: string;
+  asr_model_dir?: string;
+  asr_http_base_url?: string;
+  asr_http_model?: string;
+  asr_locale?: string;
+  asr_fallback_speech?: boolean;
 }
 
 export interface TimelineItem {
@@ -88,4 +99,33 @@ export interface OnboardingState {
   skipped: boolean;
   step: number;
   launch_observe: boolean;
+}
+
+export interface AsrModelCandidate {
+  engine: string;
+  path: string;
+  label: string;
+  ready: boolean;
+  source: string;
+}
+
+export interface AsrModelStatus {
+  sensevoice_ready: boolean;
+  sensevoice_dir: string;
+  whisper_ready: boolean;
+  whisper_dir: string;
+  /** Shared Lumen cluster models root (navi/asr/future apps). */
+  models_root: string;
+  active_engine: string;
+  active_model_dir: string;
+  candidates: AsrModelCandidate[];
+  download_url: string;
+}
+
+export interface AsrDownloadProgress {
+  phase: string;
+  message: string;
+  bytes: number;
+  total: number | null;
+  percent: number | null;
 }

@@ -15,6 +15,7 @@ anyhow = { workspace = true }
 base64 = "0.22"
 chrono = { workspace = true }
 lumen-api = { workspace = true }
+lumen-asr-engine = { workspace = true }
 lumen-config = { workspace = true }
 lumen-platform = { workspace = true }
 lumen-platform-macos = { workspace = true }

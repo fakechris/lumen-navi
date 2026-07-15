@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
 import { Onboarding } from "./Onboarding";
 import type {
+  AsrModelStatus,
   ConfigSummary,
   Health,
   ObserveStatus,
@@ -73,21 +74,24 @@ export default function App() {
   const [statusNote, setStatusNote] = useState<string | null>(null);
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const [summaryText, setSummaryText] = useState<string | null>(null);
+  const [asrModels, setAsrModels] = useState<AsrModelStatus | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [h, p, c, o, ob] = await Promise.all([
+      const [h, p, c, o, ob, models] = await Promise.all([
         api.getHealth(),
         api.getPermissions(),
         api.getConfigSummary(),
         api.observeStatus(),
         api.getOnboarding(),
+        api.checkAsrModelStatus(),
       ]);
       setHealth(h);
       setPerms(p);
       setCfg(c);
       setObserve(o);
       setOnboarding(ob);
+      setAsrModels(models);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -309,7 +313,10 @@ export default function App() {
                   <div className="value" style={{ fontSize: 16 }}>
                     {cfg?.audio ? (cfg.asr ? "摄入+转写" : "仅摄入") : "关闭"}
                   </div>
-                  <div className="meta">{cfg?.asr_locale ?? ""} · {cfg?.audio_chunk_ms ?? "—"}ms</div>
+                  <div className="meta">
+                    {cfg?.asr_engine ?? "sensevoice"} · {cfg?.asr_locale ?? ""} ·{" "}
+                    {cfg?.audio_chunk_ms ?? "—"}ms
+                  </div>
                 </div>
               </div>
 
@@ -535,9 +542,308 @@ export default function App() {
                     系统音频（预留，未实现）
                   </label>
                 </div>
+                <div className="stack mt">
+                  <label className="field">
+                    <span className="meta">持续 ASR 引擎</span>
+                    <select
+                      className="input"
+                      value={cfg?.asr_engine ?? "sensevoice"}
+                      onChange={(e) => {
+                        const asr_engine = e.target.value;
+                        setBusy(true);
+                        void api
+                          .updateSourcesConfig({ asr_engine })
+                          .then((c) => {
+                            setCfg(c);
+                            setStatusNote(
+                              `ASR 引擎 → ${asr_engine}。Stop/Start Observe 后生效。`,
+                            );
+                          })
+                          .catch((err) => setError(String(err)))
+                          .finally(() => setBusy(false));
+                      }}
+                    >
+                      <option value="sensevoice">SenseVoice（本地 sherpa，默认）</option>
+                      <option value="whisper">Whisper（本地 sherpa）</option>
+                      <option value="speech">macOS Speech</option>
+                      <option value="openai_audio">OpenAI 兼容 HTTP</option>
+                      <option value="qwen">Qwen ASR（HTTP，如 0.8B）</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span className="meta">ASR locale</span>
+                    <input
+                      className="input"
+                      value={cfg?.asr_locale ?? "zh-CN"}
+                      onChange={(e) => {
+                        const asr_locale = e.target.value;
+                        setCfg((prev) =>
+                          prev ? { ...prev, asr_locale } : prev,
+                        );
+                      }}
+                      onBlur={() => {
+                        if (!cfg?.asr_locale) return;
+                        setBusy(true);
+                        void api
+                          .updateSourcesConfig({ asr_locale: cfg.asr_locale })
+                          .then((c) => setCfg(c))
+                          .catch((err) => setError(String(err)))
+                          .finally(() => setBusy(false));
+                      }}
+                    />
+                  </label>
+                  {(cfg?.asr_engine === "openai_audio" ||
+                    cfg?.asr_engine === "qwen") && (
+                    <>
+                      <label className="field">
+                        <span className="meta">HTTP base URL（…/v1）</span>
+                        <input
+                          className="input"
+                          placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1"
+                          value={cfg?.asr_http_base_url ?? ""}
+                          onChange={(e) => {
+                            const asr_http_base_url = e.target.value;
+                            setCfg((prev) =>
+                              prev ? { ...prev, asr_http_base_url } : prev,
+                            );
+                          }}
+                          onBlur={() => {
+                            setBusy(true);
+                            void api
+                              .updateSourcesConfig({
+                                asr_http_base_url: cfg?.asr_http_base_url ?? "",
+                              })
+                              .then((c) => setCfg(c))
+                              .catch((err) => setError(String(err)))
+                              .finally(() => setBusy(false));
+                          }}
+                        />
+                      </label>
+                      <label className="field">
+                        <span className="meta">HTTP model</span>
+                        <input
+                          className="input"
+                          placeholder="qwen3-asr-0.8b"
+                          value={cfg?.asr_http_model ?? ""}
+                          onChange={(e) => {
+                            const asr_http_model = e.target.value;
+                            setCfg((prev) =>
+                              prev ? { ...prev, asr_http_model } : prev,
+                            );
+                          }}
+                          onBlur={() => {
+                            setBusy(true);
+                            void api
+                              .updateSourcesConfig({
+                                asr_http_model: cfg?.asr_http_model ?? "",
+                              })
+                              .then((c) => setCfg(c))
+                              .catch((err) => setError(String(err)))
+                              .finally(() => setBusy(false));
+                          }}
+                        />
+                      </label>
+                      <p className="meta">
+                        API key 写入 <span className="mono">navi.toml</span> 的{" "}
+                        <span className="mono">asr.http_api_key</span>，或环境变量{" "}
+                        <span className="mono">LUMEN_NAVI_ASR_API_KEY</span>。
+                      </p>
+                    </>
+                  )}
+                  {(cfg?.asr_engine === "sensevoice" ||
+                    cfg?.asr_engine === "whisper") && (
+                    <>
+                      {asrModels && (
+                        <div className="onboard-status">
+                          <div className="meta">Lumen 共享模型目录</div>
+                          <p
+                            className="meta mono"
+                            style={{ wordBreak: "break-all", marginTop: 4 }}
+                          >
+                            {asrModels.models_root}
+                          </p>
+                          {asrModels.candidates
+                            .filter(
+                              (candidate) =>
+                                candidate.ready && candidate.engine === cfg?.asr_engine,
+                            )
+                            .map((candidate) => (
+                              <div
+                                key={`${candidate.engine}:${candidate.path}`}
+                                className="onboard-candidate"
+                              >
+                                <span className="meta" style={{ wordBreak: "break-all" }}>
+                                  {candidate.label}
+                                </span>
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  disabled={busy}
+                                  onClick={() => {
+                                    setBusy(true);
+                                    void api
+                                      .useExistingAsrModel(candidate.path, candidate.engine)
+                                      .then((status) => {
+                                        setAsrModels(status);
+                                        return api.getConfigSummary();
+                                      })
+                                      .then((config) => setCfg(config))
+                                      .catch((err) => setError(String(err)))
+                                      .finally(() => setBusy(false));
+                                  }}
+                                >
+                                  使用
+                                </button>
+                              </div>
+                            ))}
+                        </div>
+                      )}
+                      <label className="field">
+                        <span className="meta">本地模型目录（可空=自动）</span>
+                        <input
+                          className="input"
+                          placeholder="~/Library/Application Support/Lumen/models/sensevoice"
+                          value={cfg?.asr_model_dir ?? ""}
+                          onChange={(e) => {
+                            const asr_model_dir = e.target.value;
+                            setCfg((prev) =>
+                              prev ? { ...prev, asr_model_dir } : prev,
+                            );
+                          }}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy || !(cfg?.asr_model_dir ?? "").trim()}
+                        onClick={() => {
+                          setBusy(true);
+                          void api
+                            .useExistingAsrModel(
+                              (cfg?.asr_model_dir ?? "").trim(),
+                              cfg?.asr_engine,
+                            )
+                            .then((status) => {
+                              setAsrModels(status);
+                              return api.getConfigSummary();
+                            })
+                            .then((config) => setCfg(config))
+                            .catch((err) => setError(String(err)))
+                            .finally(() => setBusy(false));
+                        }}
+                      >
+                        验证并使用此目录
+                      </button>
+                      {!!cfg?.asr_model_dir && (
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={busy}
+                          onClick={() => {
+                            setBusy(true);
+                            void api
+                              .updateSourcesConfig({ asr_model_dir: "" })
+                              .then((config) => {
+                                setCfg(config);
+                                return api.checkAsrModelStatus();
+                              })
+                              .then((status) => setAsrModels(status))
+                              .catch((err) => setError(String(err)))
+                              .finally(() => setBusy(false));
+                          }}
+                        >
+                          恢复自动发现
+                        </button>
+                      )}
+                      {cfg?.asr_engine === "sensevoice" && (
+                        <div className="row">
+                          <button
+                            className="btn"
+                            disabled={busy}
+                            onClick={() => {
+                              setBusy(true);
+                              void api
+                                .checkAsrModelStatus()
+                                .then((s) => {
+                                  setAsrModels(s);
+                                  setStatusNote(
+                                    s.sensevoice_ready
+                                      ? `SenseVoice 就绪 · ${s.sensevoice_dir}`
+                                      : `SenseVoice 未就绪 · 可下载到 ${s.sensevoice_dir}`,
+                                  );
+                                  if (s.active_model_dir) {
+                                    setCfg((prev) =>
+                                      prev
+                                        ? {
+                                            ...prev,
+                                            asr_model_dir: s.active_model_dir,
+                                            asr_engine: s.active_engine,
+                                          }
+                                        : prev,
+                                    );
+                                  }
+                                })
+                                .catch((err) => setError(String(err)))
+                                .finally(() => setBusy(false));
+                            }}
+                          >
+                            检查模型
+                          </button>
+                          <button
+                            className="btn primary"
+                            disabled={busy}
+                            onClick={() => {
+                              setBusy(true);
+                              setStatusNote("正在下载 SenseVoice…");
+                              void api
+                                .startAsrModelDownload()
+                                .then((s) => {
+                                  setAsrModels(s);
+                                  setStatusNote(
+                                    s.sensevoice_ready
+                                      ? `SenseVoice 已安装 · ${s.sensevoice_dir}`
+                                      : "下载完成但未检测到模型",
+                                  );
+                                  return api.getConfigSummary();
+                                })
+                                .then((c) => setCfg(c))
+                                .catch((err) => setError(String(err)))
+                                .finally(() => setBusy(false));
+                            }}
+                          >
+                            下载 SenseVoice
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={cfg?.asr_fallback_speech ?? true}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setBusy(true);
+                        void api
+                          .updateSourcesConfig({ asr_fallback_speech: checked })
+                          .then((c) => {
+                            setCfg(c);
+                            setStatusNote(
+                              checked
+                                ? "本地模型不可用时回退 macOS Speech。"
+                                : "已关闭 Speech 回退。",
+                            );
+                          })
+                          .catch((err) => setError(String(err)))
+                          .finally(() => setBusy(false));
+                      }}
+                    />
+                    本地引擎不可用时回退 Speech
+                  </label>
+                </div>
                 <div className="meta mt">
-                  api={cfg?.api_bind} · chunk={cfg?.audio_chunk_ms}ms · locale=
-                  {cfg?.asr_locale}
+                  api={cfg?.api_bind} · chunk={cfg?.audio_chunk_ms}ms · engine=
+                  {cfg?.asr_engine ?? "—"} · locale={cfg?.asr_locale}
                 </div>
                 <p className="meta mt">
                   开关写入 <span className="mono">navi.toml</span>

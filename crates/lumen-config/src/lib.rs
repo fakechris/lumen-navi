@@ -103,12 +103,37 @@ impl AudioConfig {
 
 /// Background Observe ASR (enrichment), not dictation.
 /// Dictation remains https://github.com/fakechris/lumen-asr .
+///
+/// Engines (patterns from lumen-asr, owned port in `lumen-asr-engine`):
+/// - `sensevoice` — local sherpa-onnx SenseVoice (**default**)
+/// - `whisper` — local sherpa-onnx Whisper
+/// - `speech` — macOS Speech.framework
+/// - `openai_audio` / `qwen` — OpenAI-compatible HTTP (e.g. Qwen ASR 0.8B)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AsrConfig {
     pub enabled: bool,
-    /// BCP-47 locale for Speech recognizer (e.g. `zh-CN`, `en-US`).
+    /// `sensevoice` | `whisper` | `speech` | `openai_audio` | `qwen`
+    pub engine: String,
+    /// Shared Lumen cluster models root (sensevoice/whisper install + scan).
+    /// Empty = `LUMEN_MODELS_DIR` or `~/Library/Application Support/Lumen/models`.
+    /// All Lumen apps (navi, asr, …) should share this so models download once.
+    pub models_root: String,
+    /// Specific engine model directory. Empty = auto under `models_root` / discovery.
+    /// User may point at any ready folder (shared, legacy, or custom).
+    pub model_dir: String,
+    /// BCP-47 locale (Speech / language hints), e.g. `zh-CN`, `en-US`.
     pub locale: String,
+    /// If preferred engine is not ready, fall back to macOS Speech.
+    pub fallback_speech: bool,
+    /// OpenAI-compatible base URL (…/v1). Required for `openai_audio` / `qwen`.
+    pub http_base_url: String,
+    /// Bearer token for HTTP ASR (env `LUMEN_NAVI_ASR_API_KEY` overrides if set).
+    pub http_api_key: String,
+    /// Remote model id, e.g. `whisper-1`, `qwen3-asr-0.8b`, `qwen-audio-asr`.
+    pub http_model: String,
+    /// Label written into `transcript.v1.engine` for HTTP path (empty = auto).
+    pub http_engine_label: String,
     pub poll_interval_ms: u64,
     pub batch_size: usize,
     pub max_attempts: u32,
@@ -125,7 +150,15 @@ impl Default for AsrConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            engine: "sensevoice".into(),
+            models_root: String::new(),
+            model_dir: String::new(),
             locale: "zh-CN".into(),
+            fallback_speech: true,
+            http_base_url: String::new(),
+            http_api_key: String::new(),
+            http_model: "qwen3-asr-0.8b".into(),
+            http_engine_label: String::new(),
             poll_interval_ms: 1_500,
             batch_size: 1,
             max_attempts: 5,
@@ -137,6 +170,38 @@ impl Default for AsrConfig {
             max_text_chars: 200_000,
             shutdown_drain_ms: 30_000,
         }
+    }
+}
+
+impl AsrConfig {
+    /// Normalized engine name (lowercase).
+    pub fn engine_name(&self) -> &str {
+        self.engine.trim()
+    }
+
+    /// Shared cluster models root if configured; `None` → engine default resolution.
+    pub fn models_root_path(&self) -> Option<std::path::PathBuf> {
+        let t = self.models_root.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(t))
+        }
+    }
+
+    /// Effective API key: env override then config.
+    pub fn effective_http_api_key(&self) -> String {
+        if let Ok(k) = std::env::var("LUMEN_NAVI_ASR_API_KEY") {
+            if !k.is_empty() {
+                return k;
+            }
+        }
+        if let Ok(k) = std::env::var("OPENAI_API_KEY") {
+            if !k.is_empty() {
+                return k;
+            }
+        }
+        self.http_api_key.clone()
     }
 }
 
@@ -341,5 +406,20 @@ mod tests {
         assert!(!c.audio.is_session_mode());
         assert!(c.asr.enabled);
         assert_eq!(c.asr.locale, "zh-CN");
+        assert_eq!(c.asr.engine, "sensevoice");
+        assert!(c.asr.fallback_speech);
+    }
+
+    #[test]
+    fn asr_model_selection_survives_toml_roundtrip() {
+        let mut config = Config::default();
+        config.asr.engine = "whisper".into();
+        config.asr.model_dir = "/models/custom-whisper".into();
+
+        let encoded = toml::to_string_pretty(&config).unwrap();
+        let decoded: Config = toml::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded.asr.engine, "whisper");
+        assert_eq!(decoded.asr.model_dir, "/models/custom-whisper");
     }
 }

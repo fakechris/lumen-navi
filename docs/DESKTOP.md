@@ -80,7 +80,7 @@ Install notes: [`docs/MACOS_RELEASE_NOTES.md`](MACOS_RELEASE_NOTES.md).
 |------------|-----|
 | Screen Recording | Screenshots |
 | Microphone | Audio chunks |
-| Speech Recognition | Observe ASR (`transcript.v1`) |
+| Speech Recognition | Optional ASR engine / SenseVoice fallback |
 
 Granted via System Settings after first use; the Overview tab shows probe status.
 
@@ -110,7 +110,22 @@ Stored in `shell.toml` (desktop-only; not product `navi.toml`):
 | `onboarding_step` | Resume mid-wizard |
 | `launch_observe` | Auto-start daemon on app launch |
 
-Wizard covers Screen Recording + Microphone/Speech settings links.
+Wizard steps:
+
+1. Welcome  
+2. Screen Recording  
+3. Microphone (+ Speech settings link for fallback)  
+4. **Local ASR model** — choose engine, pick existing dir, or **download SenseVoice**  
+5. Ready / launch Observe  
+
+Model selection writes product `navi.toml` (`asr.engine`, `asr.model_dir`, optional `asr.models_root`).  
+**Download installs to the shared cluster path**  
+`~/Library/Application Support/Lumen/models/sensevoice/` (shared with Lumen ASR / future apps).  
+Users may pick any ready directory (shared, legacy per-app, or custom).
+
+Commands: `check_asr_model_status`, `use_existing_asr_model`, `set_asr_models_root`,  
+`start_asr_model_download`, `cancel_asr_model_download`, `set_asr_engine_preference`.  
+Event: `asr-download-progress`.
 
 ## Relationship to Lumen ASR desktop
 
@@ -121,5 +136,6 @@ Patterns borrowed (not code-coupled):
 - macOS Info.plist usage strings  
 - Warm light design tokens  
 - Tray + first-run onboarding flow  
+- SenseVoice package download + candidate scan  
 
 **Not** borrowed: hotkey dictation, inject, dictionary, capsule overlay.

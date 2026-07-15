@@ -1,5 +1,6 @@
 //! Lumen Navi desktop shell — store browser + control + observe sidecar + tray.
 
+mod asr_models;
 mod commands;
 mod shell;
 mod state;
@@ -68,6 +69,13 @@ pub fn run() {
             commands::set_launch_observe,
             commands::request_screen_permission,
             commands::open_privacy_settings,
+            asr_models::check_asr_model_status,
+            asr_models::list_local_asr_models,
+            asr_models::use_existing_asr_model,
+            asr_models::set_asr_engine_preference,
+            asr_models::set_asr_models_root,
+            asr_models::start_asr_model_download,
+            asr_models::cancel_asr_model_download,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lumen Navi");
