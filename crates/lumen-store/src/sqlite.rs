@@ -311,7 +311,8 @@ impl SqliteStore {
             id
         };
 
-        if kind == "ocr.v1" {
+        // Index OCR + ASR transcripts into the same FTS surface.
+        if kind == "ocr.v1" || kind == "transcript.v1" {
             upsert_ocr_doc_tx(&tx, event_id, &body)?;
         }
         tx.commit().map_err(StoreError::db)?;
@@ -439,7 +440,7 @@ impl SqliteStore {
         Ok(out)
     }
 
-    /// Rebuild ocr_docs/FTS from all derived ocr.v1 rows.
+    /// Rebuild ocr_docs/FTS from derived `ocr.v1` and `transcript.v1` rows.
     pub fn reindex_ocr_docs(&self) -> Result<usize, StoreError> {
         let mut conn = self
             .conn
@@ -448,7 +449,10 @@ impl SqliteStore {
         // Collect first so we never nest statements on the same connection.
         let derived: Vec<(String, String)> = {
             let mut stmt = conn
-                .prepare(r#"SELECT event_id, body FROM derived WHERE kind = 'ocr.v1'"#)
+                .prepare(
+                    r#"SELECT event_id, body FROM derived
+                       WHERE kind IN ('ocr.v1', 'transcript.v1')"#,
+                )
                 .map_err(StoreError::db)?;
             let rows = stmt
                 .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
@@ -879,10 +883,13 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
             "#,
         )
         .map_err(StoreError::db)?;
-        // Backfill from existing derived OCR (collect first — no nested statements).
+        // Backfill from existing OCR + transcripts (collect first — no nested statements).
         let derived: Vec<(String, String)> = {
             let mut stmt = conn
-                .prepare(r#"SELECT event_id, body FROM derived WHERE kind = 'ocr.v1'"#)
+                .prepare(
+                    r#"SELECT event_id, body FROM derived
+                       WHERE kind IN ('ocr.v1', 'transcript.v1')"#,
+                )
                 .map_err(StoreError::db)?;
             let rows = stmt
                 .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))

@@ -26,6 +26,7 @@ pub struct AudioStats {
     pub chunks_dropped_silent: u64,
     pub chunks_dropped_queue: u64,
     pub chunks_dropped_pause: u64,
+    pub chunks_dropped_oversized: u64,
     pub sessions_opened: u64,
     pub sessions_closed: u64,
 }
@@ -41,6 +42,7 @@ pub struct AudioOrchestrator {
     stats_emitted: AtomicU64,
     stats_silent: AtomicU64,
     stats_pause: AtomicU64,
+    stats_oversized: AtomicU64,
     stats_sessions_open: AtomicU64,
     stats_sessions_close: AtomicU64,
 }
@@ -57,6 +59,7 @@ impl AudioOrchestrator {
             stats_emitted: AtomicU64::new(0),
             stats_silent: AtomicU64::new(0),
             stats_pause: AtomicU64::new(0),
+            stats_oversized: AtomicU64::new(0),
             stats_sessions_open: AtomicU64::new(0),
             stats_sessions_close: AtomicU64::new(0),
         }
@@ -72,29 +75,40 @@ impl AudioOrchestrator {
             chunks_dropped_silent: self.stats_silent.load(Ordering::Relaxed),
             chunks_dropped_queue: 0,
             chunks_dropped_pause: self.stats_pause.load(Ordering::Relaxed),
+            chunks_dropped_oversized: self.stats_oversized.load(Ordering::Relaxed),
             sessions_opened: self.stats_sessions_open.load(Ordering::Relaxed),
             sessions_closed: self.stats_sessions_close.load(Ordering::Relaxed),
         }
     }
 
-    /// Process one PCM chunk according to mode / privacy / VAD.
+    /// Process one PCM chunk according to mode / privacy / VAD / size limits.
     pub fn on_chunk(&mut self, chunk: PcmChunk) -> Option<CapturedAudio> {
         if self.privacy.paused {
             self.stats_pause.fetch_add(1, Ordering::Relaxed);
             return None;
         }
 
+        // Enforce max chunk duration (trim tail if needed).
+        let chunk = clamp_chunk_duration(chunk, self.config.max_chunk_ms);
+
         let voice = chunk.rms >= self.config.vad_rms_threshold;
         let now = Instant::now();
 
         if self.config.is_session_mode() {
+            // Force-close long sessions before accepting more voice.
+            if let (Some(started), Some(_)) = (self.session_started, self.session_id) {
+                if now.duration_since(started)
+                    >= Duration::from_millis(self.config.max_session_ms)
+                {
+                    self.close_session();
+                }
+            }
             if voice {
                 if self.session_id.is_none() {
                     self.open_session();
                 }
                 self.last_voice = Some(now);
             } else {
-                // Silence: maybe close session; never emit if drop_silent.
                 if let Some(last) = self.last_voice {
                     if now.duration_since(last)
                         >= Duration::from_millis(self.config.session_silence_ms)
@@ -108,9 +122,16 @@ impl AudioOrchestrator {
                 }
             }
         } else {
-            // continuous: ensure a session id for grouping
             if self.session_id.is_none() {
                 self.open_session();
+            } else if let Some(started) = self.session_started {
+                // continuous: roll session id every max_session_ms for grouping hygiene
+                if now.duration_since(started)
+                    >= Duration::from_millis(self.config.max_session_ms)
+                {
+                    self.close_session();
+                    self.open_session();
+                }
             }
             if self.config.drop_silent_chunks && !voice {
                 self.stats_silent.fetch_add(1, Ordering::Relaxed);
@@ -121,6 +142,10 @@ impl AudioOrchestrator {
         let session_id = self.session_id?;
         self.ordinal = self.ordinal.saturating_add(1);
         let wav = pcm_s16le_to_wav(&chunk.samples, chunk.sample_rate, 1);
+        if wav.len() as u64 > self.config.max_audio_bytes {
+            self.stats_oversized.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
         let event = SourceEvent::new(
             SourceKind::Audio,
             event_kind::AUDIO_CHUNK_V1,
@@ -163,17 +188,28 @@ impl AudioOrchestrator {
                 Err(_) => break,
             }
         }
-        // session timeout check even without new audio
+        self.apply_idle_session_timeouts();
+        out
+    }
+
+    fn apply_idle_session_timeouts(&mut self) {
+        let now = Instant::now();
+        if let Some(started) = self.session_started {
+            if now.duration_since(started) >= Duration::from_millis(self.config.max_session_ms)
+            {
+                self.close_session();
+                return;
+            }
+        }
         if self.config.is_session_mode() {
             if let Some(last) = self.last_voice {
-                if Instant::now().duration_since(last)
+                if now.duration_since(last)
                     >= Duration::from_millis(self.config.session_silence_ms)
                 {
                     self.close_session();
                 }
             }
         }
-        out
     }
 
     pub fn force_close_session(&mut self) {
@@ -194,6 +230,22 @@ impl AudioOrchestrator {
         self.session_started = None;
         self.last_voice = None;
     }
+}
+
+/// Truncate PCM so duration ≤ max_ms (product hard cap).
+fn clamp_chunk_duration(mut chunk: PcmChunk, max_ms: u64) -> PcmChunk {
+    if max_ms == 0 || chunk.sample_rate == 0 {
+        return chunk;
+    }
+    let max_samples = (u64::from(chunk.sample_rate) * max_ms / 1000) as usize;
+    if chunk.samples.len() > max_samples && max_samples > 0 {
+        chunk.samples.truncate(max_samples);
+        chunk.duration_ms = max_ms;
+        let (rms, peak) = lumen_platform::pcm_rms_peak(&chunk.samples);
+        chunk.rms = rms;
+        chunk.peak = peak;
+    }
+    chunk
 }
 
 /// Build a synthetic mono tone chunk (tests).

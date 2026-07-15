@@ -25,30 +25,44 @@ pub struct Config {
     pub api: ApiConfig,
     #[serde(default)]
     pub audio: AudioConfig,
+    #[serde(default)]
+    pub asr: AsrConfig,
 }
 
 /// Microphone intake (S3). Enable flag is `sources.audio`.
+///
+/// Timing defaults align with the product reference path: **16 kHz mono**,
+/// short continuous windows suitable for on-device ASR (same family as Lumen ASR
+/// / native 16 kHz capture — dictation product stays separate).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
     /// `continuous` | `session`
     pub mode: String,
-    /// Preferred sample rate; device may negotiate another rate.
+    /// Target / preferred sample rate (16_000 product default).
     pub sample_rate: u32,
     pub channels: u16,
-    /// Chunk duration before flush to store.
+    /// Chunk duration before flush to store (3s product default).
     pub chunk_ms: u64,
+    /// Hard cap: never emit a single chunk longer than this (ms).
+    pub max_chunk_ms: u64,
     pub queue_capacity: usize,
     /// 0 = run until stop; >0 = finite chunks (smoke).
     pub ticks: u64,
-    /// Session mode: close after this much silence.
+    /// Session mode: close after this much silence (1.2s product default).
     pub session_silence_ms: u64,
+    /// Session mode: force-close open session after this duration (10 min).
+    pub max_session_ms: u64,
     /// Energy VAD threshold (RMS of float samples in [-1, 1]).
     pub vad_rms_threshold: f32,
-    /// Drop chunks below VAD threshold (useful in session mode).
+    /// Drop chunks below VAD threshold (session mode often true).
     pub drop_silent_chunks: bool,
+    /// Reject / skip chunks larger than this after WAV encode.
+    pub max_audio_bytes: u64,
     /// Empty = system default input device.
     pub device: String,
+    /// Enqueue `transcribe_audio` jobs after each stored chunk.
+    pub enqueue_transcribe: bool,
 }
 
 impl Default for AudioConfig {
@@ -57,13 +71,17 @@ impl Default for AudioConfig {
             mode: "continuous".into(),
             sample_rate: 16_000,
             channels: 1,
-            chunk_ms: 5_000,
+            chunk_ms: 3_000,
+            max_chunk_ms: 30_000,
             queue_capacity: 8,
             ticks: 0,
-            session_silence_ms: 2_500,
-            vad_rms_threshold: 0.008,
+            session_silence_ms: 1_200,
+            max_session_ms: 600_000,
+            vad_rms_threshold: 0.01,
             drop_silent_chunks: false,
+            max_audio_bytes: 8 * 1024 * 1024,
             device: String::new(),
+            enqueue_transcribe: true,
         }
     }
 }
@@ -71,6 +89,50 @@ impl Default for AudioConfig {
 impl AudioConfig {
     pub fn is_session_mode(&self) -> bool {
         self.mode.eq_ignore_ascii_case("session")
+    }
+
+    /// Effective mic open chunk length (clamped by max_chunk_ms).
+    pub fn effective_chunk_ms(&self) -> u64 {
+        self.chunk_ms.clamp(200, self.max_chunk_ms.max(200))
+    }
+}
+
+/// Background Observe ASR (enrichment), not dictation.
+/// Dictation remains https://github.com/fakechris/lumen-asr .
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AsrConfig {
+    pub enabled: bool,
+    /// BCP-47 locale for Speech recognizer (e.g. `zh-CN`, `en-US`).
+    pub locale: String,
+    pub poll_interval_ms: u64,
+    pub batch_size: usize,
+    pub max_attempts: u32,
+    pub retry_base_ms: u64,
+    pub retry_max_ms: u64,
+    pub timeout_ms: u64,
+    pub stale_running_ms: u64,
+    pub max_audio_bytes: u64,
+    pub max_text_chars: u64,
+    pub shutdown_drain_ms: u64,
+}
+
+impl Default for AsrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            locale: "zh-CN".into(),
+            poll_interval_ms: 1_500,
+            batch_size: 1,
+            max_attempts: 5,
+            retry_base_ms: 2_000,
+            retry_max_ms: 60_000,
+            timeout_ms: 120_000,
+            stale_running_ms: 300_000,
+            max_audio_bytes: 8 * 1024 * 1024,
+            max_text_chars: 200_000,
+            shutdown_drain_ms: 30_000,
+        }
     }
 }
 
@@ -235,6 +297,7 @@ impl Default for Config {
             ocr: OcrConfig::default(),
             api: ApiConfig::default(),
             audio: AudioConfig::default(),
+            asr: AsrConfig::default(),
         }
     }
 }
@@ -266,7 +329,13 @@ mod tests {
         assert!(c.api.enabled);
         assert_eq!(c.api.bind, "127.0.0.1:7420");
         assert!(c.sources.audio);
-        assert_eq!(c.audio.chunk_ms, 5_000);
+        assert_eq!(c.audio.sample_rate, 16_000);
+        assert_eq!(c.audio.chunk_ms, 3_000);
+        assert_eq!(c.audio.session_silence_ms, 1_200);
+        assert_eq!(c.audio.max_session_ms, 600_000);
+        assert!(c.audio.enqueue_transcribe);
         assert!(!c.audio.is_session_mode());
+        assert!(c.asr.enabled);
+        assert_eq!(c.asr.locale, "zh-CN");
     }
 }

@@ -186,12 +186,15 @@ DerivedRecord { id, event_id, kind, body, created_at }
 
 Media-first job kinds: `ocr_screen`, `transcribe_audio`, `segment_activity`, `redact` (later).
 
+Derived: `ocr.v1` (screen text), `transcript.v1` (audio text) — both feed FTS search docs.
+
 ### Media payload intent
 
 | Kind | Fields (intent) |
 |------|-----------------|
 | `screenshot.v1` | app_name, bundle_id, window_title, display_id, bounds, pixel_hash, reason |
 | `audio_chunk.v1` | device, sample_rate, channels, duration_ms, mode, rms, peak, format=`wav_s16le` (see `docs/AUDIO_PRODUCT.md`) |
+| `transcript.v1` | text, language, engine=`speech`, confidence, audio_blake3 |
 | `video_segment.v1` | display_id, duration_ms, codec, linked_screenshot_ids? |
 
 ---

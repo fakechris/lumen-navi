@@ -1,6 +1,6 @@
-//! Lumen Navi daemon — Observe (screen + mic) + OCR + local control API.
+//! Lumen Navi daemon — Observe (screen + mic) + OCR + ASR + local control API.
 //!
-//! Screen and audio never wait on each other. OCR never blocks capture.
+//! Screen and audio never wait on each other. OCR/ASR never block capture.
 
 mod control_server;
 
@@ -10,12 +10,14 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use lumen_api::{HealthResponse, SourceStatus};
 use lumen_config::{AudioConfig, Config, PrivacyConfig};
-use lumen_platform::{MicCapturer, MicOpenConfig, OcrEngine, PermissionProbe};
+use lumen_platform::{AsrEngine, MicCapturer, MicOpenConfig, OcrEngine, PermissionProbe};
 use lumen_platform_macos::{
     request_screen_recording, MacDisplays, MacFrontmost, MacMicCapturer, MacPermissions,
-    MacScreenCapturer, MacScreenLock, MacVisionOcr,
+    MacScreenCapturer, MacScreenLock, MacSpeechAsr, MacVisionOcr,
 };
-use lumen_process::{OcrWorker, OcrWorkerConfig};
+use lumen_process::{
+    OcrWorker, OcrWorkerConfig, TranscribeWorker, TranscribeWorkerConfig, JOB_KIND_TRANSCRIBE_AUDIO,
+};
 use lumen_sources_media::{AudioOrchestrator, CaptureOrchestrator, CapturedBatch};
 use lumen_store::{EventStore, SCHEMA_VERSION, SqliteStore};
 use lumen_types::{SourceEvent, SourceKind, TriggerReason};
@@ -34,7 +36,7 @@ async fn main() -> Result<()> {
     info!(
         product = "lumen-navi",
         repo = "https://github.com/fakechris/lumen-navi",
-        phase = "S3-audio",
+        phase = "S3-audio-asr",
         "daemon starting"
     );
 
@@ -45,7 +47,10 @@ async fn main() -> Result<()> {
         audio = config.sources.audio,
         audio_mode = %config.audio.mode,
         audio_chunk_ms = config.audio.chunk_ms,
+        audio_silence_ms = config.audio.session_silence_ms,
         ocr = config.ocr.enabled,
+        asr = config.asr.enabled,
+        asr_locale = %config.asr.locale,
         ticks_screen = config.capture.screen_ticks,
         ticks_audio = config.audio.ticks,
         api = config.api.enabled,
@@ -73,11 +78,12 @@ async fn main() -> Result<()> {
             SourceKind::Other("daemon".into()),
             "daemon.boot.v1",
             json!({
-                "phase": "S3-audio",
+                "phase": "S3-audio-asr",
                 "observe": true,
                 "screen": config.sources.screen,
                 "audio": config.sources.audio,
                 "ocr": config.ocr.enabled,
+                "asr": config.asr.enabled,
                 "api": config.api.enabled,
             }),
         )])
@@ -137,6 +143,48 @@ async fn main() -> Result<()> {
         }
     } else {
         info!("OCR disabled in config");
+        None
+    };
+
+    // --- ASR worker (async; independent of capture) ---
+    let (asr_cancel_tx, asr_cancel_rx) = watch::channel(false);
+    let asr_handle = if config.asr.enabled {
+        let engine = Arc::new(MacSpeechAsr::with_max_audio_bytes(
+            config.asr.max_audio_bytes as usize,
+        ));
+        if engine.is_supported() {
+            let worker = Arc::new(TranscribeWorker::new(
+                Arc::clone(&store),
+                engine,
+                TranscribeWorkerConfig {
+                    locale: config.asr.locale.clone(),
+                    poll_interval: Duration::from_millis(config.asr.poll_interval_ms),
+                    batch_size: config.asr.batch_size.max(1),
+                    max_attempts: config.asr.max_attempts as i64,
+                    retry_base: Duration::from_millis(config.asr.retry_base_ms),
+                    retry_max: Duration::from_millis(config.asr.retry_max_ms),
+                    engine_timeout: Duration::from_millis(config.asr.timeout_ms),
+                    stale_running: Duration::from_millis(config.asr.stale_running_ms),
+                    max_audio_bytes: config.asr.max_audio_bytes as usize,
+                    max_text_chars: config.asr.max_text_chars as usize,
+                    shutdown_drain: Duration::from_millis(config.asr.shutdown_drain_ms),
+                },
+            ));
+            let _ = worker.reclaim_stale();
+            let w = Arc::clone(&worker);
+            let rx = asr_cancel_rx.clone();
+            Some((
+                worker,
+                tokio::spawn(async move {
+                    w.run_until_cancelled(rx).await;
+                }),
+            ))
+        } else {
+            warn!("Speech ASR not supported on this OS; worker not started");
+            None
+        }
+    } else {
+        info!("ASR disabled in config");
         None
     };
 
@@ -396,6 +444,40 @@ async fn main() -> Result<()> {
         }
     }
 
+    if let Some((worker, handle)) = asr_handle {
+        let _ = asr_cancel_tx.send(true);
+        let _ = handle.await;
+        if config.audio.ticks > 0 || config.capture.screen_ticks > 0 {
+            let st = worker.drain(40).await;
+            info!(
+                processed = st.processed,
+                succeeded = st.succeeded,
+                empty = st.empty,
+                failed = st.failed,
+                dead = st.dead,
+                skipped = st.skipped_existing,
+                reclaimed = st.reclaimed,
+                timed_out = st.timed_out,
+                "asr stats"
+            );
+        } else {
+            let st = worker.stats();
+            info!(
+                processed = st.processed,
+                succeeded = st.succeeded,
+                empty = st.empty,
+                failed = st.failed,
+                dead = st.dead,
+                reclaimed = st.reclaimed,
+                timed_out = st.timed_out,
+                "asr stats"
+            );
+        }
+        if let Ok(counts) = store.job_counts_by_status(JOB_KIND_TRANSCRIBE_AUDIO) {
+            info!(?counts, "asr job counts");
+        }
+    }
+
     // API-only keep-alive when no long observe ran.
     if config.api.enabled && expect_long && !ran_long_loop {
         info!(
@@ -441,7 +523,7 @@ async fn run_audio_loop(
     let open_cfg = MicOpenConfig {
         preferred_sample_rate: config.sample_rate,
         preferred_channels: config.channels,
-        chunk_ms: config.chunk_ms,
+        chunk_ms: config.effective_chunk_ms(),
         device: config.device.clone(),
     };
     let capturer = MacMicCapturer;
@@ -452,11 +534,15 @@ async fn run_audio_loop(
 
     info!(
         mode = %config.mode,
-        chunk_ms = config.chunk_ms,
+        chunk_ms = config.effective_chunk_ms(),
+        silence_ms = config.session_silence_ms,
+        max_session_ms = config.max_session_ms,
         ticks = config.ticks,
+        enqueue_transcribe = config.enqueue_transcribe,
         "audio observe started"
     );
 
+    let enqueue_asr = config.enqueue_transcribe;
     let mut orch = AudioOrchestrator::new(config.clone(), privacy);
     let max_ticks = config.ticks;
     let mut poll = tokio::time::interval(Duration::from_millis(100));
@@ -482,6 +568,13 @@ async fn run_audio_loop(
                     let bytes = cap.wav.len();
                     match store.put_and_append(cap.event, cap.media_type, &cap.wav) {
                         Ok(stored) => {
+                            if enqueue_asr {
+                                match store.enqueue_job(stored.id, JOB_KIND_TRANSCRIBE_AUDIO) {
+                                    Ok(Some(_)) => {}
+                                    Ok(None) => {}
+                                    Err(e) => warn!(error = %e, "enqueue transcribe_audio failed"),
+                                }
+                            }
                             info!(
                                 id = %stored.id,
                                 kind = %stored.kind,

@@ -4,12 +4,17 @@
 //! records without mutating originals.
 
 mod ocr_worker;
+mod transcribe_worker;
 
 use async_trait::async_trait;
 use lumen_types::SourceEvent;
 use thiserror::Error;
 
 pub use ocr_worker::{OcrWorker, OcrWorkerConfig, OcrWorkerStats};
+pub use transcribe_worker::{
+    TranscribeWorker, TranscribeWorkerConfig, TranscribeWorkerStats, DERIVED_TRANSCRIPT_V1,
+    JOB_KIND_TRANSCRIBE_AUDIO,
+};
 
 #[derive(Debug, Error)]
 pub enum ProcessError {

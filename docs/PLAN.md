@@ -53,19 +53,22 @@ Design: [`docs/OBSERVE_CAPTURE.md`](OBSERVE_CAPTURE.md)
 
 ---
 
-## Phase S3 — Audio source ✅
+## Phase S3 — Audio source + Observe ASR ✅
 
 Product: [`docs/AUDIO_PRODUCT.md`](AUDIO_PRODUCT.md)
 
 - [x] Mic path via cpal (dedicated audio thread; stream `!Send` isolated)  
-- [x] Continuous + session (VAD/RMS) modes; `session_id` grouping  
+- [x] Timing aligned to reference: 16 kHz mono, 3s chunks, 1.2s silence, 10m max session  
+- [x] Continuous + session (VAD/RMS) modes; size / duration hard caps  
 - [x] `audio_chunk.v1` + WAV CA blobs; independent `sources.audio`  
+- [x] Async `transcribe_audio` → `transcript.v1` (Speech.framework; OCR-parity job machine)  
+- [x] Transcripts indexed into same FTS as OCR  
 - [x] Concurrent with screen; privacy pause; bounded backpressure  
-- [x] Unit tests with synthetic PCM (no live mic required)  
+- [x] Unit tests with synthetic PCM + StubAsr (no live mic/Speech required)  
 - [ ] Long-run soak (manual)  
 - [ ] System audio loopback (later)  
 
-**Exit:** concurrent screen + audio durable intake; restart keeps stored chunks.
+**Exit:** concurrent screen + audio durable intake + searchable transcripts; dictation remains [Lumen ASR](https://github.com/fakechris/lumen-asr).
 
 ---
 

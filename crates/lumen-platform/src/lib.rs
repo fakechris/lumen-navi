@@ -214,9 +214,87 @@ impl Default for MicOpenConfig {
         Self {
             preferred_sample_rate: 16_000,
             preferred_channels: 1,
-            chunk_ms: 5_000,
+            chunk_ms: 3_000,
             device: String::new(),
         }
+    }
+}
+
+// --- ASR (process plane; never on capture hot path) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AsrResult {
+    pub text: String,
+    pub confidence: f64,
+    pub language: Option<String>,
+    /// e.g. `speech` | `stub`
+    pub engine: String,
+}
+
+/// On-device speech recognition for Observe enrichment (not dictation UI).
+#[async_trait]
+pub trait AsrEngine: Send + Sync {
+    fn is_supported(&self) -> bool;
+
+    /// Transcribe a WAV (or other decodeable) audio blob.
+    async fn transcribe(
+        &self,
+        audio: &[u8],
+        locale: &str,
+    ) -> Result<AsrResult, PlatformError>;
+}
+
+/// Stub / unavailable ASR.
+pub struct NullAsr;
+
+#[async_trait]
+impl AsrEngine for NullAsr {
+    fn is_supported(&self) -> bool {
+        false
+    }
+
+    async fn transcribe(
+        &self,
+        _audio: &[u8],
+        _locale: &str,
+    ) -> Result<AsrResult, PlatformError> {
+        Err(PlatformError::Unsupported("ASR not available".into()))
+    }
+}
+
+/// Deterministic test double.
+pub struct StubAsr {
+    canned: String,
+}
+
+impl StubAsr {
+    pub fn new(canned: impl Into<String>) -> Self {
+        Self {
+            canned: canned.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl AsrEngine for StubAsr {
+    fn is_supported(&self) -> bool {
+        true
+    }
+
+    async fn transcribe(
+        &self,
+        audio: &[u8],
+        _locale: &str,
+    ) -> Result<AsrResult, PlatformError> {
+        if audio.is_empty() {
+            return Err(PlatformError::Message("empty audio".into()));
+        }
+        Ok(AsrResult {
+            text: self.canned.clone(),
+            confidence: 1.0,
+            language: Some("zh".into()),
+            engine: "stub".into(),
+        })
     }
 }
 
