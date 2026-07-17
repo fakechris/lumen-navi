@@ -1,0 +1,185 @@
+/* Selection popup (划词弹窗) — reuses the warm-light tokens from styles.css */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f2f2f7;
+  --card: #ffffff;
+  --text: #1d1d1f;
+  --muted: #6e6e73;
+  --accent: #007aff;
+  --accent-dim: rgba(0, 122, 255, 0.12);
+  --warm: #ff9f0a;
+  --ok: #34c759;
+  --error: #ff3b30;
+  --border: rgba(0, 0, 0, 0.09);
+  --shadow: 0 2px 6px rgba(0, 0, 0, 0.08), 0 16px 48px rgba(0, 0, 0, 0.16);
+  --radius: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c1e;
+    --card: #2c2c2e;
+    --text: #f5f5f7;
+    --muted: #98989d;
+    --accent: #0a84ff;
+    --accent-dim: rgba(10, 132, 255, 0.18);
+    --warm: #ff9f0a;
+    --ok: #30d158;
+    --error: #ff453a;
+    --border: rgba(255, 255, 255, 0.1);
+    --shadow: 0 2px 6px rgba(0, 0, 0, 0.4), 0 16px 48px rgba(0, 0, 0, 0.5);
+  }
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: transparent; color: var(--text); overflow: hidden; }
+
+.popup {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.popup-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  user-select: none;
+}
+
+.popup-title {
+  font-weight: 650;
+  font-size: 12px;
+  color: var(--muted);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.popup-title span { color: var(--warm); }
+
+.popup-close {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.popup-close:hover { background: var(--accent-dim); color: var(--text); }
+
+.popup-selection {
+  margin: 10px 12px 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 64px;
+  overflow: auto;
+}
+
+.popup-actions {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+
+.popup-btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 550;
+  padding: 5px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.popup-btn:hover { border-color: var(--accent); }
+.popup-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.popup-btn:disabled { opacity: 0.5; cursor: default; }
+
+.popup-ask {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px 0;
+}
+.popup-ask input {
+  flex: 1;
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  outline: none;
+}
+.popup-ask input:focus { border-color: var(--accent); }
+
+.popup-result {
+  flex: 1;
+  margin: 10px 12px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+}
+.popup-result:empty { display: none; }
+
+.popup-result .cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: popup-blink 0.9s steps(2) infinite;
+}
+@keyframes popup-blink { 50% { opacity: 0; } }
+
+.popup-error {
+  margin: 10px 12px 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 59, 48, 0.1);
+  color: var(--error);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.popup-hint {
+  padding: 0 12px 10px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+}

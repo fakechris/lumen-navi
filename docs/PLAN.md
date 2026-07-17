@@ -107,9 +107,13 @@ Product: [`docs/OCR_PRODUCT.md`](OCR_PRODUCT.md)
 
 ## Phase A1 — Act (optional)
 
-- Bundle/spawn **cua-driver** (MIT only from trycua/cua)  
+- Bundle/spawn **cua-driver** (MIT only from trycua/cua — MCP-native desktop automation driver)  
 - `lumen-act` thin client  
 - Never block intake  
+- First Act-flavored surface shipped: **selection popup (划词助手)** — text-in → action-out
+  (translate/ask via OpenAI-compatible HTTP today). Its action seam
+  (`assistant_run` command + `[assistant]` config) is where a cua-driver-backed
+  engine plugs in later — no changes to Observe/capture paths.  
 
 ---
 

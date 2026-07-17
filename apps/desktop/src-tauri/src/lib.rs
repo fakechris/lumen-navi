@@ -1,7 +1,9 @@
 //! Lumen Navi desktop shell — store browser + control + observe sidecar + tray.
 
 mod asr_models;
+mod assistant;
 mod commands;
+mod selection_popup;
 mod shell;
 mod state;
 mod tray;
@@ -29,6 +31,14 @@ pub fn run() {
         .setup(move |app| {
             if let Err(e) = tray::setup_tray(app.handle()) {
                 tracing::warn!(error = %e, "tray setup failed");
+            }
+            {
+                let popup_enabled = app
+                    .try_state::<AppState>()
+                    .and_then(|s| s.load_config().ok())
+                    .map(|c| c.assistant.popup_enabled)
+                    .unwrap_or(false);
+                selection_popup::init_from_config(&app.handle(), popup_enabled);
             }
             if launch_observe {
                 let handle = app.handle().clone();
@@ -76,6 +86,13 @@ pub fn run() {
             asr_models::set_asr_models_root,
             asr_models::start_asr_model_download,
             asr_models::cancel_asr_model_download,
+            commands::assistant_get_config,
+            commands::assistant_update_config,
+            commands::assistant_run,
+            commands::assistant_cancel,
+            commands::request_accessibility_permission,
+            commands::selection_popup_hide,
+            commands::selection_popup_current,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lumen Navi");

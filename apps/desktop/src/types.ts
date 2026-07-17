@@ -129,3 +129,30 @@ export interface AsrDownloadProgress {
   total: number | null;
   percent: number | null;
 }
+
+/** Selection-popup assistant config (navi.toml `[assistant]`). */
+export interface AssistantConfig {
+  enabled: boolean;
+  popup_enabled: boolean;
+  base_url: string;
+  model: string;
+  target_lang: string;
+  max_selection_chars: number;
+  /** Key is never echoed back — only whether one is configured. */
+  api_key_set: boolean;
+  accessibility_trusted: boolean;
+  clipboard_fallback: boolean;
+}
+
+export interface AssistantUpdate {
+  enabled?: boolean;
+  popup_enabled?: boolean;
+  base_url?: string;
+  model?: string;
+  target_lang?: string;
+  /** undefined = keep, "" = clear, value = set. */
+  api_key?: string;
+  clipboard_fallback?: boolean;
+}
+
+export type AssistantAction = "translate" | "ask";
