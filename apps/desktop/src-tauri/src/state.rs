@@ -1,5 +1,6 @@
 //! Shared app state: durable store + optional observe daemon child + shell prefs.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::Mutex;
@@ -18,6 +19,9 @@ pub struct AppState {
     pub shell: Mutex<ShellConfig>,
     /// Child `lumen-daemon` when Observe is running from the shell.
     pub observe_child: Mutex<Option<Child>>,
+    /// In-flight assistant (selection popup) streaming requests, by id.
+    pub assistant_tasks:
+        Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
 }
 
 impl AppState {
@@ -38,6 +42,7 @@ impl AppState {
             paused: Mutex::new(config.privacy.paused),
             shell: Mutex::new(shell_cfg),
             observe_child: Mutex::new(None),
+            assistant_tasks: Mutex::new(HashMap::new()),
         })
     }
 

@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AsrModelCandidate,
   AsrModelStatus,
+  AssistantAction,
+  AssistantConfig,
+  AssistantUpdate,
   ConfigSummary,
   EventSummary,
   Health,
@@ -72,4 +75,18 @@ export const api = {
     invoke<AsrModelStatus>("set_asr_models_root", { modelsRoot }),
   startAsrModelDownload: () => invoke<AsrModelStatus>("start_asr_model_download"),
   cancelAsrModelDownload: () => invoke<void>("cancel_asr_model_download"),
+  assistantGetConfig: () => invoke<AssistantConfig>("assistant_get_config"),
+  assistantUpdateConfig: (update: AssistantUpdate) =>
+    invoke<AssistantConfig>("assistant_update_config", { update }),
+  assistantRun: (action: AssistantAction, text: string, question?: string) =>
+    invoke<string>("assistant_run", {
+      action,
+      text,
+      question: question ?? null,
+    }),
+  assistantCancel: (id: string) => invoke<void>("assistant_cancel", { id }),
+  requestAccessibilityPermission: () =>
+    invoke<boolean>("request_accessibility_permission"),
+  selectionPopupHide: () => invoke<void>("selection_popup_hide"),
+  selectionPopupCurrent: () => invoke<string | null>("selection_popup_current"),
 };

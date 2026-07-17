@@ -72,7 +72,9 @@ scripts/macos/prepare-daemon-binary.sh aarch64-apple-darwin
 cd apps/desktop && npm ci && npm run tauri -- build --target aarch64-apple-darwin --bundles dmg
 ```
 
-Install notes: [`docs/MACOS_RELEASE_NOTES.md`](MACOS_RELEASE_NOTES.md).
+Install notes: [`docs/MACOS_RELEASE_NOTES.md`](MACOS_RELEASE_NOTES.md).  
+Local dev builds should use a **stable self-signed identity** so TCC
+permissions survive rebuilds: [`docs/MACOS_LOCAL_SIGNING.md`](MACOS_LOCAL_SIGNING.md).
 
 ## Permissions (macOS)
 
@@ -81,6 +83,7 @@ Install notes: [`docs/MACOS_RELEASE_NOTES.md`](MACOS_RELEASE_NOTES.md).
 | Screen Recording | Screenshots |
 | Microphone | Audio chunks |
 | Speech Recognition | Optional ASR engine / SenseVoice fallback |
+| Accessibility | Selection popup (划词助手) — read selected text + mouse-up monitor |
 
 Granted via System Settings after first use; the Overview tab shows probe status.
 
@@ -89,7 +92,62 @@ Granted via System Settings after first use; the Overview tab shows probe status
 1. **概览** — health counts, sources, start/stop Observe, privacy pause  
 2. **搜索** — OCR + transcript FTS (same index as control API)  
 3. **活动** — timeline with thumbnails, text preview, kind/app filters, day summary  
-4. **设置** — live source toggles (restart Observe to apply), data dir, launch-on-start
+4. **设置** — live source toggles (restart Observe to apply), 划词助手, data dir, launch-on-start
+
+## Selection popup (划词助手)
+
+PopClip-style floating panel: select text with the mouse in any app → a
+borderless panel appears near the selection → click **翻译** or ask a question
+→ the selected text goes to an OpenAI-compatible chat LLM and the answer
+streams back into the panel. Esc or clicking elsewhere dismisses it.
+
+- **Off by default.** Enable in 设置 → 划词助手 (`assistant.popup_enabled`),
+  then grant **Accessibility** (used to read the selection via AX API and to
+  run the global mouse-up monitor; re-enable the toggle after granting).
+- **Privacy:** selected text is sent to the configured LLM **only** when the
+  user clicks an action. Nothing is captured, stored, or indexed; unrelated
+  to Observe capture and its privacy gates.
+- **Limits:** apps with no Accessibility-tree support at all (a few
+  custom-rendered UIs / old terminals / some Java apps) don't trigger the
+  panel. Chromium apps (Chrome, VS Code, Electron) build their AX tree
+  lazily — the monitor nudges them (`AXManualAccessibility` /
+  `AXEnhancedUserInterface`) and retries briefly after mouse-up. WebKit
+  (Safari) doesn't vend `AXSelectedText`; the selected string is read via
+  `AXSelectedTextMarkerRange` + `AXStringForTextMarkerRange` instead. There
+  is no ⌘C pasteboard fallback in auto mode (it must not clobber the
+  pasteboard); a Bob-style ⌘C-with-restore capture could be added later
+  behind a hotkey.
+- Config (`navi.toml`):
+
+```toml
+[assistant]
+enabled = true            # master switch for LLM actions
+popup_enabled = true      # mouse-selection auto popup
+base_url = "https://api.openai.com/v1"   # any OpenAI-compatible endpoint
+api_key = "sk-…"          # or env LUMEN_NAVI_LLM_API_KEY / OPENAI_API_KEY
+model = "gpt-4o-mini"
+target_lang = "中文"
+max_selection_chars = 4000
+```
+
+Commands: `assistant_get_config`, `assistant_update_config`, `assistant_run`,
+`assistant_cancel`, `request_accessibility_permission`,
+`selection_popup_hide`, `selection_popup_current`.
+Popup events: `selection-changed`, `assistant-stream`, `assistant-done`,
+`assistant-error`.
+
+Implementation: AX capture + CGEventTap live in
+`crates/lumen-platform-macos/src/selection.rs`; window glue in
+`apps/desktop/src-tauri/src/selection_popup.rs`; SSE client in
+`apps/desktop/src-tauri/src/assistant.rs`; panel UI in
+`apps/desktop/src/popup/` (vite multi-entry `popup.html`).
+
+**Roadmap (Act plane):** the popup's action seam (`assistant_run` + the
+`[assistant]` config) is designed to gain a
+[cua-driver](https://github.com/trycua/cua)-backed engine later (MIT only —
+never `cua-agent[omni]`/ultralytics, AGPL-3.0). That integration is computer-**use**
+only: it must never sit on the Observe capture path, which stays Navi-owned.
+
 
 ## Tray
 

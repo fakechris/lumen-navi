@@ -27,6 +27,69 @@ pub struct Config {
     pub audio: AudioConfig,
     #[serde(default)]
     pub asr: AsrConfig,
+    #[serde(default)]
+    pub assistant: AssistantConfig,
+}
+
+/// Selection-popup assistant (desktop 划词弹窗) — OpenAI-compatible chat LLM.
+///
+/// Text is sent to the configured endpoint **only** on explicit user action
+/// (translate / ask) from the popup; never during capture.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AssistantConfig {
+    /// Master switch for the assistant feature.
+    pub enabled: bool,
+    /// Show popup automatically after mouse text selection.
+    pub popup_enabled: bool,
+    /// OpenAI-compatible base URL (…/v1).
+    pub base_url: String,
+    /// Bearer token (env `LUMEN_NAVI_LLM_API_KEY` / `OPENAI_API_KEY` overrides).
+    pub api_key: String,
+    /// Chat model id, e.g. `gpt-4o-mini`, `deepseek-chat`, `qwen-plus`.
+    pub model: String,
+    /// Translate target language, e.g. `中文`, `English`.
+    pub target_lang: String,
+    /// Selection text is truncated beyond this many chars before sending.
+    pub max_selection_chars: usize,
+    /// HTTP request timeout (connect + read).
+    pub timeout_ms: u64,
+    /// When AX exposes no selection (canvas editors, GPU terminals), grab it
+    /// via simulated ⌘C with full pasteboard save/restore.
+    pub clipboard_fallback: bool,
+}
+
+impl Default for AssistantConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            popup_enabled: false,
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: String::new(),
+            model: "gpt-4o-mini".into(),
+            target_lang: "中文".into(),
+            max_selection_chars: 4_000,
+            timeout_ms: 120_000,
+            clipboard_fallback: true,
+        }
+    }
+}
+
+impl AssistantConfig {
+    /// Effective API key: env override then config.
+    pub fn effective_api_key(&self) -> String {
+        if let Ok(k) = std::env::var("LUMEN_NAVI_LLM_API_KEY") {
+            if !k.is_empty() {
+                return k;
+            }
+        }
+        if let Ok(k) = std::env::var("OPENAI_API_KEY") {
+            if !k.is_empty() {
+                return k;
+            }
+        }
+        self.api_key.clone()
+    }
 }
 
 /// Microphone intake (S3). Enable flag is `sources.audio`.
@@ -55,7 +118,8 @@ pub struct AudioConfig {
     pub max_session_ms: u64,
     /// Energy VAD threshold (RMS of float samples in [-1, 1]).
     pub vad_rms_threshold: f32,
-    /// Drop chunks below VAD threshold (session mode often true).
+    /// Drop chunks below VAD threshold — default on: storing ambient silence
+    /// only floods the timeline and wastes ASR work.
     pub drop_silent_chunks: bool,
     /// Reject / skip chunks larger than this after WAV encode.
     pub max_audio_bytes: u64,
@@ -81,7 +145,7 @@ impl Default for AudioConfig {
             session_silence_ms: 1_200,
             max_session_ms: 600_000,
             vad_rms_threshold: 0.01,
-            drop_silent_chunks: false,
+            drop_silent_chunks: true,
             max_audio_bytes: 8 * 1024 * 1024,
             device: String::new(),
             enqueue_transcribe: true,
@@ -367,6 +431,7 @@ impl Default for Config {
             api: ApiConfig::default(),
             audio: AudioConfig::default(),
             asr: AsrConfig::default(),
+            assistant: AssistantConfig::default(),
         }
     }
 }
@@ -403,11 +468,15 @@ mod tests {
         assert_eq!(c.audio.session_silence_ms, 1_200);
         assert_eq!(c.audio.max_session_ms, 600_000);
         assert!(c.audio.enqueue_transcribe);
+        assert!(c.audio.drop_silent_chunks);
         assert!(!c.audio.is_session_mode());
         assert!(c.asr.enabled);
         assert_eq!(c.asr.locale, "zh-CN");
         assert_eq!(c.asr.engine, "sensevoice");
         assert!(c.asr.fallback_speech);
+        assert!(!c.assistant.enabled);
+        assert!(!c.assistant.popup_enabled);
+        assert_eq!(c.assistant.model, "gpt-4o-mini");
     }
 
     #[test]
@@ -421,5 +490,24 @@ mod tests {
 
         assert_eq!(decoded.asr.engine, "whisper");
         assert_eq!(decoded.asr.model_dir, "/models/custom-whisper");
+    }
+
+    #[test]
+    fn assistant_config_survives_toml_roundtrip() {
+        let mut config = Config::default();
+        config.assistant.enabled = true;
+        config.assistant.popup_enabled = true;
+        config.assistant.base_url = "https://api.deepseek.com/v1".into();
+        config.assistant.model = "deepseek-chat".into();
+        config.assistant.target_lang = "English".into();
+
+        let encoded = toml::to_string_pretty(&config).unwrap();
+        let decoded: Config = toml::from_str(&encoded).unwrap();
+
+        assert!(decoded.assistant.enabled);
+        assert!(decoded.assistant.popup_enabled);
+        assert_eq!(decoded.assistant.base_url, "https://api.deepseek.com/v1");
+        assert_eq!(decoded.assistant.model, "deepseek-chat");
+        assert_eq!(decoded.assistant.target_lang, "English");
     }
 }

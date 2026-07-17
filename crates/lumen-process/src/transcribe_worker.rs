@@ -268,12 +268,23 @@ impl TranscribeWorker {
                 + "\n…[truncated]";
         }
 
+        // Skip empty transcripts: silence/noise chunks that slipped past VAD
+        // produce no value in the FTS index or timeline — don't persist them.
+        let nonempty = !result.text.trim().is_empty();
+        if !nonempty {
+            info!(
+                event = %job.event_id,
+                engine = %result.engine,
+                "empty transcript — transcript.v1 skipped"
+            );
+            return Ok(JobOutcome::Success { nonempty: false });
+        }
+
         let body = transcript_body_json(&result, job.event_id, &bytes);
         self.store
             .insert_derived(job.event_id, DERIVED_TRANSCRIPT_V1, body)
             .map_err(|e| JobError::transient(e.to_string()))?;
 
-        let nonempty = !result.text.trim().is_empty();
         info!(
             event = %job.event_id,
             chars = result.text.chars().count(),
@@ -462,5 +473,39 @@ mod tests {
         );
         worker.tick_once().await.unwrap();
         assert_eq!(worker.stats().skipped_existing, 1);
+    }
+
+    #[tokio::test]
+    async fn empty_transcript_is_not_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
+        let event = SourceEvent::new(
+            SourceKind::Audio,
+            event_kind::AUDIO_CHUNK_V1,
+            json!({}),
+        );
+        let eid = event.id;
+        store
+            .put_and_append(event, "audio/wav", b"RIFF....fake-wav-bytes")
+            .unwrap();
+        store
+            .enqueue_job(eid, JOB_KIND_TRANSCRIBE_AUDIO)
+            .unwrap();
+
+        let worker = TranscribeWorker::new(
+            Arc::clone(&store),
+            Arc::new(StubAsr::new("   ")),
+            TranscribeWorkerConfig {
+                poll_interval: Duration::from_millis(10),
+                engine_timeout: Duration::from_secs(5),
+                ..Default::default()
+            },
+        );
+        assert_eq!(worker.tick_once().await.unwrap(), 1);
+        // Job completes but nothing is written or indexed; counted as empty.
+        assert!(!store.has_derived(eid, DERIVED_TRANSCRIPT_V1).unwrap());
+        assert!(store.search_ocr("transcript", 5).unwrap().is_empty());
+        assert_eq!(worker.stats().empty, 1);
+        assert_eq!(worker.stats().succeeded, 0);
     }
 }

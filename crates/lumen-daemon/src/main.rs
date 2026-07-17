@@ -524,13 +524,21 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// `voice` flag from the audio_chunk payload; missing (old events) counts as voiced.
+fn stored_voice_flag(event: &lumen_types::SourceEvent) -> bool {
+    event
+        .payload
+        .get("voice")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
 async fn run_audio_loop(
     store: Arc<SqliteStore>,
     config: AudioConfig,
     privacy: PrivacyConfig,
     mut cancel: watch::Receiver<bool>,
-) -> Result<lumen_sources_media::AudioStats> {
-    let open_cfg = MicOpenConfig {
+) -> Result<lumen_sources_media::AudioStats> {    let open_cfg = MicOpenConfig {
         preferred_sample_rate: config.sample_rate,
         preferred_channels: config.channels,
         chunk_ms: config.effective_chunk_ms(),
@@ -576,9 +584,13 @@ async fn run_audio_loop(
                 let batch = orch.drain_ready(&stream);
                 for cap in batch {
                     let bytes = cap.wav.len();
+                    // Only voiced chunks are worth ASR; silent ones may still be
+                    // stored (drop_silent_chunks=false) but must not burn
+                    // transcription work.
+                    let voiced = stored_voice_flag(&cap.event);
                     match store.put_and_append(cap.event, cap.media_type, &cap.wav) {
                         Ok(stored) => {
-                            if enqueue_asr {
+                            if enqueue_asr && voiced {
                                 match store.enqueue_job(stored.id, JOB_KIND_TRANSCRIBE_AUDIO) {
                                     Ok(Some(_)) => {}
                                     Ok(None) => {}

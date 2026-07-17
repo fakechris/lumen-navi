@@ -4,6 +4,8 @@ import { api } from "./api";
 import { Onboarding } from "./Onboarding";
 import type {
   AsrModelStatus,
+  AssistantConfig,
+  AssistantUpdate,
   ConfigSummary,
   Health,
   ObserveStatus,
@@ -75,16 +77,19 @@ export default function App() {
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const [summaryText, setSummaryText] = useState<string | null>(null);
   const [asrModels, setAsrModels] = useState<AsrModelStatus | null>(null);
+  const [assistant, setAssistant] = useState<AssistantConfig | null>(null);
+  const [assistantKey, setAssistantKey] = useState("");
 
   const refresh = useCallback(async () => {
     try {
-      const [h, p, c, o, ob, models] = await Promise.all([
+      const [h, p, c, o, ob, models, asst] = await Promise.all([
         api.getHealth(),
         api.getPermissions(),
         api.getConfigSummary(),
         api.observeStatus(),
         api.getOnboarding(),
         api.checkAsrModelStatus(),
+        api.assistantGetConfig(),
       ]);
       setHealth(h);
       setPerms(p);
@@ -92,6 +97,7 @@ export default function App() {
       setObserve(o);
       setOnboarding(ob);
       setAsrModels(models);
+      setAssistant(asst);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -185,6 +191,19 @@ export default function App() {
       setBusy(false);
     }
   }, [cfg, refresh]);
+
+  const updateAssistant = useCallback(async (update: AssistantUpdate) => {
+    setBusy(true);
+    try {
+      const a = await api.assistantUpdateConfig(update);
+      setAssistant(a);
+      setStatusNote("划词助手配置已保存。");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
 
   // Tray menu → UI actions
   useEffect(() => {
@@ -849,6 +868,160 @@ export default function App() {
                   开关写入 <span className="mono">navi.toml</span>
                   。采集进程需重启后读取新配置。
                 </p>
+              </div>
+              <div className="card">
+                <h3>划词助手（选中文字 → 翻译 / 问答）</h3>
+                <div className="stack mt">
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={!!assistant?.popup_enabled}
+                      onChange={(e) =>
+                        void updateAssistant({ popup_enabled: e.target.checked })
+                      }
+                    />
+                    鼠标划词后自动弹出面板
+                  </label>
+                  {assistant?.popup_enabled &&
+                    !assistant?.accessibility_trusted && (
+                      <div>
+                        <p className="meta">
+                          需要「辅助功能」权限来读取其他应用中的选中文字。
+                          授权后几秒内自动生效，无需重启。
+                        </p>
+                        <div className="row mt">
+                          <button
+                            className="btn"
+                            disabled={busy}
+                            onClick={() => {
+                              setBusy(true);
+                              void api
+                                .requestAccessibilityPermission()
+                                .then(() => api.assistantGetConfig())
+                                .then((a) => setAssistant(a))
+                                .catch((err) => setError(String(err)))
+                                .finally(() => setBusy(false));
+                            }}
+                          >
+                            请求权限
+                          </button>
+                          <button
+                            className="btn"
+                            onClick={() =>
+                              void api.openPrivacySettings("accessibility")
+                            }
+                          >
+                            打开系统设置
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={!!assistant?.enabled}
+                      onChange={(e) =>
+                        void updateAssistant({ enabled: e.target.checked })
+                      }
+                    />
+                    启用助手（点击动作时把选中文字发给 LLM）
+                  </label>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={!!assistant?.clipboard_fallback}
+                      onChange={(e) =>
+                        void updateAssistant({
+                          clipboard_fallback: e.target.checked,
+                        })
+                      }
+                    />
+                    无 AX 应用（钉钉文档 / 终端）用 ⌘C 兜底取词（读取后立即恢复剪贴板）
+                  </label>
+                  <label className="field">
+                    <span className="meta">LLM base URL（OpenAI 兼容 …/v1）</span>
+                    <input
+                      className="input"
+                      placeholder="https://api.openai.com/v1"
+                      value={assistant?.base_url ?? ""}
+                      onChange={(e) => {
+                        const base_url = e.target.value;
+                        setAssistant((prev) =>
+                          prev ? { ...prev, base_url } : prev,
+                        );
+                      }}
+                      onBlur={() => void updateAssistant({ base_url: assistant?.base_url ?? "" })}
+                    />
+                  </label>
+                  <label className="field">
+                    <span className="meta">模型</span>
+                    <input
+                      className="input"
+                      placeholder="gpt-4o-mini"
+                      value={assistant?.model ?? ""}
+                      onChange={(e) => {
+                        const model = e.target.value;
+                        setAssistant((prev) =>
+                          prev ? { ...prev, model } : prev,
+                        );
+                      }}
+                      onBlur={() => void updateAssistant({ model: assistant?.model ?? "" })}
+                    />
+                  </label>
+                  <label className="field">
+                    <span className="meta">翻译目标语言</span>
+                    <input
+                      className="input"
+                      placeholder="中文"
+                      value={assistant?.target_lang ?? ""}
+                      onChange={(e) => {
+                        const target_lang = e.target.value;
+                        setAssistant((prev) =>
+                          prev ? { ...prev, target_lang } : prev,
+                        );
+                      }}
+                      onBlur={() =>
+                        void updateAssistant({ target_lang: assistant?.target_lang ?? "" })
+                      }
+                    />
+                  </label>
+                  <label className="field">
+                    <span className="meta">
+                      API key（{assistant?.api_key_set ? "已配置，输入以更换" : "未配置"}）
+                    </span>
+                    <input
+                      className="input"
+                      type="password"
+                      placeholder="sk-…"
+                      value={assistantKey}
+                      onChange={(e) => setAssistantKey(e.target.value)}
+                      onBlur={() => {
+                        const k = assistantKey.trim();
+                        if (k) {
+                          void updateAssistant({ api_key: k });
+                          setAssistantKey("");
+                        }
+                      }}
+                    />
+                  </label>
+                  {assistant?.api_key_set && (
+                    <div className="row">
+                      <button
+                        className="btn"
+                        disabled={busy}
+                        onClick={() => void updateAssistant({ api_key: "" })}
+                      >
+                        清除 API key
+                      </button>
+                    </div>
+                  )}
+                  <p className="meta">
+                    写入 <span className="mono">navi.toml</span> 的{" "}
+                    <span className="mono">assistant</span> 段；也可用环境变量{" "}
+                    <span className="mono">LUMEN_NAVI_LLM_API_KEY</span>。选中文字仅在
+                    你点击「翻译 / 提问」时发送，不会被采集或存储。
+                  </p>
+                </div>
               </div>
               <div className="card">
                 <h3>Shell</h3>

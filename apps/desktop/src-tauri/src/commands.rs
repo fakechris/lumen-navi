@@ -11,9 +11,12 @@ use lumen_platform_macos::MacPermissions;
 use lumen_store::{EventStore, SCHEMA_VERSION, TimelineQuery};
 use lumen_types::event_kind;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use serde_json::json;
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
+use crate::assistant::{self, AssistantJob};
+use crate::selection_popup::{self, POPUP_LABEL};
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -640,4 +643,194 @@ fn resolve_daemon_binary() -> Option<PathBuf> {
 
 fn err(e: impl ToString) -> String {
     e.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Selection popup assistant (划词弹窗 + LLM)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct AssistantConfigDto {
+    pub enabled: bool,
+    pub popup_enabled: bool,
+    pub base_url: String,
+    pub model: String,
+    pub target_lang: String,
+    pub max_selection_chars: usize,
+    /// Never echoes the key back — only whether one is configured.
+    pub api_key_set: bool,
+    pub accessibility_trusted: bool,
+    pub clipboard_fallback: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AssistantUpdate {
+    pub enabled: Option<bool>,
+    pub popup_enabled: Option<bool>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub target_lang: Option<String>,
+    /// `None` = keep, `Some("")` = clear, `Some(v)` = set.
+    pub api_key: Option<String>,
+    pub clipboard_fallback: Option<bool>,
+}
+
+fn assistant_dto(cfg: &lumen_config::Config) -> AssistantConfigDto {
+    AssistantConfigDto {
+        enabled: cfg.assistant.enabled,
+        popup_enabled: cfg.assistant.popup_enabled,
+        base_url: cfg.assistant.base_url.clone(),
+        model: cfg.assistant.model.clone(),
+        target_lang: cfg.assistant.target_lang.clone(),
+        max_selection_chars: cfg.assistant.max_selection_chars,
+        api_key_set: !cfg.assistant.effective_api_key().is_empty(),
+        accessibility_trusted: lumen_platform_macos::accessibility_trusted(false),
+        clipboard_fallback: cfg.assistant.clipboard_fallback,
+    }
+}
+
+#[tauri::command]
+pub fn assistant_get_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AssistantConfigDto, String> {
+    let cfg = state.load_config().map_err(err)?;
+    let dto = assistant_dto(&cfg);
+    // Self-heal: settings UI polls this every few seconds; once Accessibility
+    // is granted, (re)start the monitor without requiring a manual re-toggle.
+    if cfg.assistant.popup_enabled && dto.accessibility_trusted {
+        selection_popup::ensure_monitor(&app);
+    }
+    Ok(dto)
+}
+
+#[tauri::command]
+pub fn assistant_update_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    update: AssistantUpdate,
+) -> Result<AssistantConfigDto, String> {
+    let mut cfg = state.load_config().map_err(err)?;
+    if let Some(v) = update.enabled {
+        cfg.assistant.enabled = v;
+    }
+    if let Some(v) = update.popup_enabled {
+        cfg.assistant.popup_enabled = v;
+    }
+    if let Some(v) = update.base_url {
+        cfg.assistant.base_url = v.trim().to_string();
+    }
+    if let Some(v) = update.model {
+        let t = v.trim();
+        if !t.is_empty() {
+            cfg.assistant.model = t.to_string();
+        }
+    }
+    if let Some(v) = update.target_lang {
+        let t = v.trim();
+        if !t.is_empty() {
+            cfg.assistant.target_lang = t.to_string();
+        }
+    }
+    if let Some(v) = update.api_key {
+        cfg.assistant.api_key = v.trim().to_string();
+    }
+    if let Some(v) = update.clipboard_fallback {
+        cfg.assistant.clipboard_fallback = v;
+    }
+    state.save_config(&cfg).map_err(err)?;
+    selection_popup::set_popup_enabled(&app, cfg.assistant.popup_enabled);
+    Ok(assistant_dto(&cfg))
+}
+
+#[tauri::command]
+pub fn request_accessibility_permission() -> Result<bool, String> {
+    Ok(lumen_platform_macos::accessibility_trusted(true))
+}
+
+/// Start a streaming assistant request; returns its id. Progress arrives as
+/// `assistant-stream` / `assistant-done` / `assistant-error` popup events.
+#[tauri::command]
+pub fn assistant_run(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    action: String,
+    text: String,
+    question: Option<String>,
+) -> Result<String, String> {
+    let cfg = state.load_config().map_err(err)?.assistant;
+    if !cfg.enabled {
+        return Err("assistant is disabled (enable it in Settings)".into());
+    }
+    let action = assistant::AssistantAction::parse(&action)?;
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("empty selection text".into());
+    }
+    if action == assistant::AssistantAction::Ask
+        && question.as_deref().map(str::trim).unwrap_or("").is_empty()
+    {
+        return Err("ask action requires a question".into());
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let handle = app.clone();
+    let job = AssistantJob {
+        id: id.clone(),
+        action,
+        text,
+        question,
+    };
+    let task_id = id.clone();
+    let join = tauri::async_runtime::spawn(async move {
+        let result = assistant::run_stream(handle.clone(), cfg, job).await;
+        if let Some(st) = handle.try_state::<AppState>() {
+            if let Ok(mut tasks) = st.assistant_tasks.lock() {
+                tasks.remove(&task_id);
+            }
+        }
+        match result {
+            Ok(()) => {
+                let _ = handle.emit_to(POPUP_LABEL, "assistant-done", json!({ "id": task_id }));
+            }
+            Err(e) => {
+                let _ = handle.emit_to(
+                    POPUP_LABEL,
+                    "assistant-error",
+                    json!({ "id": task_id, "message": e }),
+                );
+            }
+        }
+    });
+    state
+        .assistant_tasks
+        .lock()
+        .map_err(err)?
+        .insert(id.clone(), join);
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn assistant_cancel(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let handle = state
+        .assistant_tasks
+        .lock()
+        .map_err(err)?
+        .remove(&id);
+    if let Some(h) = handle {
+        h.abort();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn selection_popup_hide(app: AppHandle) -> Result<(), String> {
+    selection_popup::hide_popup(&app);
+    Ok(())
+}
+
+/// Popup webview pulls this on load (avoids racing `selection-changed`).
+#[tauri::command]
+pub fn selection_popup_current() -> Result<Option<String>, String> {
+    Ok(selection_popup::take_pending_text())
 }
