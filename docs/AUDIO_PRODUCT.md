@@ -114,10 +114,10 @@ ticks = 0                    # 0 = until stop; >0 finite chunks (smoke)
 session_silence_ms = 1200
 max_session_ms = 600000
 vad_rms_threshold = 0.01
-drop_silent_chunks = false
+drop_silent_chunks = true     # silent chunks (RMS below threshold) are not stored
 max_audio_bytes = 8388608
 device = ""
-enqueue_transcribe = true
+enqueue_transcribe = true     # voiced chunks only; empty transcripts are not persisted
 system_audio = false         # reserved (ScreenCaptureKit); mic-only for now
 
 [asr]
