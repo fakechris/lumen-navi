@@ -1,0 +1,40 @@
+/* ============================================================
+   Lumen Design System — typography.css
+   IBM Plex Sans for UI, Plex Mono for code/timecodes/counts, and a
+   system reading serif for long-form transcript / translation /
+   knowledge reading (the one place across the family that runs to
+   paragraphs). Scale is in rem; base 1rem = 15px in the apps.
+   ============================================================ */
+
+:root, [data-theme] {
+  /* families */
+  --font-sans: 'IBM Plex Sans', 'IBM Plex Sans SC', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-serif: 'Iowan Old Style', 'Songti SC', 'Source Han Serif SC', Georgia, 'Times New Roman', serif;
+
+  /* type scale */
+  --text-xs:   0.78rem;   /* 11–12px — metadata, eyebrows, counts */
+  --text-sm:   0.92rem;   /* 13–14px — secondary UI text          */
+  --text-base: 1rem;      /* 15px    — body / default             */
+  --text-lg:   1.15rem;   /* 17px    — lead paragraph, card title */
+  --text-xl:   1.4rem;    /* 21px    — section heading            */
+  --text-2xl:  1.75rem;   /* 26px    — page heading               */
+  --text-3xl:  2.5rem;    /* 37px    — display / hero              */
+
+  /* weights */
+  --weight-regular: 400;
+  --weight-medium:  500;
+  --weight-semibold:600;
+  --weight-bold:    700;
+
+  /* line-heights */
+  --leading-tight: 1.1;    /* headings              */
+  --leading-snug:  1.35;   /* dense UI              */
+  --leading-normal:1.55;   /* body                  */
+  --leading-relaxed:1.7;   /* long-form reading serif */
+
+  /* tracking */
+  --tracking-tight:  -0.02em;   /* headings              */
+  --tracking-normal: 0;
+  --tracking-wide:   0.08em;    /* eyebrows / uppercase labels */
+}

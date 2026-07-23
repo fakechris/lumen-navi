@@ -1,0 +1,41 @@
+<!-- @dsCard group="Components" viewport="700x260" name="Navigation — Tabs, NavItem, ThemeToggle" subtitle="Underline tabs, sidebar nav, Atelier⇄Vault toggle" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{margin:0;padding:20px;background:var(--bg)}.split{display:grid;grid-template-columns:200px 1fr;gap:24px;align-items:start}.nav{display:grid;gap:4px;background:var(--sidebar);border:1px solid var(--border);border-radius:var(--radius-md);padding:8px}.bar{display:flex;justify-content:flex-end;margin-bottom:14px}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { Tabs, NavItem, ThemeToggle } = window.LumenDesignSystem_2ccddc;
+function Demo() {
+  const [tab, setTab] = React.useState("transcript");
+  return (
+    <div>
+      <div className="bar"><ThemeToggle /></div>
+      <div className="split">
+        <div className="nav">
+          <NavItem icon="folder" label="Projects" active />
+          <NavItem icon="transcript" label="Transcript" />
+          <NavItem icon="microphone" label="Speakers" />
+          <NavItem icon="settings" label="Settings" />
+        </div>
+        <div>
+          <Tabs active={tab} onChange={setTab}
+            tabs={[{id:"transcript",label:"Transcript"},{id:"speakers",label:"Speakers"},{id:"timeline",label:"Timeline"},{id:"export",label:"Export"}]} />
+          <p style={{marginTop:16,color:"var(--text-secondary)",fontSize:"var(--text-sm)"}}>Active section: <strong style={{color:"var(--text)"}}>{tab}</strong>. Toggle the theme with the moon/sun above — the whole card switches between Atelier and Vault.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<Demo />);
+</script>
+</body>
+</html>

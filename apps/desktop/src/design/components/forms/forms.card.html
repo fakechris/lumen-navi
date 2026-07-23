@@ -1,0 +1,31 @@
+<!-- @dsCard group="Components" viewport="700x230" name="Forms — Input, Textarea, Select" subtitle="Text fields, search field, serif reading editor, dropdown" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{margin:0;padding:20px;background:var(--bg)}.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;max-width:640px}.lbl{font-size:var(--text-xs);font-weight:600;color:var(--text-secondary);margin-bottom:6px;display:block}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { Input, Textarea, Select } = window.LumenDesignSystem_2ccddc;
+function Demo() {
+  return (
+    <div className="grid">
+      <div><span className="lbl">Project name</span><Input placeholder="Untitled project" /></div>
+      <div><span className="lbl">Search</span><Input icon="search" placeholder="Search transcripts…" /></div>
+      <div><span className="lbl">ASR engine</span><Select options={["SenseVoice (local)","Whisper","Qwen HTTP"]} style={{width:"100%"}} /></div>
+      <div><span className="lbl">Invalid</span><Input invalid defaultValue="not-an-email@" /></div>
+      <div style={{gridColumn:"1 / -1"}}><span className="lbl">Cue text — serif reading editor</span><Textarea reading defaultValue="So the first thing we shipped was a local-first pipeline, and everything after that followed from one rule: never lose the raw capture." /></div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<Demo />);
+</script>
+</body>
+</html>

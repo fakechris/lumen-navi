@@ -1,54 +1,23 @@
-/* Selection popup (划词弹窗) — reuses the warm-light tokens from styles.css */
+/* ============================================================
+   Selection popup (划词弹窗) — floating popover on the Lumen
+   Design System tokens (imported via ../design/styles.css).
+   The window itself is transparent; the popover carries the
+   only shadow allowed outside the shell (--shadow-pop).
+   ============================================================ */
 
-:root {
-  color-scheme: light dark;
-  --bg: #f2f2f7;
-  --card: #ffffff;
-  --text: #1d1d1f;
-  --muted: #6e6e73;
-  --accent: #007aff;
-  --accent-dim: rgba(0, 122, 255, 0.12);
-  --warm: #ff9f0a;
-  --ok: #34c759;
-  --error: #ff3b30;
-  --border: rgba(0, 0, 0, 0.09);
-  --shadow: 0 2px 6px rgba(0, 0, 0, 0.08), 0 16px 48px rgba(0, 0, 0, 0.16);
-  --radius: 12px;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-  font-size: 13px;
-  line-height: 1.5;
-  -webkit-font-smoothing: antialiased;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1c1c1e;
-    --card: #2c2c2e;
-    --text: #f5f5f7;
-    --muted: #98989d;
-    --accent: #0a84ff;
-    --accent-dim: rgba(10, 132, 255, 0.18);
-    --warm: #ff9f0a;
-    --ok: #30d158;
-    --error: #ff453a;
-    --border: rgba(255, 255, 255, 0.1);
-    --shadow: 0 2px 6px rgba(0, 0, 0, 0.4), 0 16px 48px rgba(0, 0, 0, 0.5);
-  }
-}
-
-* { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
-body { background: transparent; color: var(--text); overflow: hidden; }
+body { background: transparent; overflow: hidden; min-width: 0; }
 
 .popup {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--card);
+  background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-pop);
   overflow: hidden;
+  font-size: var(--text-sm);
 }
 
 .popup-head {
@@ -57,42 +26,43 @@ body { background: transparent; color: var(--text); overflow: hidden; }
   gap: 8px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg);
+  background: var(--surface-2);
   user-select: none;
 }
 
 .popup-title {
-  font-weight: 650;
-  font-size: 12px;
-  color: var(--muted);
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
 }
-.popup-title span { color: var(--warm); }
+.popup-title span { color: var(--accent); }
 
 .popup-close {
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--muted);
+  color: var(--text-tertiary);
   font-size: 14px;
   line-height: 1;
   padding: 2px 6px;
   border-radius: 6px;
   cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
-.popup-close:hover { background: var(--accent-dim); color: var(--text); }
+.popup-close:hover { background: var(--accent-soft); color: var(--text); }
 
 .popup-selection {
   margin: 10px 12px 0;
   padding: 8px 10px;
-  background: var(--bg);
+  background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 12px;
-  color: var(--muted);
+  border-radius: var(--radius-input);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 64px;
@@ -107,21 +77,24 @@ body { background: transparent; color: var(--text); overflow: hidden; }
 
 .popup-btn {
   appearance: none;
-  border: 1px solid var(--border);
-  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
   color: var(--text);
-  font-size: 12.5px;
-  font-weight: 550;
-  padding: 5px 14px;
-  border-radius: 8px;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  padding: 6px 14px;
+  border-radius: var(--radius-input);
   cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
 .popup-btn:hover { border-color: var(--accent); }
 .popup-btn.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
+  font-weight: var(--weight-semibold);
 }
+.popup-btn.primary:hover { background: var(--accent-strong); }
 .popup-btn:disabled { opacity: 0.5; cursor: default; }
 
 .popup-ask {
@@ -132,26 +105,32 @@ body { background: transparent; color: var(--text); overflow: hidden; }
 .popup-ask input {
   flex: 1;
   appearance: none;
-  border: 1px solid var(--border);
-  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
   color: var(--text);
-  border-radius: 8px;
-  padding: 6px 10px;
-  font-size: 12.5px;
+  border-radius: var(--radius-input);
+  padding: 7px 11px;
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
   outline: none;
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
-.popup-ask input:focus { border-color: var(--accent); }
+.popup-ask input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
 
 .popup-result {
   flex: 1;
   margin: 10px 12px 12px;
   padding: 10px 12px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-input);
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 13px;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
 }
 .popup-result:empty { display: none; }
 
@@ -169,17 +148,17 @@ body { background: transparent; color: var(--text); overflow: hidden; }
 .popup-error {
   margin: 10px 12px 12px;
   padding: 8px 10px;
-  border-radius: 8px;
-  background: rgba(255, 59, 48, 0.1);
-  color: var(--error);
-  font-size: 12px;
+  border-radius: var(--radius-input);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: var(--text-xs);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .popup-hint {
   padding: 0 12px 10px;
-  color: var(--muted);
-  font-size: 11px;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
   text-align: right;
 }
