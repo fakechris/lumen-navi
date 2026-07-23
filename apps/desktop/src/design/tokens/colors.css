@@ -1,0 +1,136 @@
+/* ============================================================
+   Lumen Design System — colors.css   (dual scheme)
+   Two equal-weight themes, switched by `data-theme` on <html>:
+     · Light "Atelier"  — warm parchment + terracotta (the family's
+       default; the "warm light" identity all Lumen apps share)
+     · Dark  "Vault"    — near-black + deep blue + cyan (engineering
+       night mode; used by OVP2 and every desktop app's dark toggle)
+
+   Canonical semantic tokens use bare names (--bg, --surface, --text,
+   --accent…) so both the Lumen app suite and OVP2 code adopt this with
+   no renaming. Lumen-suite aliases (--surface-subtle, --text-secondary,
+   --accent-hover…) map onto the same values for drop-in compatibility.
+   ============================================================ */
+
+/* ===== LIGHT (default) — "Atelier" ===== */
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg:            #f7f6f2;   /* warm parchment page */
+  --bg-deep:       #efece5;   /* canvas behind shells / graph void */
+  --surface:       #fffdfa;   /* cards, panels, raised UI */
+  --surface-2:     #fbf7f0;   /* raised tier, page-help, subtle fills */
+  --border:        #e7e1d8;   /* hairline 1px separators */
+  --border-strong: #cdc4b6;   /* input borders, emphasised edges */
+  --text:          #1f1a17;   /* primary ink */
+  --text-soft:     #443a32;   /* secondary ink */
+  --muted:         #71675d;   /* tertiary / metadata */
+
+  --accent:        #9f4f24;   /* terracotta — primary brand accent */
+  --accent-soft:   #f4dfd2;   /* accent tint fill */
+  --accent-strong: #843c15;   /* accent hover / pressed */
+  --accent-2:      #2563bb;   /* secondary accent — links, charts, graph */
+  --accent-2-soft: #dbe7f7;
+  --on-accent:     #fffdfa;   /* text/icon on a filled accent surface */
+
+  /* semantic status (shared by all apps) */
+  --success:       #2f7d52;  --success-soft: #e4f0e8;
+  --warn:          #a85e10;  --warn-soft:    #fff8ec;  --warn-border: #d48a2f;
+  --danger:        #b04545;  --danger-soft:  #fbe9e7;
+  --info:          #2563bb;  --info-soft:    #dbe7f7;
+
+  /* OVP2 knowledge-truth states (semantic, not decorative) */
+  --durable:  #2f7d52;   /* claim backed by verbatim evidence  */
+  --caveated: #b8862e;   /* claim needs human review           */
+  --blocked:  #b04545;   /* source blocked / failed            */
+
+  --code-bg:   #f4f1ea;
+  --code-text: #1f1a17;
+
+  /* graph surface (OVP2 knowledge graph, shared with charts) */
+  --graph-bg:        #efece5;
+  --graph-link:      rgba(31, 26, 23, 0.16);
+  --graph-link-hi:   #9f4f24;
+  --graph-hull:      rgba(159, 79, 36, 0.10);
+  --graph-hull-edge: rgba(159, 79, 36, 0.55);
+  --graph-grid:      rgba(31, 26, 23, 0.04);
+
+  /* categorical palette (8) — graph communities, speaker chips, tags.
+     Tuned to read on the warm light bg. */
+  --c-1: #9f4f24;  /* terracotta  */
+  --c-2: #2563bb;  /* deep blue   */
+  --c-3: #2f7d52;  /* moss green  */
+  --c-4: #b8862e;  /* gold ochre  */
+  --c-5: #6c4dab;  /* plum        */
+  --c-6: #b04545;  /* barn red    */
+  --c-7: #2d6e87;  /* slate teal  */
+  --c-8: #645a52;  /* warm gray   */
+
+  --shadow-shell: 0 12px 36px rgba(31, 26, 23, 0.06);
+  --shadow-pop:   0 16px 48px rgba(31, 26, 23, 0.12);
+
+  /* ---- Lumen-suite compatibility aliases (same values) ---- */
+  --surface-subtle: var(--surface-2);
+  --surface-hover:  #f2ede4;
+  --sidebar:        #efece5;
+  --text-secondary: var(--text-soft);
+  --text-tertiary:  var(--muted);
+  --accent-hover:   var(--accent-strong);
+  --shadow:         var(--shadow-shell);
+}
+
+/* ===== DARK — "Vault" ===== */
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg:            #0a0e16;
+  --bg-deep:       #05080d;
+  --surface:       #11161f;
+  --surface-2:     #161c27;
+  --border:        #1f2937;
+  --border-strong: #2c3a4f;
+  --text:          #e6edf5;
+  --text-soft:     #c2cfde;
+  --muted:         #7d8aa0;
+
+  --accent:        #3b82f6;   /* deep blue */
+  --accent-soft:   rgba(59, 130, 246, 0.16);
+  --accent-strong: #5b98f8;
+  --accent-2:      #06b6d4;   /* cyan */
+  --accent-2-soft: rgba(6, 182, 212, 0.16);
+  --on-accent:     #081120;
+
+  --success:       #22c55e;  --success-soft: rgba(34, 197, 94, 0.15);
+  --warn:          #fbbf24;  --warn-soft:    rgba(245, 158, 11, 0.12); --warn-border: #f59e0b;
+  --danger:        #f472b6;  --danger-soft:  rgba(244, 114, 182, 0.14);
+  --info:          #06b6d4;  --info-soft:    rgba(6, 182, 212, 0.16);
+
+  --durable:  #22c55e;
+  --caveated: #eab308;
+  --blocked:  #f87171;
+
+  --code-bg:   #0e1420;
+  --code-text: #e6edf5;
+
+  --graph-bg:        #05080d;
+  --graph-link:      rgba(125, 138, 160, 0.28);
+  --graph-link-hi:   #06b6d4;
+  --graph-hull:      rgba(59, 130, 246, 0.08);
+  --graph-hull-edge: rgba(59, 130, 246, 0.55);
+  --graph-grid:      rgba(255, 255, 255, 0.03);
+
+  --c-1: #3b82f6;  --c-2: #06b6d4;  --c-3: #22c55e;  --c-4: #eab308;
+  --c-5: #a78bfa;  --c-6: #f472b6;  --c-7: #14b8a6;  --c-8: #94a3b8;
+
+  --shadow-shell: 0 12px 36px rgba(0, 0, 0, 0.55);
+  --shadow-pop:   0 18px 52px rgba(0, 0, 0, 0.7);
+
+  --surface-subtle: var(--surface-2);
+  --surface-hover:  #1c2432;
+  --sidebar:        #0c1119;
+  --text-secondary: var(--text-soft);
+  --text-tertiary:  var(--muted);
+  --accent-hover:   var(--accent-strong);
+  --shadow:         var(--shadow-shell);
+}

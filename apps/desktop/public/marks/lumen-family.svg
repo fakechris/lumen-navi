@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Lumen family mark">
+<rect x="4" y="4" width="120" height="120" rx="30" fill="#231a13"></rect>
+<rect x="4.75" y="4.75" width="118.5" height="118.5" rx="29.25" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="1.5"></rect>
+<g stroke="#f4ece0" stroke-width="8" stroke-linecap="round">
+<line x1="64" y1="27" x2="64" y2="42"></line>
+<line x1="64" y1="86" x2="64" y2="101"></line>
+<line x1="27" y1="64" x2="42" y2="64"></line>
+<line x1="86" y1="64" x2="101" y2="64"></line>
+</g>
+<circle cx="64" cy="64" r="15" fill="#f4ece0"></circle>
+</svg>

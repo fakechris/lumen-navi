@@ -129,7 +129,7 @@ export default function PopupApp() {
           翻译
         </button>
         <button className="popup-btn" onClick={copy}>
-          {copied ? "已复制 ✓" : "复制"}
+          {copied ? "已复制" : "复制"}
         </button>
         {streaming && (
           <button className="popup-btn" onClick={stop}>

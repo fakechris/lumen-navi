@@ -1,0 +1,46 @@
+<!-- @dsCard group="Components" viewport="700x300" name="Data display — Card, StatCard, Pill, EmptyState" subtitle="Surfaces, metric tiles, status pills, empty states" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{margin:0;padding:20px;background:var(--bg)}.stats{display:flex;gap:12px;margin-bottom:14px}.pills{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { Card, StatCard, Pill, EmptyState, Button } = window.LumenDesignSystem_2ccddc;
+function Demo() {
+  return (
+    <div>
+      <div className="stats">
+        <StatCard label="Came in" value={3} hint="today" />
+        <StatCard label="Read" value={8} hint="+2 vs. yesterday" />
+        <StatCard label="Crystallized" value={2} tone="success" hint="durable" />
+        <StatCard label="Attention" value={1} tone="warn" hint="1 blocked" />
+      </div>
+      <div className="pills">
+        <Pill tone="durable">durable</Pill>
+        <Pill tone="caveated">caveated</Pill>
+        <Pill tone="blocked">blocked</Pill>
+        <Pill tone="success">done</Pill>
+        <Pill tone="warn">waiting</Pill>
+        <Pill tone="accent" solid>v0.23.0</Pill>
+        <Pill tone="neutral">Pinboard</Pill>
+      </div>
+      <Card>
+        <EmptyState icon="folder" title="No projects yet" action={<Button icon="upload">Import media</Button>}>
+          Drop an audio or video file, paste a URL, or record your mic to start your first transcript.
+        </EmptyState>
+      </Card>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<Demo />);
+</script>
+</body>
+</html>

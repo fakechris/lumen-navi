@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Lumen Navi">
+  <rect x="4" y="4" width="120" height="120" rx="30" fill="#231a13"></rect>
+  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="29.25" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="1.5"></rect>
+  <g fill="none" stroke="#4fb87e" stroke-width="6" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M64 30 L100 50 L64 70 L28 50 Z" fill="#4fb87e"></path>
+    <path d="M28 62 L64 82 L100 62"></path>
+    <path d="M28 74 L64 94 L100 74" stroke-opacity="0.5"></path>
+  </g>
+</svg>

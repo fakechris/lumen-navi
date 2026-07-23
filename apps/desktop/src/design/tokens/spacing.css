@@ -1,0 +1,43 @@
+/* ============================================================
+   Lumen Design System — spacing.css
+   4px base grid, the OVP2 radius scale (10/12/16/20/999), 1px
+   hairline borders, and a two-step shadow system. The house style is
+   "quiet utility": borders do the structural work, shadows appear only
+   on the outermost shell and on popovers — never on inline cards.
+   ============================================================ */
+
+:root, [data-theme] {
+  /* spacing — 4px grid */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* radius scale */
+  --radius-input: 10px;   /* buttons, inputs, small controls */
+  --radius-md:    12px;   /* nested panels                   */
+  --radius-card:  16px;   /* cards                           */
+  --radius-shell: 20px;   /* outer app / portal shell        */
+  --radius-pill:  999px;  /* pills, badges, status dots      */
+
+  /* borders */
+  --border-width: 1px;
+
+  /* elevation — only two, and used sparingly */
+  --shadow-shell: 0 12px 36px rgba(31, 26, 23, 0.06);  /* overridden per theme in colors.css */
+  --shadow-pop:   0 16px 48px rgba(31, 26, 23, 0.12);
+
+  /* motion — restrained; hover changes opacity/underline, not position */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1); /* @kind other */
+  --dur-fast:   120ms; /* @kind other */
+  --dur-normal: 180ms; /* @kind other */
+
+  /* focus ring — accent, 2px offset (matches Lumen app :focus-visible) */
+  --focus-ring: 0 0 0 2px var(--accent-soft);
+}

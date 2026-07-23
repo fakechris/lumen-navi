@@ -2,6 +2,20 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
 import { Onboarding } from "./Onboarding";
+import {
+  Button,
+  EmptyState,
+  Icon,
+  Input,
+  NavItem,
+  Notice,
+  Pill,
+  Select,
+  StatCard,
+  StatusDot,
+  ThemeToggle,
+} from "./design";
+import type { IconName } from "./design";
 import type {
   AsrModelStatus,
   AssistantConfig,
@@ -16,28 +30,43 @@ import type {
   TimelineItem,
 } from "./types";
 
-const NAV: { id: TabId; label: string; title: string; blurb: string }[] = [
+const NAV: {
+  id: TabId;
+  label: string;
+  icon: IconName;
+  eyebrow: string;
+  title: string;
+  blurb: string;
+}[] = [
   {
     id: "overview",
     label: "概览",
+    icon: "layers",
+    eyebrow: "Overview",
     title: "概览",
     blurb: "权限 · 摄入状态 · 一键开始 Observe",
   },
   {
     id: "search",
     label: "搜索",
+    icon: "search",
+    eyebrow: "Search",
     title: "全文搜索",
-    blurb: "OCR + 语音转写（同一 FTS 索引）",
+    blurb: "OCR 与语音转写共用一套 FTS 索引",
   },
   {
     id: "activity",
     label: "活动",
+    icon: "transcript",
+    eyebrow: "Activity",
     title: "时间线",
-    blurb: "缩略图 · OCR/转写预览 · 按类型/应用过滤",
+    blurb: "缩略图 · OCR/转写预览 · 按类型或应用过滤",
   },
   {
     id: "settings",
     label: "设置",
+    icon: "settings",
+    eyebrow: "Settings",
     title: "设置",
     blurb: "源开关 · 隐私 · 日摘要 · 数据目录",
   },
@@ -52,11 +81,11 @@ function fmtTime(iso?: string | null): string {
   }
 }
 
-function permPill(v: string): "ok" | "warn" | "err" {
+function permStatus(v: string): "done" | "failed" | "idle" {
   const s = v.toLowerCase();
-  if (s.includes("granted")) return "ok";
-  if (s.includes("denied") || s.includes("restricted")) return "err";
-  return "warn";
+  if (s.includes("granted")) return "done";
+  if (s.includes("denied") || s.includes("restricted")) return "failed";
+  return "idle";
 }
 
 export default function App() {
@@ -249,35 +278,59 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className="shell">
       {onboarding?.needs_onboarding && (
         <Onboarding initial={onboarding} onDone={() => void refresh()} />
       )}
       <aside className="sidebar">
         <div className="brand">
-          Lumen <span>Navi</span>
+          <img className="brand-mark" src="/marks/lumen-navi.svg" alt="Lumen Navi" />
+          <div>
+            <strong>lumen-navi</strong>
+            <span>持续上下文</span>
+          </div>
         </div>
-        {NAV.map((n) => (
-          <button
-            key={n.id}
-            className={`nav-btn ${tab === n.id ? "active" : ""}`}
-            onClick={() => setTab(n.id)}
-          >
-            {n.label}
-          </button>
-        ))}
+        <nav className="nav">
+          {NAV.map((n) => (
+            <NavItem
+              key={n.id}
+              icon={n.icon}
+              label={n.label}
+              active={tab === n.id}
+              onClick={() => setTab(n.id)}
+            />
+          ))}
+        </nav>
+        <div className="side-foot">
+          <ThemeToggle
+            storageKey="lumen-navi.theme"
+            onChange={(t) => {
+              try {
+                localStorage.setItem("lumen-navi.theme", t);
+              } catch {
+                /* ignore */
+              }
+            }}
+          />
+          <span className="ver">v0.1.0</span>
+        </div>
       </aside>
 
-      <main className="main">
-        <header className="header">
+      <main className="workspace">
+        <div className="workspace-head">
+          <p className="eyebrow">{nav.eyebrow}</p>
           <h1>{nav.title}</h1>
-          <p>{nav.blurb}</p>
-        </header>
+          <p className="sub">{nav.blurb}</p>
+        </div>
 
-        {error && <div className="error">{error}</div>}
+        {error && (
+          <div className="banner">
+            <Notice tone="danger">{error}</Notice>
+          </div>
+        )}
         {statusNote && !error && (
-          <div className="error" style={{ color: "var(--ok)", background: "color-mix(in srgb, var(--ok) 12%, var(--card))", borderColor: "color-mix(in srgb, var(--ok) 25%, var(--border))" }}>
-            {statusNote}
+          <div className="banner">
+            <Notice tone="success">{statusNote}</Notice>
           </div>
         )}
 
@@ -286,74 +339,79 @@ export default function App() {
             <div className="stack">
               <div className="row">
                 {observe?.running ? (
-                  <button className="btn danger" disabled={busy} onClick={() => void stopObserve()}>
+                  <Button variant="danger" icon="close" disabled={busy} onClick={() => void stopObserve()}>
                     停止 Observe
-                  </button>
+                  </Button>
                 ) : (
-                  <button className="btn primary" disabled={busy} onClick={() => void startObserve()}>
+                  <Button variant="primary" icon="play" disabled={busy} onClick={() => void startObserve()}>
                     开始 Observe
-                  </button>
+                  </Button>
                 )}
-                <button className="btn" disabled={busy} onClick={() => void refresh()}>
+                <Button variant="secondary" disabled={busy} onClick={() => void refresh()}>
                   刷新
-                </button>
-                <button className="btn" disabled={busy} onClick={() => void togglePause()}>
+                </Button>
+                <Button variant="secondary" disabled={busy} onClick={() => void togglePause()}>
                   {cfg?.paused ? "恢复采集" : "隐私暂停"}
-                </button>
-                <span className={`pill ${observe?.running ? "ok" : "warn"}`}>
-                  {observe?.running ? "Running" : "Stopped"}
-                </span>
-                {cfg?.paused && <span className="pill warn">Paused</span>}
+                </Button>
+                <StatusDot
+                  status={observe?.running ? "running" : "idle"}
+                  label={observe?.running ? "运行中" : "已停止"}
+                />
+                {cfg?.paused && <Pill tone="warn">已暂停</Pill>}
               </div>
 
               <div className="grid mt">
-                <div className="card">
-                  <h3>Events</h3>
-                  <div className="value">{health?.stored_events ?? "—"}</div>
-                  <div className="meta">schema v{health?.schema_version ?? "—"}</div>
-                </div>
-                <div className="card">
-                  <h3>Search docs</h3>
-                  <div className="value">{health?.ocr_docs ?? "—"}</div>
-                  <div className="meta">OCR + transcripts</div>
-                </div>
-                <div className="card">
-                  <h3>Screen</h3>
-                  <div className="value" style={{ fontSize: 16 }}>
-                    {health?.sources.find((s) => s.id === "screen")?.enabled
+                <StatCard
+                  label="Events"
+                  value={health?.stored_events ?? "—"}
+                  hint={`schema v${health?.schema_version ?? "—"}`}
+                />
+                <StatCard
+                  label="Search docs"
+                  value={health?.ocr_docs ?? "—"}
+                  hint="OCR 与转写"
+                />
+                <StatCard
+                  label="Screen"
+                  tone={
+                    health?.sources.find((s) => s.id === "screen")?.running
+                      ? "accent"
+                      : "default"
+                  }
+                  value={
+                    health?.sources.find((s) => s.id === "screen")?.enabled
                       ? health.sources.find((s) => s.id === "screen")?.running
                         ? "运行中"
                         : "已启用"
-                      : "关闭"}
-                  </div>
-                </div>
-                <div className="card">
-                  <h3>Audio / ASR</h3>
-                  <div className="value" style={{ fontSize: 16 }}>
-                    {cfg?.audio ? (cfg.asr ? "摄入+转写" : "仅摄入") : "关闭"}
-                  </div>
-                  <div className="meta">
-                    {cfg?.asr_engine ?? "sensevoice"} · {cfg?.asr_locale ?? ""} ·{" "}
-                    {cfg?.audio_chunk_ms ?? "—"}ms
-                  </div>
-                </div>
+                      : "关闭"
+                  }
+                />
+                <StatCard
+                  label="Audio / ASR"
+                  tone={cfg?.asr ? "accent" : "default"}
+                  value={cfg?.audio ? (cfg.asr ? "转写" : "仅摄入") : "关闭"}
+                  hint={`${cfg?.asr_engine ?? "sensevoice"} · ${cfg?.asr_locale ?? ""} · ${cfg?.audio_chunk_ms ?? "—"}ms`}
+                />
               </div>
 
               <div className="card mt">
-                <h3>Permissions</h3>
-                <div className="row mt">
-                  <span className={`pill ${permPill(perms?.screen_recording ?? "")}`}>
-                    Screen {perms?.screen_recording ?? "—"}
-                  </span>
-                  <span className={`pill ${permPill(perms?.microphone ?? "")}`}>
-                    Mic {perms?.microphone ?? "—"}
-                  </span>
-                  <span className={`pill ${permPill(perms?.accessibility ?? "")}`}>
-                    AX {perms?.accessibility ?? "—"}
-                  </span>
+                <h3>权限</h3>
+                <div className="stack mt">
+                  <StatusDot
+                    status={permStatus(perms?.screen_recording ?? "")}
+                    label={`屏幕录制 · ${perms?.screen_recording ?? "—"}`}
+                  />
+                  <StatusDot
+                    status={permStatus(perms?.microphone ?? "")}
+                    label={`麦克风 · ${perms?.microphone ?? "—"}`}
+                  />
+                  <StatusDot
+                    status={permStatus(perms?.accessibility ?? "")}
+                    label={`辅助功能 · ${perms?.accessibility ?? "—"}`}
+                  />
                 </div>
                 <p className="meta mt">
-                  首次截屏/录音时系统会弹权限。Speech Recognition 用于本地转写（非听写注入）。
+                  首次截屏或录音时，系统会请求授权。语音识别权限用于本机转写，不做听写注入。
                   听写产品见 Lumen ASR。
                 </p>
               </div>
@@ -363,25 +421,30 @@ export default function App() {
           {tab === "search" && (
             <div className="stack">
               <div className="row">
-                <input
-                  type="search"
-                  placeholder="搜索屏幕文字或转写…"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void onSearch();
-                  }}
-                />
-                <button className="btn primary" disabled={busy || !query.trim()} onClick={() => void onSearch()}>
+                <div style={{ flex: 1, minWidth: 220 }}>
+                  <Input
+                    icon="search"
+                    type="search"
+                    placeholder="搜索屏幕文字或转写…"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void onSearch();
+                    }}
+                  />
+                </div>
+                <Button variant="primary" disabled={busy || !query.trim()} onClick={() => void onSearch()}>
                   搜索
-                </button>
-                <button className="btn" disabled={busy} onClick={() => void reindex()}>
+                </Button>
+                <Button variant="secondary" disabled={busy} onClick={() => void reindex()}>
                   重建索引
-                </button>
+                </Button>
               </div>
               <div className="list">
                 {hits.length === 0 && (
-                  <div className="meta">输入关键词搜索 OCR / transcript 全文索引。</div>
+                  <EmptyState icon="search" title="搜索屏幕文字与转写">
+                    输入关键词，检索 OCR 与转写共用的全文索引。
+                  </EmptyState>
                 )}
                 {hits.map((h) => (
                   <div className="list-item" key={h.event_id}>
@@ -401,28 +464,30 @@ export default function App() {
           {tab === "activity" && (
             <div className="stack">
               <div className="row">
-                <select
+                <Select
                   value={kindFilter}
                   onChange={(e) => setKindFilter(e.target.value)}
-                  style={{ height: 34, borderRadius: 9, border: "1px solid var(--border)", background: "var(--card)", color: "var(--text)", padding: "0 8px" }}
+                  style={{ width: 150 }}
                 >
                   <option value="">全部类型</option>
                   <option value="screenshot">screenshot</option>
                   <option value="audio_chunk">audio_chunk</option>
                   <option value="summary">summary</option>
                   <option value="daemon">daemon</option>
-                </select>
-                <input
-                  type="text"
-                  placeholder="过滤应用 / 标题 / 文本…"
-                  value={appFilter}
-                  onChange={(e) => setAppFilter(e.target.value)}
-                />
-                <button className="btn" disabled={busy} onClick={() => void loadTimeline()}>
+                </Select>
+                <div style={{ flex: 1, minWidth: 220 }}>
+                  <Input
+                    type="text"
+                    placeholder="过滤应用 / 标题 / 文本…"
+                    value={appFilter}
+                    onChange={(e) => setAppFilter(e.target.value)}
+                  />
+                </div>
+                <Button variant="secondary" disabled={busy} onClick={() => void loadTimeline()}>
                   刷新
-                </button>
-                <button
-                  className="btn primary"
+                </Button>
+                <Button
+                  variant="primary"
                   disabled={busy}
                   onClick={() => {
                     setBusy(true);
@@ -442,11 +507,11 @@ export default function App() {
                   }}
                 >
                   生成今日摘要
-                </button>
+                </Button>
               </div>
               {summaryText && (
                 <div className="card">
-                  <h3>Day summary</h3>
+                  <h3>今日摘要</h3>
                   <pre className="meta mt" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
                     {summaryText}
                   </pre>
@@ -454,7 +519,9 @@ export default function App() {
               )}
               <div className="list">
                 {timeline.length === 0 && (
-                  <div className="meta">暂无事件。启动 Observe 后会持续写入。</div>
+                  <EmptyState icon="transcript" title="暂无事件">
+                    启动 Observe 后，屏幕与音频会持续写入这里。
+                  </EmptyState>
                 )}
                 {timeline.map((e) => (
                   <div className="list-item timeline-row" key={e.id}>
@@ -463,7 +530,9 @@ export default function App() {
                     ) : e.has_image ? (
                       <div className="thumb placeholder">img</div>
                     ) : e.kind.includes("audio") ? (
-                      <div className="thumb placeholder">♪</div>
+                      <div className="thumb placeholder">
+                        <Icon name="microphone" size={18} />
+                      </div>
                     ) : (
                       <div className="thumb placeholder">·</div>
                     )}

@@ -1,0 +1,58 @@
+/* ============================================================
+   Lumen Design System — base.css
+   Minimal element resets + link defaults. Sets the family font,
+   warm background, and primary ink so any bare page inherits the
+   brand. Nothing opinionated beyond what every surface needs.
+   ============================================================ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { font-size: 15px; }
+
+body {
+  margin: 0;
+  min-width: 320px;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4 { margin: 0 0 0.5em; font-weight: var(--weight-semibold); line-height: var(--leading-tight); letter-spacing: var(--tracking-tight); }
+h1 { font-size: var(--text-3xl); }
+h2 { font-size: var(--text-2xl); }
+h3 { font-size: var(--text-xl); }
+h4 { font-size: var(--text-lg); }
+p  { margin: 0 0 1em; text-wrap: pretty; }
+
+a { color: var(--accent-2); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code, kbd, pre, samp {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+code { background: var(--code-bg); color: var(--code-text); padding: 0.1em 0.36em; border-radius: 6px; }
+pre { background: var(--code-bg); color: var(--code-text); padding: var(--space-4); border-radius: var(--radius-md); overflow: auto; }
+pre code { background: none; padding: 0; }
+
+hr { border: 0; border-top: var(--border-width) solid var(--border); margin: var(--space-6) 0; }
+
+::selection { background: var(--accent-soft); color: var(--text); }
+
+:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  outline-offset: 2px;
+}
+
+/* Long-form reading blocks (transcripts, translations, knowledge cards) */
+.reading {
+  font-family: var(--font-serif);
+  font-size: var(--text-lg);
+  line-height: var(--leading-relaxed);
+  color: var(--text-soft);
+}
