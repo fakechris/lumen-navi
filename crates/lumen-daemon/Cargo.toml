@@ -12,10 +12,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
 lumen-api = { workspace = true }
 lumen-asr-engine = { workspace = true }
 lumen-config = { workspace = true }
+lumen-models = { workspace = true }
 lumen-intake = { workspace = true }
 lumen-platform = { workspace = true }
 lumen-platform-macos = { workspace = true }

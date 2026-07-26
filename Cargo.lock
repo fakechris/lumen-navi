@@ -2162,15 +2162,16 @@ dependencies = [
 [[package]]
 name = "lumen-asr-engine"
 version = "0.1.0"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=c22f24af02260bcfd64a5dbb641ea105079f0591#c22f24af02260bcfd64a5dbb641ea105079f0591"
 dependencies = [
+ "anyhow",
  "async-trait",
- "fs2",
- "lumen-platform",
  "parking_lot",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sherpa-onnx",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2190,11 +2191,13 @@ name = "lumen-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "lumen-api",
  "lumen-asr-engine",
  "lumen-config",
  "lumen-intake",
+ "lumen-models",
  "lumen-platform",
  "lumen-platform-macos",
  "lumen-process",
@@ -2221,6 +2224,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen-models"
+version = "0.1.0"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=c22f24af02260bcfd64a5dbb641ea105079f0591#c22f24af02260bcfd64a5dbb641ea105079f0591"
+dependencies = [
+ "fs2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "lumen-navi-desktop"
 version = "0.1.0"
 dependencies = [
@@ -2229,8 +2243,8 @@ dependencies = [
  "chrono",
  "futures-util",
  "lumen-api",
- "lumen-asr-engine",
  "lumen-config",
+ "lumen-models",
  "lumen-platform",
  "lumen-platform-macos",
  "lumen-store",
@@ -2285,6 +2299,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "lumen-asr-engine",
  "lumen-platform",
  "lumen-store",
  "lumen-types",

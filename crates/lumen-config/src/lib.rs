@@ -168,7 +168,7 @@ impl AudioConfig {
 /// Background Observe ASR (enrichment), not dictation.
 /// Dictation remains https://github.com/fakechris/lumen-asr .
 ///
-/// Engines (patterns from lumen-asr, owned port in `lumen-asr-engine`):
+/// Engines (shared `lumen-asr-engine` crate from lumen-suite):
 /// - `sensevoice` — local sherpa-onnx SenseVoice (**default**)
 /// - `whisper` — local sherpa-onnx Whisper
 /// - `speech` — macOS Speech.framework

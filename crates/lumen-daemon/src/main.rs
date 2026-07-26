@@ -8,12 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use lumen_api::{HealthResponse, SourceStatus};
 use lumen_asr_engine::{
-    build_engine, engine_status_with_root, EngineBuildConfig, EngineKind,
+    build_engine, probe_status, samples_to_wav_mono_i16, AsrEngine, AsrEngineId, AsrError,
+    AsrRequest, AsrResult, EngineBuildConfig, EngineKind,
 };
 use lumen_config::{AsrConfig, AudioConfig, Config, PrivacyConfig};
-use lumen_platform::{AsrEngine, MicCapturer, MicOpenConfig, OcrEngine, PermissionProbe};
+use lumen_platform::{MicCapturer, MicOpenConfig, OcrEngine, PermissionProbe, PlatformError};
 use lumen_platform_macos::{
     request_screen_recording, MacDisplays, MacFrontmost, MacMicCapturer, MacPermissions,
     MacScreenCapturer, MacScreenLock, MacSpeechAsr, MacVisionOcr,
@@ -620,10 +622,53 @@ async fn run_audio_loop(
     Ok(orch.stats())
 }
 
+/// Map a navi `asr.engine` config value to the shared [`EngineKind`].
+///
+/// Config compatibility: navi historically routed bare `qwen` / `qwen3-asr`
+/// to the OpenAI-compatible HTTP path (it has no local MLX worker wiring).
+/// The shared crate now parses those names as the *local* Qwen engine, so we
+/// keep the old meaning for existing `navi.toml` files here. Explicitly
+/// local names (`local_qwen`) still reach the shared parser unchanged.
+fn engine_kind_from_config(name: &str) -> Option<EngineKind> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "qwen" | "qwen3-asr" | "qwen3_asr" => Some(EngineKind::OpenAiAudio),
+        other => EngineKind::parse(other),
+    }
+}
+
+/// Consumer-side model-dir resolution (shared `build_engine`/`probe_status`
+/// no longer fall back to default directories): a configured dir wins when it
+/// is actually ready, otherwise resolve the shared Lumen default via
+/// `lumen_models`.
+fn resolve_model_dir(
+    kind: EngineKind,
+    configured: &str,
+    models_root: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    let configured = configured.trim();
+    let configured_path =
+        (!configured.is_empty()).then(|| std::path::PathBuf::from(configured));
+    match kind {
+        EngineKind::SenseVoice => Some(match configured_path {
+            Some(p) if lumen_models::sensevoice_ready(&p) => p,
+            _ => lumen_models::default_sensevoice_dir_with_root(models_root),
+        }),
+        EngineKind::Whisper => Some(match configured_path {
+            Some(p) if lumen_models::whisper_ready(&p) => p,
+            _ => lumen_models::default_whisper_dir_with_root(models_root),
+        }),
+        EngineKind::Qwen => Some(match configured_path {
+            Some(p) if lumen_models::qwen_ready(&p) => p,
+            _ => lumen_models::default_qwen_dir(),
+        }),
+        EngineKind::Speech | EngineKind::OpenAiAudio => None,
+    }
+}
+
 /// Resolve continuous Observe ASR engine from config.
 /// Default: SenseVoice (sherpa). Optional: Whisper, OpenAI-compatible HTTP (Qwen ASR), Speech.
 fn build_asr_engine(asr: &AsrConfig) -> Result<Arc<dyn AsrEngine>, String> {
-    let kind = EngineKind::parse(asr.engine_name()).unwrap_or_else(|| {
+    let kind = engine_kind_from_config(asr.engine_name()).unwrap_or_else(|| {
         warn!(
             engine = %asr.engine,
             "unknown asr.engine; defaulting to sensevoice"
@@ -631,15 +676,8 @@ fn build_asr_engine(asr: &AsrConfig) -> Result<Arc<dyn AsrEngine>, String> {
         EngineKind::SenseVoice
     });
     let models_root = asr.models_root_path();
-    let st = engine_status_with_root(
-        kind,
-        if asr.model_dir.is_empty() {
-            None
-        } else {
-            Some(asr.model_dir.as_str())
-        },
-        models_root.as_deref(),
-    );
+    let model_dir = resolve_model_dir(kind, &asr.model_dir, models_root.as_deref());
+    let st = probe_status(kind, model_dir.as_deref());
     info!(
         engine = %kind.as_str(),
         ready = st.ready,
@@ -654,12 +692,7 @@ fn build_asr_engine(asr: &AsrConfig) -> Result<Arc<dyn AsrEngine>, String> {
 
     let build_cfg = EngineBuildConfig {
         kind,
-        models_root: models_root.clone().unwrap_or_default(),
-        model_dir: if asr.model_dir.is_empty() {
-            std::path::PathBuf::new()
-        } else {
-            std::path::PathBuf::from(&asr.model_dir)
-        },
+        model_dir: model_dir.unwrap_or_default(),
         locale: asr.locale.clone(),
         max_audio_bytes: asr.max_audio_bytes as usize,
         http_base_url: asr.http_base_url.clone(),
@@ -667,6 +700,8 @@ fn build_asr_engine(asr: &AsrConfig) -> Result<Arc<dyn AsrEngine>, String> {
         http_model: asr.http_model.clone(),
         http_timeout_ms: asr.timeout_ms,
         http_engine_label: asr.http_engine_label.clone(),
+        qwen_python: std::path::PathBuf::new(),
+        qwen_timeout_ms: asr.timeout_ms,
     };
 
     match kind {
@@ -687,12 +722,143 @@ fn build_asr_engine(asr: &AsrConfig) -> Result<Arc<dyn AsrEngine>, String> {
 }
 
 fn speech_engine(asr: &AsrConfig) -> Arc<dyn AsrEngine> {
-    Arc::new(MacSpeechAsr::with_max_audio_bytes(
-        asr.max_audio_bytes as usize,
-    ))
+    Arc::new(SpeechEngineAdapter {
+        inner: MacSpeechAsr::with_max_audio_bytes(asr.max_audio_bytes as usize),
+        locale: asr.locale.clone(),
+        max_audio_bytes: asr.max_audio_bytes as usize,
+    })
+}
+
+/// macOS Speech.framework stays in navi's platform layer
+/// ([`MacSpeechAsr`] implements `lumen_platform::AsrEngine`); this adapter
+/// exposes it through the shared `lumen_asr_engine::AsrEngine` trait, matching
+/// the shared crate's `EngineKind::Speech → Ok(None)` contract.
+struct SpeechEngineAdapter {
+    inner: MacSpeechAsr,
+    locale: String,
+    max_audio_bytes: usize,
+}
+
+#[async_trait]
+impl AsrEngine for SpeechEngineAdapter {
+    fn id(&self) -> AsrEngineId {
+        AsrEngineId::Speech
+    }
+
+    fn is_supported(&self) -> bool {
+        lumen_platform::AsrEngine::is_supported(&self.inner)
+    }
+
+    fn max_audio_bytes(&self) -> Option<usize> {
+        Some(self.max_audio_bytes)
+    }
+
+    async fn transcribe(&self, req: AsrRequest) -> Result<AsrResult, AsrError> {
+        // PCM path: Speech.framework consumes files/blobs, so re-encode.
+        let wav = samples_to_wav_mono_i16(&req.samples, req.sample_rate);
+        let locale = req.language_hint.clone().unwrap_or_else(|| self.locale.clone());
+        self.transcribe_wav(&wav, &locale).await
+    }
+
+    async fn transcribe_wav(&self, audio: &[u8], locale: &str) -> Result<AsrResult, AsrError> {
+        let r = lumen_platform::AsrEngine::transcribe(&self.inner, audio, locale)
+            .await
+            .map_err(platform_err_to_asr)?;
+        let mut out = AsrResult::new(r.text, AsrEngineId::Speech);
+        out.engine_label = r.engine; // "speech" — transcript.v1 label unchanged
+        out.language = r.language;
+        out.confidence = r.confidence as f32;
+        Ok(out)
+    }
+}
+
+fn platform_err_to_asr(e: PlatformError) -> AsrError {
+    match e {
+        PlatformError::Unsupported(m) => AsrError::Unsupported(m),
+        // Preserve "permission denied" in the message: the transcribe worker
+        // classifies it as a permanent failure.
+        PlatformError::PermissionDenied(m) => {
+            AsrError::Inference(format!("permission denied: {m}"))
+        }
+        PlatformError::Message(m) => AsrError::Inference(m),
+    }
 }
 
 #[inline]
 fn debug_skip_dup_ocr() {
     // open job already exists — normal under burst captures
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Old navi config values keep their meaning: bare `qwen` names stay on
+    /// the HTTP path even though the shared crate parses them as local.
+    #[test]
+    fn config_qwen_still_means_http() {
+        assert_eq!(
+            engine_kind_from_config("qwen"),
+            Some(EngineKind::OpenAiAudio)
+        );
+        assert_eq!(
+            engine_kind_from_config("qwen3-asr"),
+            Some(EngineKind::OpenAiAudio)
+        );
+        assert_eq!(
+            engine_kind_from_config("qwen_asr_0.8b"),
+            Some(EngineKind::OpenAiAudio)
+        );
+        assert_eq!(
+            engine_kind_from_config("sensevoice"),
+            Some(EngineKind::SenseVoice)
+        );
+        assert_eq!(engine_kind_from_config("speech"), Some(EngineKind::Speech));
+        assert_eq!(
+            engine_kind_from_config("local_qwen"),
+            Some(EngineKind::Qwen)
+        );
+        assert_eq!(engine_kind_from_config("nope"), None);
+    }
+
+    /// Ported from the removed internal crate: a configured-but-gone model dir
+    /// falls back to the ready shared model under models_root.
+    #[test]
+    fn invalid_selected_model_falls_back_to_ready_shared_model() {
+        let root = std::env::temp_dir().join(format!(
+            "lumen-navi-invalid-selected-model-{}",
+            std::process::id()
+        ));
+        let shared = root.join("sensevoice");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("model.int8.onnx"), b"model").unwrap();
+        std::fs::write(shared.join("tokens.txt"), b"tokens").unwrap();
+
+        let selected = root.join("deleted-custom-model");
+        assert_eq!(
+            resolve_model_dir(
+                EngineKind::SenseVoice,
+                &selected.display().to_string(),
+                Some(&root)
+            ),
+            Some(shared)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The cluster models contract doc navi ships must stay byte-identical to
+    /// cluster v1 (same pin as lumen-suite / lumen-asr). Was previously
+    /// asserted in the removed internal lumen-asr-engine crate.
+    #[test]
+    fn shared_model_contract_matches_cluster_v1() {
+        let bytes = include_bytes!("../../../docs/SHARED_MODELS_CONTRACT.md");
+        assert_eq!(fnv1a64(bytes), 0xc877_89f4_de20_5e71);
+    }
+
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
 }

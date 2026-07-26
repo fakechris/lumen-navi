@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use lumen_asr_engine::{
+use lumen_models::{
     default_sensevoice_dir_with_root, default_whisper_dir_with_root, download_sensevoice_package,
     lumen_models_dir_with_override, scan_model_candidates_with_root, sensevoice_ready,
     whisper_ready, SENSEVOICE_ARCHIVE_URL,
@@ -64,9 +64,12 @@ fn candidates_for(cfg: &lumen_config::Config) -> Vec<AsrModelCandidate> {
     let root = models_root_from_cfg(cfg);
     scan_model_candidates_with_root(root.as_deref())
         .into_iter()
+        // Shared scan also surfaces local-qwen (MLX) snapshots; navi's model
+        // picker only manages sensevoice/whisper installs, so filter by engine.
+        .filter(|c| matches!(c.engine.as_str(), "sensevoice" | "whisper"))
         .map(|c| AsrModelCandidate {
             engine: c.engine,
-            path: c.path,
+            path: c.path.display().to_string(),
             label: c.label,
             ready: c.ready,
             source: c.source,
@@ -297,7 +300,7 @@ pub async fn start_asr_model_download(app: AppHandle) -> Result<AsrModelStatus, 
             );
             status_from_config(&state)
         }
-        Ok(Err(e)) => Err(e),
+        Ok(Err(e)) => Err(e.to_string()),
         Err(e) => Err(format!("download task failed: {e}")),
     }
 }

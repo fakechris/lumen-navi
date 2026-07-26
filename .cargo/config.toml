@@ -1,0 +1,5 @@
+# lumen-suite (shared lumen-asr-engine / lumen-models) is a private git
+# dependency; use the git CLI so the developer's credentials (ssh / gh auth)
+# apply instead of cargo's builtin fetcher (which 401s).
+[net]
+git-fetch-with-cli = true

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use lumen_platform::{AsrEngine, AsrResult, PlatformError};
+use lumen_asr_engine::{AsrEngine, AsrError, AsrResult};
 use lumen_store::{JobRecord, JobStatus, SqliteStore};
 use serde_json::json;
 use tracing::{debug, info, warn};
@@ -274,7 +274,7 @@ impl TranscribeWorker {
         if !nonempty {
             info!(
                 event = %job.event_id,
-                engine = %result.engine,
+                engine = %result.engine_label,
                 "empty transcript — transcript.v1 skipped"
             );
             return Ok(JobOutcome::Success { nonempty: false });
@@ -288,7 +288,7 @@ impl TranscribeWorker {
         info!(
             event = %job.event_id,
             chars = result.text.chars().count(),
-            engine = %result.engine,
+            engine = %result.engine_label,
             nonempty,
             "transcript.v1 written"
         );
@@ -296,10 +296,10 @@ impl TranscribeWorker {
     }
 
     async fn run_engine(&self, bytes: &[u8]) -> Result<AsrResult, JobError> {
-        let fut = self.engine.transcribe(bytes, &self.config.locale);
+        let fut = self.engine.transcribe_wav(bytes, &self.config.locale);
         match tokio::time::timeout(self.config.engine_timeout, fut).await {
             Ok(Ok(r)) => Ok(r),
-            Ok(Err(e)) => Err(classify_platform_err(e)),
+            Ok(Err(e)) => Err(classify_asr_err(e)),
             Err(_) => Err(JobError {
                 message: format!(
                     "asr timed out after {}ms",
@@ -373,7 +373,10 @@ fn transcript_body_json(result: &AsrResult, event_id: uuid::Uuid, audio: &[u8]) 
         "text": result.text,
         "confidence": result.confidence,
         "language": result.language,
-        "engine": result.engine,
+        // Keep transcript.v1 `engine` a free-form label ("sensevoice",
+        // "whisper", "speech", "qwen_asr", ...) — same strings as before the
+        // shared-crate migration; the typed id lives in `result.engine`.
+        "engine": result.engine_label,
         "audio_bytes": audio.len(),
         "audio_blake3": hash.to_hex().to_string(),
     })
@@ -387,10 +390,21 @@ fn retry_delay(attempts: i64, base: Duration, max: Duration) -> Duration {
     Duration::from_millis(ms.min(max.as_millis() as u64))
 }
 
-fn classify_platform_err(e: PlatformError) -> JobError {
+fn classify_asr_err(e: AsrError) -> JobError {
+    let permanent_kind = matches!(
+        e,
+        AsrError::EmptyAudio
+            | AsrError::AudioTooLarge { .. }
+            | AsrError::InvalidAudio(_)
+            | AsrError::NotConfigured(_)
+            | AsrError::Unsupported(_)
+    );
     let msg = e.to_string();
     let lower = msg.to_lowercase();
-    let permanent = lower.contains("empty")
+    // Message heuristics retained for engine-reported errors that surface as
+    // `Inference` (e.g. macOS Speech authorization failures).
+    let permanent = permanent_kind
+        || lower.contains("empty")
         || lower.contains("too large")
         || lower.contains("not authorized")
         || lower.contains("unsupported")
@@ -405,9 +419,14 @@ fn classify_platform_err(e: PlatformError) -> JobError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lumen_platform::StubAsr;
+    use lumen_asr_engine::{samples_to_wav_mono_i16, StubAsr};
     use lumen_types::{event_kind, SourceEvent, SourceKind};
     use serde_json::json;
+
+    /// Valid 100ms 16kHz mono WAV blob (shared engines actually decode audio).
+    fn test_wav() -> Vec<u8> {
+        samples_to_wav_mono_i16(&[0.25f32; 1600], 16_000)
+    }
 
     #[tokio::test]
     async fn processes_audio_to_transcript() {
@@ -420,7 +439,7 @@ mod tests {
         );
         let eid = event.id;
         store
-            .put_and_append(event, "audio/wav", b"RIFF....fake-wav-bytes")
+            .put_and_append(event, "audio/wav", &test_wav())
             .unwrap();
         assert!(store
             .enqueue_job(eid, JOB_KIND_TRANSCRIBE_AUDIO)
@@ -486,7 +505,7 @@ mod tests {
         );
         let eid = event.id;
         store
-            .put_and_append(event, "audio/wav", b"RIFF....fake-wav-bytes")
+            .put_and_append(event, "audio/wav", &test_wav())
             .unwrap();
         store
             .enqueue_job(eid, JOB_KIND_TRANSCRIBE_AUDIO)
