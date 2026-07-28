@@ -986,6 +986,7 @@ dependencies = [
 [[package]]
 name = "lumen-context"
 version = "0.1.0"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=c33c13ef782ff141d8299507902268d6b1b7e06b#c33c13ef782ff141d8299507902268d6b1b7e06b"
 dependencies = [
  "async-trait",
  "base64",
@@ -1002,7 +1003,6 @@ dependencies = [
  "objc2-foundation",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
