@@ -66,6 +66,7 @@ pub fn run() {
             commands::get_config_summary,
             commands::update_sources_config,
             commands::generate_day_summary,
+            commands::export_session_transcript,
             commands::set_privacy_paused,
             commands::observe_status,
             commands::observe_start,

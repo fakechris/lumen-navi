@@ -354,6 +354,42 @@ pub fn generate_day_summary(
     Ok(body)
 }
 
+#[derive(Debug, Serialize)]
+pub struct TranscriptExportDto {
+    pub path: String,
+    pub segments: usize,
+    pub duration_seconds: Option<f64>,
+}
+
+/// Export one audio session's transcripts as a `lumen-transcript.v1` JSON
+/// file (importable by lumen-cut). `dest_path` comes from a frontend save
+/// dialog; empty → `<data_dir>/exports/<session>.lumen-transcript.json`.
+#[tauri::command]
+pub fn export_session_transcript(
+    state: State<'_, AppState>,
+    session_id: String,
+    dest_path: Option<String>,
+) -> Result<TranscriptExportDto, String> {
+    let session = Uuid::parse_str(session_id.trim()).map_err(|e| format!("session_id: {e}"))?;
+    let doc = lumen_process::export_session_transcript(&state.store, session).map_err(err)?;
+    let json = doc.to_json_string_pretty().map_err(err)?;
+
+    let path = match dest_path.as_deref().map(str::trim) {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => {
+            let dir = state.data_dir.join("exports");
+            std::fs::create_dir_all(&dir).map_err(err)?;
+            dir.join(format!("{session}.lumen-transcript.json"))
+        }
+    };
+    std::fs::write(&path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(TranscriptExportDto {
+        path: path.display().to_string(),
+        segments: doc.segments.len(),
+        duration_seconds: doc.media.as_ref().and_then(|m| m.duration_seconds),
+    })
+}
+
 fn parse_opt_ts(s: Option<String>) -> Result<Option<DateTime<Utc>>, String> {
     match s {
         None => Ok(None),

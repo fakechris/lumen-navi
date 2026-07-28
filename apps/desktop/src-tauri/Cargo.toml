@@ -19,6 +19,7 @@ lumen-config = { workspace = true }
 lumen-models = { workspace = true }
 lumen-platform = { workspace = true }
 lumen-platform-macos = { workspace = true }
+lumen-process = { workspace = true }
 lumen-store = { workspace = true }
 lumen-types = { workspace = true }
 serde = { workspace = true }
