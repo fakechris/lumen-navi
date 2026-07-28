@@ -102,3 +102,7 @@ Install notes: [`docs/MACOS_RELEASE_NOTES.md`](docs/MACOS_RELEASE_NOTES.md).
 | `api.bind` | `127.0.0.1:7420` |
 
 **cua-driver is not used for capture/OCR/ASR.**
+
+## License
+
+Lumen Navi is licensed under the [GNU General Public License v3.0 only](LICENSE).

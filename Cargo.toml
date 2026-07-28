@@ -29,7 +29,7 @@ default-members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "UNLICENSED"
+license = "GPL-3.0-only"
 authors = ["Chris"]
 repository = "https://github.com/fakechris/lumen-navi"
 
