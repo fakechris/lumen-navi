@@ -12,6 +12,7 @@ chrono = { workspace = true }
 lumen-asr-engine = { workspace = true }
 lumen-platform = { workspace = true }
 lumen-store = { workspace = true }
+lumen-transcript = { workspace = true }
 lumen-types = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

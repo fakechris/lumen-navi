@@ -57,6 +57,17 @@ pub struct TimelineItem {
     pub artifact_bytes: Option<u64>,
 }
 
+/// One event of a session with one derived doc body (see
+/// [`SqliteStore::list_session_derived`]).
+#[derive(Debug, Clone)]
+pub struct SessionDerivedRow {
+    pub event_id: Uuid,
+    pub ts: DateTime<Utc>,
+    pub payload: serde_json::Value,
+    /// Derived doc body JSON (e.g. a `transcript.v1` record).
+    pub body: String,
+}
+
 /// On-disk store: `$data_dir/meta/navi.db` + `$data_dir/blobs/...`.
 pub struct SqliteStore {
     data_dir: PathBuf,
@@ -568,6 +579,54 @@ impl SqliteStore {
         for r in rows {
             let (id, kind, body) = r.map_err(StoreError::db)?;
             out.push((parse_uuid(id)?, kind, body));
+        }
+        Ok(out)
+    }
+
+    /// Events of one session joined with a derived doc kind, oldest first.
+    ///
+    /// Used by transcript export: `audio_chunk.v1` events + their
+    /// `transcript.v1` bodies. Chunks without that derived doc (silence,
+    /// pending/failed ASR) are not returned — the export timeline keeps a
+    /// hole there instead.
+    pub fn list_session_derived(
+        &self,
+        session_id: Uuid,
+        event_kind: &str,
+        derived_kind: &str,
+    ) -> Result<Vec<SessionDerivedRow>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT e.id, e.ts, e.payload, d.body
+                   FROM events e
+                   JOIN derived d ON d.event_id = e.id AND d.kind = ?3
+                   WHERE e.session_id = ?1 AND e.kind = ?2
+                   ORDER BY e.ts ASC, e.rowid ASC"#,
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map(
+                params![session_id.to_string(), event_kind, derived_kind],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .map_err(StoreError::db)?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, ts, payload, body) = r.map_err(StoreError::db)?;
+            out.push(SessionDerivedRow {
+                event_id: parse_uuid(id)?,
+                ts: parse_ts(ts)?,
+                payload: serde_json::from_str(&payload).unwrap_or(serde_json::json!({})),
+                body,
+            });
         }
         Ok(out)
     }

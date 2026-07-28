@@ -5,6 +5,7 @@
 
 mod ocr_worker;
 mod transcribe_worker;
+mod transcript_export;
 
 use async_trait::async_trait;
 use lumen_types::SourceEvent;
@@ -15,6 +16,7 @@ pub use transcribe_worker::{
     TranscribeWorker, TranscribeWorkerConfig, TranscribeWorkerStats, DERIVED_TRANSCRIPT_V1,
     JOB_KIND_TRANSCRIBE_AUDIO,
 };
+pub use transcript_export::{export_session_transcript, TranscriptExportError};
 
 #[derive(Debug, Error)]
 pub enum ProcessError {
