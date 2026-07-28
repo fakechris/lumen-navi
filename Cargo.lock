@@ -2162,7 +2162,7 @@ dependencies = [
 [[package]]
 name = "lumen-asr-engine"
 version = "0.1.0"
-source = "git+https://github.com/fakechris/lumen-suite.git?rev=c22f24af02260bcfd64a5dbb641ea105079f0591#c22f24af02260bcfd64a5dbb641ea105079f0591"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=ef449465d18865d3d819309a64b1e723ae329817#ef449465d18865d3d819309a64b1e723ae329817"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2226,7 +2226,7 @@ dependencies = [
 [[package]]
 name = "lumen-models"
 version = "0.1.0"
-source = "git+https://github.com/fakechris/lumen-suite.git?rev=c22f24af02260bcfd64a5dbb641ea105079f0591#c22f24af02260bcfd64a5dbb641ea105079f0591"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=ef449465d18865d3d819309a64b1e723ae329817#ef449465d18865d3d819309a64b1e723ae329817"
 dependencies = [
  "fs2",
  "serde",
@@ -2247,6 +2247,7 @@ dependencies = [
  "lumen-models",
  "lumen-platform",
  "lumen-platform-macos",
+ "lumen-process",
  "lumen-store",
  "lumen-types",
  "reqwest 0.12.28",
@@ -2302,6 +2303,7 @@ dependencies = [
  "lumen-asr-engine",
  "lumen-platform",
  "lumen-store",
+ "lumen-transcript",
  "lumen-types",
  "serde_json",
  "tempfile",
@@ -2344,6 +2346,15 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "lumen-transcript"
+version = "0.1.0"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=ef449465d18865d3d819309a64b1e723ae329817#ef449465d18865d3d819309a64b1e723ae329817"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -56,9 +56,11 @@ lumen-config = { path = "crates/lumen-config" }
 lumen-platform = { path = "crates/lumen-platform" }
 lumen-platform-macos = { path = "crates/lumen-platform-macos" }
 # Shared Lumen product-cluster crates (lumen-suite). `cloud` enables the
-# OpenAI-compatible HTTP engine navi has always shipped.
-lumen-asr-engine = { git = "https://github.com/fakechris/lumen-suite.git", rev = "c22f24af02260bcfd64a5dbb641ea105079f0591", features = ["cloud"] }
-lumen-models = { git = "https://github.com/fakechris/lumen-suite.git", rev = "c22f24af02260bcfd64a5dbb641ea105079f0591" }
+# OpenAI-compatible HTTP engine navi has always shipped. Keep all lumen-suite
+# deps on a single rev.
+lumen-asr-engine = { git = "https://github.com/fakechris/lumen-suite.git", rev = "ef449465d18865d3d819309a64b1e723ae329817", features = ["cloud"] }
+lumen-models = { git = "https://github.com/fakechris/lumen-suite.git", rev = "ef449465d18865d3d819309a64b1e723ae329817" }
+lumen-transcript = { git = "https://github.com/fakechris/lumen-suite.git", rev = "ef449465d18865d3d819309a64b1e723ae329817" }
 lumen-intake = { path = "crates/lumen-intake" }
 lumen-sources-media = { path = "crates/lumen-sources-media" }
 lumen-store = { path = "crates/lumen-store" }
