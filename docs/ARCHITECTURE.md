@@ -27,9 +27,11 @@ Media-first is intentional: continuous capture is the reliability spine. Chrome 
 
 - **Repo:** https://github.com/fakechris/lumen-asr  
 - **Role:** voice dictation (hotkey → ASR → correct → inject).  
-- **To Navi:** remains a **separate product**. May later become an intake source or share *patterns* (sherpa-onnx, permission ports, SQLite discipline). **Do not merge monorepos.**
+- **To Navi:** remains a **separate product**; shared code lives in the
+  [lumen-suite](https://github.com/fakechris/lumen-suite) crates (§5), not in
+  either product repo. **Do not merge monorepos.**
 
-Patterns borrowed (not code-coupled):
+Patterns borrowed:
 
 - Core crates have **no UI deps**
 - **Ports over providers**
@@ -111,12 +113,23 @@ Act plane ──► open-source cua-driver (MIT)
 | `lumen-config` | Config load, feature flags, retention defaults |
 | `lumen-platform` | Ports: permissions, frontmost app, screen/audio capturers |
 | `lumen-platform-macos` | macOS implementations (mic, Speech ASR, Vision OCR) |
-| `lumen-asr-engine` | Observe ASR: SenseVoice/Whisper (sherpa), OpenAI-compat HTTP (Qwen) |
 | `lumen-intake` | `Source`, sink, supervisor, policy gate |
 | `lumen-store` | Event / blob / job persistence APIs |
-| `lumen-process` | Processors + job orchestration (OCR + transcribe workers) |
+| `lumen-process` | Processors + job orchestration (OCR + transcribe workers, transcript export) |
 | `lumen-api` | Versioned local control/RPC schema |
 | `lumen-daemon` | Thin binary wiring |
+
+### Shared lumen-suite crates (git deps, not in-tree)
+
+ASR engines and model management moved to the shared product-cluster repo
+[lumen-suite](https://github.com/fakechris/lumen-suite); navi pins all of them
+to a single rev in the workspace `Cargo.toml`:
+
+| Crate | Responsibility |
+|-------|----------------|
+| `lumen-asr-engine` | Observe ASR: SenseVoice/Whisper (sherpa), macOS Speech, OpenAI-compat HTTP (Qwen) |
+| `lumen-models` | Shared ASR model contract: discovery, download, verification |
+| `lumen-transcript` | `lumen-transcript.v1` interchange types — navi exports session transcripts (via `lumen_process::export_session_transcript`) for lumen-cut's "Import from Navi" |
 
 ### Growth (add without rewriting core)
 
@@ -134,8 +147,9 @@ Act plane ──► open-source cua-driver (MIT)
 types ← config | platform | intake | store | process | api
 intake ← sources-media
 platform-macos → platform
-asr-engine → platform
-daemon → config, platform-*, asr-engine, intake, sources-media, store, process, api
+process → lumen-asr-engine, lumen-transcript   (shared, git)
+daemon  → config, platform-*, intake, sources-media, store, process, api
+          + lumen-asr-engine, lumen-models     (shared, git)
 ```
 
 No cycles. Process depends on types (+ store APIs), **not** on sources.
@@ -195,7 +209,7 @@ Derived: `ocr.v1` (screen text), `transcript.v1` (audio text) — both feed FTS 
 |------|-----------------|
 | `screenshot.v1` | app_name, bundle_id, window_title, display_id, bounds, pixel_hash, reason |
 | `audio_chunk.v1` | device, sample_rate, channels, duration_ms, mode, rms, peak, format=`wav_s16le` (see `docs/AUDIO_PRODUCT.md`) |
-| `transcript.v1` | text, language, engine=`speech`, confidence, audio_blake3 |
+| `transcript.v1` | text, language, engine label (`sensevoice`/`whisper`/`speech`/`qwen_asr`), confidence, audio_bytes, audio_blake3 |
 | `video_segment.v1` | display_id, duration_ms, codec, linked_screenshot_ids? |
 
 ---

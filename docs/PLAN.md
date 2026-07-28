@@ -62,7 +62,8 @@ Product: [`docs/AUDIO_PRODUCT.md`](AUDIO_PRODUCT.md)
 - [x] Continuous + session (VAD/RMS) modes; size / duration hard caps  
 - [x] `audio_chunk.v1` + WAV CA blobs; independent `sources.audio`  
 - [x] Async `transcribe_audio` → `transcript.v1` (SenseVoice default; Whisper / Speech / OpenAI-compat Qwen; OCR-parity job machine)  
-- [x] `lumen-asr-engine` crate (patterns from lumen-asr; Navi-owned WAV→text port)  
+- [x] `lumen-asr-engine` WAV→text port — now consumed from shared [lumen-suite](https://github.com/fakechris/lumen-suite) crates (`lumen-asr-engine` + `lumen-models`, git deps; formerly in-tree)  
+- [x] `lumen-transcript.v1` session export (`lumen_process::export_session_transcript` + desktop command; shared `lumen-transcript` crate)  
 
 - [x] Transcripts indexed into same FTS as OCR  
 - [x] Concurrent with screen; privacy pause; bounded backpressure  
@@ -142,6 +143,7 @@ Product: [`docs/DESKTOP.md`](DESKTOP.md)
 ```
 https://github.com/fakechris/lumen-navi   ← this product
 https://github.com/fakechris/lumen-asr    ← dictation product (separate)
+https://github.com/fakechris/lumen-suite  ← shared crates: ASR engines, model contract, transcript interchange (git deps)
 https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 ```
 

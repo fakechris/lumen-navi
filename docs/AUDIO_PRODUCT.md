@@ -15,7 +15,7 @@ System audio loopback and **dictation UI** are out of scope.
 | **Lumen Navi** (this repo) | Continuous Observe: store audio + background ASR enrichment |
 | **[Lumen ASR](https://github.com/fakechris/lumen-asr)** | Separate dictation product (hotkey → correct → inject) |
 
-Do **not** merge monorepos. Navi **reuses patterns** (16 kHz mono, sherpa SenseVoice/Whisper, OpenAI-compatible HTTP) via crate `lumen-asr-engine`, and owns its `AsrEngine` port (`WAV → text`).
+Do **not** merge monorepos. The `AsrEngine` port (`WAV → text`; sherpa SenseVoice/Whisper, macOS Speech, OpenAI-compatible HTTP) and model management now come from the shared [lumen-suite](https://github.com/fakechris/lumen-suite) crates `lumen-asr-engine` / `lumen-models` (git deps pinned to one rev), shared with lumen-asr. Session transcripts can be exported as `lumen-transcript.v1` interchange files (shared crate `lumen-transcript`) for lumen-cut's "Import from Navi".
 
 ## Timing alignment (reference)
 
