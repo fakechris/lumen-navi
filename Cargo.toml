@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/lumen-context",
   "crates/lumen-types",
   "crates/lumen-config",
   "crates/lumen-platform",
@@ -14,7 +13,6 @@ members = [
   "crates/lumen-daemon",
 ]
 default-members = [
-  "crates/lumen-context",
   "crates/lumen-types",
   "crates/lumen-config",
   "crates/lumen-platform",
@@ -53,7 +51,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 lumen-types = { path = "crates/lumen-types" }
-lumen-context = { path = "crates/lumen-context" }
+lumen-context = { git = "https://github.com/fakechris/lumen-suite.git", rev = "c33c13ef782ff141d8299507902268d6b1b7e06b" }
 lumen-config = { path = "crates/lumen-config" }
 lumen-platform = { path = "crates/lumen-platform" }
 lumen-platform-macos = { path = "crates/lumen-platform-macos" }
