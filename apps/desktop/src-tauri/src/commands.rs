@@ -345,18 +345,46 @@ pub fn get_event_image_data_url(
     state: State<'_, AppState>,
     event_id: String,
 ) -> Result<Option<String>, String> {
-    let id = Uuid::parse_str(&event_id).map_err(|e| e.to_string())?;
+    get_event_media_data_url_inner(&state, &event_id, MediaKind::Image)
+}
+
+#[tauri::command]
+pub fn get_event_media_data_url(
+    state: State<'_, AppState>,
+    event_id: String,
+) -> Result<Option<String>, String> {
+    get_event_media_data_url_inner(&state, &event_id, MediaKind::ImageOrAudio)
+}
+
+#[derive(Clone, Copy)]
+enum MediaKind {
+    Image,
+    ImageOrAudio,
+}
+
+fn get_event_media_data_url_inner(
+    state: &AppState,
+    event_id: &str,
+    kind: MediaKind,
+) -> Result<Option<String>, String> {
+    let id = Uuid::parse_str(event_id).map_err(|e| e.to_string())?;
     let Some((media, bytes)) = state.store.load_first_artifact_bytes(id).map_err(err)? else {
         return Ok(None);
     };
-    if !media.starts_with("image/") {
+    if !media_allowed(&media, kind) {
         return Ok(None);
     }
-    // Cap thumbnail payload (~1.5MB base64 ~ 2MB string).
-    if bytes.len() > 1_500_000 {
+    // Timeline media is loaded into the WebView as a data URL. Keep the
+    // payload bounded even if a malformed artifact bypassed ingest limits.
+    if bytes.len() > 10 * 1024 * 1024 {
         return Ok(None);
     }
     Ok(Some(format!("data:{media};base64,{}", B64.encode(&bytes))))
+}
+
+fn media_allowed(media: &str, kind: MediaKind) -> bool {
+    media.starts_with("image/")
+        || matches!(kind, MediaKind::ImageOrAudio) && media.starts_with("audio/")
 }
 
 #[tauri::command]
@@ -678,8 +706,11 @@ pub fn request_screen_permission() -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub fn request_microphone_permission() -> Result<(), String> {
-    lumen_platform_macos::request_microphone_access().map_err(|e| e.to_string())
+pub async fn request_microphone_permission() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(lumen_platform_macos::request_microphone_access)
+        .await
+        .map_err(|e| format!("microphone permission task failed: {e}"))?
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -743,7 +774,9 @@ fn open_url(url: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod command_tests {
-    use super::{daemon_health_url, ensure_browser_pairing, privacy_settings_url};
+    use super::{
+        daemon_health_url, ensure_browser_pairing, media_allowed, privacy_settings_url, MediaKind,
+    };
     use lumen_config::Config;
 
     #[test]
@@ -767,6 +800,14 @@ mod command_tests {
             daemon_health_url("http://127.0.0.1:7420/"),
             "http://127.0.0.1:7420/health"
         );
+    }
+
+    #[test]
+    fn timeline_media_allows_images_and_audio_but_not_active_content() {
+        assert!(media_allowed("image/jpeg", MediaKind::Image));
+        assert!(!media_allowed("audio/wav", MediaKind::Image));
+        assert!(media_allowed("audio/wav", MediaKind::ImageOrAudio));
+        assert!(!media_allowed("text/html", MediaKind::ImageOrAudio));
     }
 
     #[test]

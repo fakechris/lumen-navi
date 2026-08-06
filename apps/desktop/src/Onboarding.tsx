@@ -159,10 +159,14 @@ export function Onboarding({
   async function requestScreen() {
     setBusy(true);
     try {
-      await api.requestScreenPermission();
-      await api.openPrivacySettings("screen");
+      const granted = await api.requestScreenPermission();
+      if (!granted) await api.openPrivacySettings("screen");
       setPerms(await api.getPermissions());
-      setError(null);
+      setError(
+        granted
+          ? null
+          : "屏幕录制权限尚未允许，请在系统列表中开启 Lumen Navi。未授权时不会保存受限截图。",
+      );
     } catch (e) {
       setError(`请求屏幕录制权限失败：${String(e)}`);
     } finally {
@@ -173,10 +177,10 @@ export function Onboarding({
   async function requestMicrophone() {
     setBusy(true);
     try {
-      await api.requestMicrophonePermission();
+      const granted = await api.requestMicrophonePermission();
       await api.openPrivacySettings("microphone");
       setPerms(await api.getPermissions());
-      setError(null);
+      setError(granted ? null : "麦克风权限尚未允许，请在系统列表中开启 Lumen Navi。");
     } catch (e) {
       setError(`请求麦克风权限失败：${String(e)}`);
     } finally {

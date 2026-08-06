@@ -295,15 +295,3 @@ pub fn default_input_available() -> bool {
         .and_then(|d| d.default_input_config().ok())
         .is_some()
 }
-
-/// Open a short-lived real input stream so macOS registers and prompts for
-/// microphone access. Enumerating devices alone does not create a TCC entry.
-pub fn request_microphone_access() -> Result<(), PlatformError> {
-    let stream = MacMicCapturer.open(MicOpenConfig {
-        chunk_ms: 200,
-        ..MicOpenConfig::default()
-    })?;
-    let _ = stream.recv_timeout(Duration::from_millis(250));
-    stream.stop();
-    Ok(())
-}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
 import { Onboarding } from "./Onboarding";
@@ -90,6 +90,67 @@ function permStatus(v: string): "done" | "failed" | "idle" {
   return "idle";
 }
 
+function AudioPreview({ item }: { item: TimelineItem }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
+
+  useEffect(() => {
+    if (!url) return;
+    void audioRef.current?.play().catch(() => {
+      // WebKit may require a second explicit click after an async load. The
+      // native controls remain visible in that case.
+    });
+  }, [url]);
+
+  async function loadAudio() {
+    if (url) {
+      void audioRef.current?.play();
+      return;
+    }
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const next = await api.getEventMediaDataUrl(item.id);
+      if (!next) throw new Error("音频文件不可用");
+      setUrl(next);
+    } catch (error) {
+      setLoadError(String(error));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (url) {
+    return (
+      <audio
+        ref={audioRef}
+        className="timeline-audio"
+        controls
+        preload="metadata"
+        src={url}
+      >
+        当前系统无法播放这段音频。
+      </audio>
+    );
+  }
+
+  return (
+    <div className="audio-load-row">
+      <Button
+        variant="secondary"
+        icon="play"
+        disabled={loading}
+        onClick={() => void loadAudio()}
+      >
+        {loading ? "正在载入…" : "播放录音"}
+      </Button>
+      {loadError && <span className="meta audio-error">{loadError}</span>}
+    </div>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState<TabId>("overview");
   const [health, setHealth] = useState<Health | null>(null);
@@ -98,6 +159,7 @@ export default function App() {
   const [observe, setObserve] = useState<ObserveStatus | null>(null);
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
+  const [activeImage, setActiveImage] = useState<{ src: string; label: string } | null>(null);
   const [kindFilter, setKindFilter] = useState("");
   const [appFilter, setAppFilter] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
@@ -170,9 +232,17 @@ export default function App() {
   async function requestScreenRecording() {
     setBusy(true);
     try {
-      await api.requestScreenPermission();
-      await api.openPrivacySettings("screen");
-      setStatusNote("请在屏幕录制列表中允许 Lumen Navi；更改后可能需要重启 App。");
+      const granted = await api.requestScreenPermission();
+      if (granted) {
+        await api.updateSourcesConfig({ screen: cfg?.screen ?? true });
+        setStatusNote("屏幕录制权限已生效；采集服务已重载。");
+      } else {
+        await api.openPrivacySettings("screen");
+        setStatusNote(
+          "系统尚未允许屏幕录制。请在列表中开启 Lumen Navi；未授权时不会再保存只有壁纸的错误截图。",
+        );
+      }
+      setPerms(await api.getPermissions());
       setError(null);
     } catch (e) {
       setError(`请求屏幕录制权限失败：${String(e)}`);
@@ -184,9 +254,13 @@ export default function App() {
   async function requestMicrophone() {
     setBusy(true);
     try {
-      await api.requestMicrophonePermission();
+      const granted = await api.requestMicrophonePermission();
       await api.openPrivacySettings("microphone");
-      setStatusNote("请在麦克风列表中允许 Lumen Navi；授权状态会自动刷新。");
+      setStatusNote(
+        granted
+          ? "麦克风权限已生效；已打开系统设置供你核对。"
+          : "麦克风权限尚未允许；Lumen Navi 现在应已出现在系统列表中。",
+      );
       setError(null);
     } catch (e) {
       setError(`请求麦克风权限失败：${String(e)}`);
@@ -251,6 +325,15 @@ export default function App() {
       void loadTimeline();
     }
   }, [tab, loadTimeline]);
+
+  useEffect(() => {
+    if (!activeImage) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setActiveImage(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [activeImage]);
 
   const nav = NAV.find((n) => n.id === tab)!;
 
@@ -662,7 +745,24 @@ export default function App() {
                 {timeline.map((e) => (
                   <div className="list-item timeline-row" key={e.id}>
                     {e.has_image && thumbs[e.id] ? (
-                      <img className="thumb" src={thumbs[e.id]} alt="" />
+                      <button
+                        className="thumb-button"
+                        type="button"
+                        aria-label="放大查看截图"
+                        onClick={() =>
+                          setActiveImage({
+                            src: thumbs[e.id],
+                            label: `${e.app_name || "屏幕截图"} · ${fmtTime(e.ts)}`,
+                          })
+                        }
+                      >
+                        <img
+                          className="thumb"
+                          src={thumbs[e.id]}
+                          alt={`${e.app_name || "应用"} 的屏幕截图`}
+                        />
+                        <span className="thumb-zoom">放大</span>
+                      </button>
                     ) : e.has_image ? (
                       <div className="thumb placeholder">img</div>
                     ) : e.kind.includes("audio") ? (
@@ -684,6 +784,9 @@ export default function App() {
                       {e.text_preview && (
                         <div className="snippet">{e.text_preview}</div>
                       )}
+                      {e.kind.includes("audio_chunk") && e.artifact_bytes != null && (
+                        <AudioPreview item={e} />
+                      )}
                       <div className="meta">
                         <span>{fmtTime(e.ts)}</span>
                         <span className="mono">{e.id.slice(0, 8)}</span>
@@ -694,6 +797,25 @@ export default function App() {
                   </div>
                 ))}
               </div>
+              {activeImage && (
+                <div
+                  className="image-viewer"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label={activeImage.label}
+                  onClick={(event) => {
+                    if (event.target === event.currentTarget) setActiveImage(null);
+                  }}
+                >
+                  <div className="image-viewer-bar">
+                    <span>{activeImage.label}</span>
+                    <Button variant="secondary" onClick={() => setActiveImage(null)}>
+                      关闭
+                    </Button>
+                  </div>
+                  <img src={activeImage.src} alt={activeImage.label} />
+                </div>
+              )}
             </div>
           )}
 

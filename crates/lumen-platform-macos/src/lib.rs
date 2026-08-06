@@ -17,9 +17,12 @@ pub use capture::{MacDisplays, MacScreenCapturer};
 pub use clipboard::clipboard_grab_selection;
 pub use frontmost::MacFrontmost;
 pub use lock::{is_screen_locked, MacScreenLock};
-pub use mic::{default_input_available, request_microphone_access, MacMicCapturer};
+pub use mic::{default_input_available, MacMicCapturer};
 pub use ocr::{default_ocr_languages, MacVisionOcr};
-pub use permissions::{request_screen_recording, MacPermissions};
+pub use permissions::{
+    request_microphone_access, request_screen_recording, screen_recording_access_granted,
+    MacPermissions,
+};
 pub use selection::{
     accessibility_trusted, focused_element_pid, focused_selection, maybe_selection, mouse_location,
     normalize_selection, start_mouse_up_monitor, MouseUp, SelectionInfo,

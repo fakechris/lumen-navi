@@ -105,6 +105,7 @@ fn list_displays_sync() -> Result<Vec<DisplayInfo>, PlatformError> {
 fn cg_image_for_display(id: DisplayId) -> Result<core_graphics::image::CGImage, PlatformError> {
     use core_graphics::display::CGDisplay;
 
+    ensure_screen_capture_access(super::permissions::screen_recording_access_granted())?;
     let display = CGDisplay::new(id.0);
     display.image().ok_or_else(|| {
         PlatformError::PermissionDenied(
@@ -113,6 +114,17 @@ fn cg_image_for_display(id: DisplayId) -> Result<core_graphics::image::CGImage, 
                 .into(),
         )
     })
+}
+
+fn ensure_screen_capture_access(granted: bool) -> Result<(), PlatformError> {
+    if granted {
+        Ok(())
+    } else {
+        Err(PlatformError::PermissionDenied(
+            "Screen Recording is not authorized; restricted wallpaper-only frames are not saved"
+                .into(),
+        ))
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -285,5 +297,21 @@ fn capture_display_encoded(
     {
         let _ = (id, max_edge, jpeg, jpeg_quality);
         Err(PlatformError::Unsupported("capture requires macOS".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_screen_capture_access;
+    use lumen_platform::PlatformError;
+
+    #[test]
+    fn rejects_restricted_wallpaper_only_capture() {
+        assert!(ensure_screen_capture_access(true).is_ok());
+        assert!(matches!(
+            ensure_screen_capture_access(false),
+            Err(PlatformError::PermissionDenied(message))
+                if message.contains("wallpaper-only")
+        ));
     }
 }
