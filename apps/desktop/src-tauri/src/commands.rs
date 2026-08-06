@@ -268,7 +268,7 @@ pub fn enable_browser_pairing(
     let mut cfg = state.load_config().map_err(err)?;
     ensure_browser_pairing(&mut cfg, rotate);
     state.save_config(&cfg).map_err(err)?;
-    reload_local_service(&state, &cfg)?;
+    reload_local_service(&state)?;
     Ok(browser_pairing_dto(&cfg))
 }
 
@@ -412,17 +412,13 @@ pub fn update_sources_config(
         cfg.asr.fallback_speech = v;
     }
     state.save_config(&cfg).map_err(err)?;
-    reload_local_service(&state, &cfg)?;
+    reload_local_service(&state)?;
     get_config_summary(state)
 }
 
-fn reload_local_service(state: &AppState, cfg: &Config) -> Result<(), String> {
+fn reload_local_service(state: &AppState) -> Result<(), String> {
     observe_stop_inner(state)?;
-    let has_active_source =
-        cfg.sources.screen || cfg.sources.audio || cfg.sources.video || cfg.sources.browser;
-    if has_active_source {
-        observe_start_inner(state)?;
-    }
+    observe_start_inner(state)?;
     Ok(())
 }
 
@@ -506,7 +502,7 @@ pub fn set_privacy_paused(state: State<'_, AppState>, paused: bool) -> Result<()
     cfg.privacy.paused = paused;
     state.save_config(&cfg).map_err(err)?;
     *state.paused.lock().map_err(err)? = paused;
-    reload_local_service(&state, &cfg)?;
+    reload_local_service(&state)?;
     Ok(())
 }
 
