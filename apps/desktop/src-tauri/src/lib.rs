@@ -64,6 +64,8 @@ pub fn run() {
             commands::get_event_image_data_url,
             commands::reindex_search,
             commands::get_config_summary,
+            commands::get_browser_pairing,
+            commands::enable_browser_pairing,
             commands::update_sources_config,
             commands::generate_day_summary,
             commands::export_session_transcript,

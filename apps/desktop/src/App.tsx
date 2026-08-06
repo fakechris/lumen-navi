@@ -20,6 +20,7 @@ import type {
   AsrModelStatus,
   AssistantConfig,
   AssistantUpdate,
+  BrowserPairing,
   ConfigSummary,
   Health,
   ObserveStatus,
@@ -108,10 +109,11 @@ export default function App() {
   const [asrModels, setAsrModels] = useState<AsrModelStatus | null>(null);
   const [assistant, setAssistant] = useState<AssistantConfig | null>(null);
   const [assistantKey, setAssistantKey] = useState("");
+  const [browserPairing, setBrowserPairing] = useState<BrowserPairing | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [h, p, c, o, ob, models, asst] = await Promise.all([
+      const [h, p, c, o, ob, models, asst, browser] = await Promise.all([
         api.getHealth(),
         api.getPermissions(),
         api.getConfigSummary(),
@@ -119,6 +121,7 @@ export default function App() {
         api.getOnboarding(),
         api.checkAsrModelStatus(),
         api.assistantGetConfig(),
+        api.getBrowserPairing(),
       ]);
       setHealth(h);
       setPerms(p);
@@ -127,11 +130,65 @@ export default function App() {
       setOnboarding(ob);
       setAsrModels(models);
       setAssistant(asst);
+      setBrowserPairing(browser);
       setError(null);
     } catch (e) {
       setError(String(e));
     }
   }, []);
+
+  async function openPrivacySettings(kind: string) {
+    try {
+      await api.openPrivacySettings(kind);
+      setStatusNote("已打开 macOS 隐私与安全设置。授权后 Navi 会自动刷新状态。");
+      setError(null);
+    } catch (e) {
+      setError(`无法打开系统设置：${String(e)}`);
+    }
+  }
+
+  async function requestAccessibility() {
+    setBusy(true);
+    try {
+      const granted = await api.requestAccessibilityPermission();
+      if (!granted) await api.openPrivacySettings("accessibility");
+      setAssistant(await api.assistantGetConfig());
+      setStatusNote(
+        granted
+          ? "辅助功能权限已生效。"
+          : "请在系统设置中允许 Lumen Navi；返回后状态会自动刷新。",
+      );
+      setError(null);
+    } catch (e) {
+      setError(`请求辅助功能权限失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function configureBrowserPairing(rotate = false) {
+    setBusy(true);
+    try {
+      const wasRunning = !!observe?.running;
+      const pairing = await api.enableBrowserPairing(rotate);
+      setBrowserPairing(pairing);
+      if (wasRunning) {
+        await api.observeStop();
+        setObserve(await api.observeStart());
+      }
+      setStatusNote(
+        wasRunning
+          ? "浏览同步已启用，Observe 已重启。把下方地址和 token 填入扩展即可联动。"
+          : "浏览同步已启用。启动 Observe 后，把下方地址和 token 填入扩展。",
+      );
+      await refresh();
+      setError(null);
+    } catch (e) {
+      setError(`配置浏览器联动失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     void refresh();
@@ -392,6 +449,24 @@ export default function App() {
                   value={cfg?.audio ? (cfg.asr ? "转写" : "仅摄入") : "关闭"}
                   hint={`${cfg?.asr_engine ?? "sensevoice"} · ${cfg?.asr_locale ?? ""} · ${cfg?.audio_chunk_ms ?? "—"}ms`}
                 />
+                <StatCard
+                  label="Browser"
+                  tone={health?.browser?.last_ingest_at ? "accent" : "default"}
+                  value={
+                    health?.browser?.last_ingest_at
+                      ? "已联动"
+                      : health?.browser?.configured
+                        ? "等待扩展"
+                        : browserPairing?.configured
+                          ? "等待 Observe"
+                          : "未配对"
+                  }
+                  hint={
+                    health?.browser
+                      ? `${health.browser.accepted_events} events · ${fmtTime(health.browser.last_ingest_at)}`
+                      : "扩展仍可独立采集"
+                  }
+                />
               </div>
 
               <div className="card mt">
@@ -414,6 +489,20 @@ export default function App() {
                   首次截屏或录音时，系统会请求授权。语音识别权限用于本机转写，不做听写注入。
                   听写产品见 Lumen ASR。
                 </p>
+                <div className="row mt">
+                  <Button variant="secondary" disabled={busy} onClick={() => void openPrivacySettings("screen")}>
+                    屏幕录制设置
+                  </Button>
+                  <Button variant="secondary" disabled={busy} onClick={() => void openPrivacySettings("microphone")}>
+                    麦克风设置
+                  </Button>
+                  <Button variant="secondary" disabled={busy} onClick={() => void requestAccessibility()}>
+                    请求辅助功能
+                  </Button>
+                  <Button variant="secondary" disabled={busy} onClick={() => void openPrivacySettings("accessibility")}>
+                    辅助功能设置
+                  </Button>
+                </div>
               </div>
             </div>
           )}
@@ -571,6 +660,69 @@ export default function App() {
                   <button className="btn" onClick={() => void api.openDataDir()}>
                     在 Finder 中打开
                   </button>
+                </div>
+              </div>
+              <div className="card">
+                <h3>Browser extension</h3>
+                <div className="stack mt">
+                  <StatusDot
+                    status={health?.browser?.last_ingest_at ? "done" : "idle"}
+                    label={
+                      health?.browser?.last_ingest_at
+                        ? `已联动 · 最后同步 ${fmtTime(health.browser.last_ingest_at)}`
+                        : health?.browser?.configured
+                          ? "Navi 已就绪，等待扩展发送数据"
+                          : browserPairing?.configured
+                            ? "配对已配置，启动 Observe 后提供同步 API"
+                            : "扩展尚未与 Navi 配对"
+                    }
+                  />
+                  <p className="meta">
+                    扩展始终先写自己的 IndexedDB。只有填入下方地址与 token 后，Navi
+                    才能看到同步事件；未配对时 App 无法读取扩展内部数据。
+                  </p>
+                  {browserPairing?.configured && (
+                    <>
+                      <label className="field">
+                        <span className="meta">本地地址</span>
+                        <input className="input mono" readOnly value={browserPairing.endpoint} />
+                      </label>
+                      <label className="field">
+                        <span className="meta">配对 token</span>
+                        <input className="input mono" type="password" readOnly value={browserPairing.token} />
+                      </label>
+                      <div className="meta">
+                        已接收 {health?.browser?.accepted_events ?? 0} · 重复 {health?.browser?.duplicate_events ?? 0} · 拒绝批次 {health?.browser?.rejected_batches ?? 0}
+                      </div>
+                    </>
+                  )}
+                  <div className="row">
+                    <Button variant="primary" disabled={busy} onClick={() => void configureBrowserPairing(false)}>
+                      {browserPairing?.configured ? "重新应用配置" : "启用并生成 token"}
+                    </Button>
+                    {browserPairing?.configured && (
+                      <>
+                        <Button
+                          variant="secondary"
+                          disabled={busy}
+                          onClick={() => {
+                            void navigator.clipboard
+                              .writeText(`${browserPairing.endpoint}\n${browserPairing.token}`)
+                              .then(() => setStatusNote("地址和 token 已复制。"))
+                              .catch((err) => setError(`复制失败：${String(err)}`));
+                          }}
+                        >
+                          复制连接信息
+                        </Button>
+                        <Button variant="secondary" disabled={busy} onClick={() => void configureBrowserPairing(true)}>
+                          轮换 token
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                  <p className="meta">
+                    在扩展弹窗展开“连接 Lumen Navi（可选）”，分别粘贴地址和 token，保存后会立即尝试同步。
+                  </p>
                 </div>
               </div>
               <div className="card">
@@ -962,23 +1114,13 @@ export default function App() {
                           <button
                             className="btn"
                             disabled={busy}
-                            onClick={() => {
-                              setBusy(true);
-                              void api
-                                .requestAccessibilityPermission()
-                                .then(() => api.assistantGetConfig())
-                                .then((a) => setAssistant(a))
-                                .catch((err) => setError(String(err)))
-                                .finally(() => setBusy(false));
-                            }}
+                            onClick={() => void requestAccessibility()}
                           >
                             请求权限
                           </button>
                           <button
                             className="btn"
-                            onClick={() =>
-                              void api.openPrivacySettings("accessibility")
-                            }
+                            onClick={() => void openPrivacySettings("accessibility")}
                           >
                             打开系统设置
                           </button>

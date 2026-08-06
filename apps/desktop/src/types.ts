@@ -15,6 +15,24 @@ export interface Health {
   stored_events: number;
   ocr_docs: number;
   schema_version: number;
+  browser: BrowserHealth | null;
+}
+
+export interface BrowserHealth {
+  enabled: boolean;
+  configured: boolean;
+  paused: boolean;
+  accepted_events: number;
+  duplicate_events: number;
+  rejected_batches: number;
+  last_ingest_at: string | null;
+}
+
+export interface BrowserPairing {
+  enabled: boolean;
+  configured: boolean;
+  endpoint: string;
+  token: string;
 }
 
 export interface Permissions {
