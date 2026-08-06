@@ -1,5 +1,6 @@
 //! Content-addressed blob store under `$data_dir/blobs/ca/ab/<hash>`.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -72,6 +73,32 @@ impl BlobStore {
         fs::read(path).map_err(StoreError::io)
     }
 
+    /// Current bytes in the content-addressed blob tree. Temporary files are
+    /// excluded so an interrupted write cannot permanently disable intake.
+    pub fn total_bytes(&self) -> Result<u64, StoreError> {
+        directory_bytes(&self.root)
+    }
+
+    /// Bytes a set of bodies would add after content-addressed deduplication.
+    pub fn additional_bytes<'a>(
+        &self,
+        bodies: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<u64, StoreError> {
+        let data_dir = self
+            .root
+            .parent()
+            .ok_or_else(|| StoreError::Other("blob root has no parent".into()))?;
+        let mut seen = HashSet::new();
+        let mut total = 0_u64;
+        for bytes in bodies {
+            let hex = blake3::hash(bytes).to_hex().to_string();
+            if seen.insert(hex.clone()) && !data_dir.join(relative_blob_path(&hex)).exists() {
+                total = total.saturating_add(bytes.len() as u64);
+            }
+        }
+        Ok(total)
+    }
+
     /// Remove all blob files (used by wipe). Keeps directory structure.
     pub fn wipe_all(&self) -> Result<(), StoreError> {
         if self.root.exists() {
@@ -84,6 +111,20 @@ impl BlobStore {
         fs::create_dir_all(&self.tmp).map_err(StoreError::io)?;
         Ok(())
     }
+}
+
+fn directory_bytes(path: &Path) -> Result<u64, StoreError> {
+    let mut total = 0_u64;
+    for entry in fs::read_dir(path).map_err(StoreError::io)? {
+        let entry = entry.map_err(StoreError::io)?;
+        let metadata = entry.metadata().map_err(StoreError::io)?;
+        if metadata.is_dir() {
+            total = total.saturating_add(directory_bytes(&entry.path())?);
+        } else if metadata.is_file() {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
 }
 
 fn relative_blob_path(hex: &str) -> String {
@@ -106,5 +147,8 @@ mod tests {
         assert_eq!(a.content_hash, b.content_hash);
         assert_eq!(a.path, b.path);
         assert_eq!(blobs.read_relative(&a.path).unwrap(), b"hello");
+        assert_eq!(blobs.total_bytes().unwrap(), 5);
+        assert_eq!(blobs.additional_bytes([b"hello".as_slice()]).unwrap(), 0);
+        assert_eq!(blobs.additional_bytes([b"new".as_slice(), b"new".as_slice()]).unwrap(), 3);
     }
 }

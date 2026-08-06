@@ -2193,6 +2193,9 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "blake3",
+ "chrono",
+ "http-body-util",
  "lumen-api",
  "lumen-asr-engine",
  "lumen-config",
@@ -2201,14 +2204,18 @@ dependencies = [
  "lumen-platform",
  "lumen-platform-macos",
  "lumen-process",
+ "lumen-sources-browser",
  "lumen-sources-media",
  "lumen-store",
  "lumen-types",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -2310,6 +2317,19 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "lumen-sources-browser"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "lumen-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
  "uuid",
 ]
 

@@ -1,5 +1,6 @@
 //! Durable SQLite + blob store.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -10,7 +11,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::blob::BlobStore;
-use crate::schema::{MIGRATE_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, SCHEMA_VERSION};
+use crate::schema::{MIGRATE_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, MIGRATE_V5, MIGRATE_V6, SCHEMA_VERSION};
 use crate::{EventStore, JobRecord, JobStatus, StoreError};
 
 /// One OCR search hit (FTS).
@@ -68,11 +69,68 @@ pub struct SessionDerivedRow {
     pub body: String,
 }
 
+/// Artifact bytes accepted at an intake boundary before content-addressed storage.
+#[derive(Debug, Clone)]
+pub struct ArtifactInput {
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// One event and its artifacts for idempotent batch persistence.
+#[derive(Debug, Clone)]
+pub struct EventWithArtifacts {
+    pub event: SourceEvent,
+    pub artifacts: Vec<ArtifactInput>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdempotentAppendOutcome {
+    pub accepted: usize,
+    pub duplicates: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobLimitedAppendOutcome {
+    Appended(IdempotentAppendOutcome),
+    LimitExceeded,
+}
+
+#[derive(Debug, Clone)]
+pub struct CursorEvent {
+    pub cursor: i64,
+    pub event: SourceEvent,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BrowserVisitProjection {
+    pub visit_id: Uuid,
+    pub document_id: Option<String>,
+    pub content_id: Option<String>,
+    pub url: Option<String>,
+    pub opened_at: Option<DateTime<Utc>>,
+    pub document_ready_at: Option<DateTime<Utc>>,
+    pub first_visible_at: Option<DateTime<Utc>>,
+    pub last_visible_at: Option<DateTime<Utc>>,
+    pub closed_at: Option<DateTime<Utc>>,
+    pub active_ms: Option<i64>,
+    pub visible_ms: Option<i64>,
+    pub background_ms: Option<i64>,
+    pub max_scroll_ratio: Option<f64>,
+    pub revisit_index: Option<i64>,
+    pub opener_tab_id: Option<i64>,
+    pub referrer: Option<String>,
+    pub transition: Option<String>,
+    pub close_reason: Option<String>,
+    pub extraction_status: Option<String>,
+    pub snapshot_hashes: Vec<String>,
+}
+
 /// On-disk store: `$data_dir/meta/navi.db` + `$data_dir/blobs/...`.
 pub struct SqliteStore {
     data_dir: PathBuf,
     conn: Mutex<Connection>,
     blobs: BlobStore,
+    blob_intake: Mutex<()>,
 }
 
 impl SqliteStore {
@@ -92,6 +150,7 @@ impl SqliteStore {
             data_dir,
             conn: Mutex::new(conn),
             blobs,
+            blob_intake: Mutex::new(()),
         })
     }
 
@@ -110,14 +169,215 @@ impl SqliteStore {
         media_type: impl Into<String>,
         bytes: &[u8],
     ) -> Result<SourceEvent, StoreError> {
+        let _blob_guard = self
+            .blob_intake
+            .lock()
+            .map_err(|_| StoreError::Other("blob intake lock poisoned".into()))?;
         let artifact = self.blobs.put_bytes(media_type, bytes)?;
         event.artifacts.push(artifact);
         self.append_sync(std::slice::from_ref(&event))?;
         Ok(event)
     }
 
+    /// Persist a replay-safe batch. Existing event ids are counted as duplicates;
+    /// their payload and artifacts are left untouched.
+    pub fn append_idempotent_with_artifacts(
+        &self,
+        records: Vec<EventWithArtifacts>,
+    ) -> Result<IdempotentAppendOutcome, StoreError> {
+        match self.append_idempotent_with_artifacts_up_to(records, u64::MAX)? {
+            BlobLimitedAppendOutcome::Appended(outcome) => Ok(outcome),
+            BlobLimitedAppendOutcome::LimitExceeded => {
+                Err(StoreError::Other("unexpected unlimited blob limit".into()))
+            }
+        }
+    }
+
+    /// Persist a replay-safe batch while atomically serializing blob quota
+    /// calculation and writes. Duplicate event ids are filtered before blobs.
+    pub fn append_idempotent_with_artifacts_up_to(
+        &self,
+        records: Vec<EventWithArtifacts>,
+        max_blob_bytes: u64,
+    ) -> Result<BlobLimitedAppendOutcome, StoreError> {
+        let _blob_guard = self
+            .blob_intake
+            .lock()
+            .map_err(|_| StoreError::Other("blob intake lock poisoned".into()))?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        let mut pending = Vec::with_capacity(records.len());
+        let mut seen = HashSet::new();
+        let mut duplicates = 0;
+        for record in records {
+            let event_id = record.event.id.to_string();
+            let exists = tx
+                .query_row(
+                    "SELECT 1 FROM events WHERE id = ?1",
+                    params![event_id],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(StoreError::db)?
+                .is_some();
+            if exists || !seen.insert(record.event.id) {
+                duplicates += 1;
+            } else {
+                pending.push(record);
+            }
+        }
+        let current_blob_bytes = self.blobs.total_bytes()?;
+        let additional_blob_bytes = self.blobs.additional_bytes(
+            pending
+                .iter()
+                .flat_map(|record| record.artifacts.iter())
+                .map(|artifact| artifact.bytes.as_slice()),
+        )?;
+        if additional_blob_bytes > 0
+            && current_blob_bytes.saturating_add(additional_blob_bytes) > max_blob_bytes
+        {
+            return Ok(BlobLimitedAppendOutcome::LimitExceeded);
+        }
+
+        let mut prepared = Vec::with_capacity(pending.len());
+        for record in pending {
+            let mut event = record.event;
+            for artifact in record.artifacts {
+                event
+                    .artifacts
+                    .push(self.blobs.put_bytes(artifact.media_type, &artifact.bytes)?);
+            }
+            prepared.push(event);
+        }
+        let mut accepted = 0;
+        for event in &prepared {
+            if insert_event_idempotent(&tx, event)? {
+                accepted += 1;
+            } else {
+                duplicates += 1;
+            }
+        }
+        tx.commit().map_err(StoreError::db)?;
+        Ok(BlobLimitedAppendOutcome::Appended(IdempotentAppendOutcome {
+            accepted,
+            duplicates,
+        }))
+    }
+
+    /// Read one source in insertion order without exposing SQLite rowids as
+    /// part of the event schema. The returned cursor is local to this store.
+    pub fn list_source_after_cursor(
+        &self,
+        source: &SourceKind,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<CursorEvent>, StoreError> {
+        let source = serde_json::to_string(source).map_err(StoreError::json)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT rowid, id, source, kind, ts, session_id, payload
+                   FROM events
+                   WHERE source = ?1 AND rowid > ?2
+                   ORDER BY rowid ASC
+                   LIMIT ?3"#,
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map(
+                params![source, after.max(0), limit.clamp(1, 10_000) as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        EventRow {
+                            id: row.get(1)?,
+                            source: row.get(2)?,
+                            kind: row.get(3)?,
+                            ts: row.get(4)?,
+                            session_id: row.get(5)?,
+                            payload: row.get(6)?,
+                        },
+                    ))
+                },
+            )
+            .map_err(StoreError::db)?;
+        let mut raw = Vec::new();
+        for row in rows {
+            raw.push(row.map_err(StoreError::db)?);
+        }
+        drop(stmt);
+
+        let mut output = Vec::with_capacity(raw.len());
+        for (cursor, row) in raw {
+            let mut event = row_to_event(row)?;
+            event.artifacts = load_artifacts(&conn, event.id)?;
+            output.push(CursorEvent { cursor, event });
+        }
+        Ok(output)
+    }
+
+    pub fn get_browser_visit(
+        &self,
+        visit_id: Uuid,
+    ) -> Result<Option<BrowserVisitProjection>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.query_row(
+            r#"SELECT visit_id, document_id, content_id, url, opened_at, document_ready_at,
+                      first_visible_at, last_visible_at, closed_at, active_ms, visible_ms,
+                      background_ms, max_scroll_ratio, revisit_index, opener_tab_id,
+                      referrer, transition, close_reason, extraction_status, snapshot_hashes
+               FROM browser_visits WHERE visit_id = ?1"#,
+            params![visit_id.to_string()],
+            |row| {
+                Ok(BrowserVisitProjection {
+                    visit_id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    document_id: row.get(1)?,
+                    content_id: row.get(2)?,
+                    url: row.get(3)?,
+                    opened_at: optional_sql_ts(row.get(4)?),
+                    document_ready_at: optional_sql_ts(row.get(5)?),
+                    first_visible_at: optional_sql_ts(row.get(6)?),
+                    last_visible_at: optional_sql_ts(row.get(7)?),
+                    closed_at: optional_sql_ts(row.get(8)?),
+                    active_ms: row.get(9)?,
+                    visible_ms: row.get(10)?,
+                    background_ms: row.get(11)?,
+                    max_scroll_ratio: row.get(12)?,
+                    revisit_index: row.get(13)?,
+                    opener_tab_id: row.get(14)?,
+                    referrer: row.get(15)?,
+                    transition: row.get(16)?,
+                    close_reason: row.get(17)?,
+                    extraction_status: row.get(18)?,
+                    snapshot_hashes: serde_json::from_str(&row.get::<_, String>(19)?)
+                        .unwrap_or_default(),
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::db)
+    }
+
     pub fn upsert_session(&self, session: &ActivitySession) -> Result<(), StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         conn.execute(
             r#"INSERT INTO activity_sessions
                (id, started_at, ended_at, primary_app, primary_bundle, trigger, snapshot_count, status)
@@ -1005,20 +1265,26 @@ impl SqliteStore {
     }
 
     fn wipe_sync(&self) -> Result<(), StoreError> {
-        {
-            let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
-            conn.execute_batch(
-                r#"
+        let _blob_guard = self
+            .blob_intake
+            .lock()
+            .map_err(|_| StoreError::Other("blob intake lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.execute_batch(
+            r#"
                 DELETE FROM ocr_docs;
+                DELETE FROM browser_visits;
                 DELETE FROM derived;
                 DELETE FROM jobs;
                 DELETE FROM artifacts;
                 DELETE FROM events;
                 DELETE FROM kv;
                 "#,
-            )
-            .map_err(StoreError::db)?;
-        }
+        )
+        .map_err(StoreError::db)?;
         self.blobs.wipe_all()?;
         Ok(())
     }
@@ -1232,6 +1498,26 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
         v = 4;
     }
 
+    if v < 5 {
+        conn.execute_batch(MIGRATE_V5).map_err(StoreError::db)?;
+        conn.execute(
+            "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
+            params!["5"],
+        )
+        .map_err(StoreError::db)?;
+        v = 5;
+    }
+
+    if v < 6 {
+        conn.execute_batch(MIGRATE_V6).map_err(StoreError::db)?;
+        conn.execute(
+            "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
+            params!["6"],
+        )
+        .map_err(StoreError::db)?;
+        v = 6;
+    }
+
     let _ = v;
     Ok(())
 }
@@ -1409,14 +1695,35 @@ fn preview_text(s: &str, max: usize) -> String {
 }
 
 fn insert_event(tx: &rusqlite::Transaction<'_>, event: &SourceEvent) -> Result<(), StoreError> {
+    insert_event_with_mode(tx, event, false).map(|_| ())
+}
+
+fn insert_event_idempotent(
+    tx: &rusqlite::Transaction<'_>,
+    event: &SourceEvent,
+) -> Result<bool, StoreError> {
+    insert_event_with_mode(tx, event, true)
+}
+
+fn insert_event_with_mode(
+    tx: &rusqlite::Transaction<'_>,
+    event: &SourceEvent,
+    idempotent: bool,
+) -> Result<bool, StoreError> {
     let source = serde_json::to_string(&event.source).map_err(StoreError::json)?;
     let payload = serde_json::to_string(&event.payload).map_err(StoreError::json)?;
     let session = event.session_id.map(|s| s.to_string());
     let created = Utc::now().to_rfc3339();
 
-    tx.execute(
+    let statement = if idempotent {
+        r#"INSERT OR IGNORE INTO events (id, source, kind, ts, session_id, payload, created_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#
+    } else {
         r#"INSERT INTO events (id, source, kind, ts, session_id, payload, created_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#
+    };
+    let inserted = tx.execute(
+        statement,
         params![
             event.id.to_string(),
             source,
@@ -1428,6 +1735,9 @@ fn insert_event(tx: &rusqlite::Transaction<'_>, event: &SourceEvent) -> Result<(
         ],
     )
     .map_err(StoreError::db)?;
+    if inserted == 0 {
+        return Ok(false);
+    }
 
     for (ordinal, art) in event.artifacts.iter().enumerate() {
         tx.execute(
@@ -1445,7 +1755,177 @@ fn insert_event(tx: &rusqlite::Transaction<'_>, event: &SourceEvent) -> Result<(
         )
         .map_err(StoreError::db)?;
     }
+    project_browser_event(tx, event)?;
+    Ok(true)
+}
+
+fn project_browser_event(
+    tx: &rusqlite::Transaction<'_>,
+    event: &SourceEvent,
+) -> Result<(), StoreError> {
+    if event.source != SourceKind::Browser {
+        return Ok(());
+    }
+    if !matches!(
+        event.kind.as_str(),
+        "browser.navigation_committed.v1"
+            | "browser.document_ready.v1"
+            | "browser.visibility_focus_change.v1"
+            | "browser.visit_closed.v1"
+    ) {
+        return Ok(());
+    }
+    let visit_id = event
+        .payload
+        .get("visit_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .or(event.session_id);
+    let Some(visit_id) = visit_id else {
+        return Ok(());
+    };
+    let data = event
+        .payload
+        .get("data")
+        .unwrap_or(&serde_json::Value::Null);
+    let is_navigation = event.kind == "browser.navigation_committed.v1";
+    let is_ready = event.kind == "browser.document_ready.v1";
+    let is_visibility = event.kind == "browser.visibility_focus_change.v1";
+    let is_close = event.kind == "browser.visit_closed.v1";
+    let max_scroll = data
+        .get("max_scroll_ratio")
+        .and_then(serde_json::Value::as_f64);
+    let active_ms = json_i64(data.get("active_ms"));
+    let visible_ms = json_i64(data.get("visible_ms"));
+    let background_ms = json_i64(data.get("background_ms"));
+    let visible_now = (is_visibility
+        && data
+            .get("visible")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false))
+        || (is_close
+            && data
+                .get("visible_at_close")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false));
+    let identity_source = event
+        .artifacts
+        .iter()
+        .find_map(|artifact| artifact.content_hash.as_deref())
+        .or_else(|| data.get("canonical").and_then(serde_json::Value::as_str))
+        .or_else(|| event.payload.get("url").and_then(serde_json::Value::as_str));
+    let content_id = identity_source.map(|value| blake3::hash(value.as_bytes()).to_hex().to_string());
+    let existing: Option<(Option<String>, String)> = tx
+        .query_row(
+            "SELECT content_id, snapshot_hashes FROM browser_visits WHERE visit_id = ?1",
+            params![visit_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(StoreError::db)?;
+    let effective_content_id = content_id
+        .clone()
+        .or_else(|| existing.as_ref().and_then(|item| item.0.clone()));
+    let revisit_index = if let Some(content_id) = effective_content_id.as_deref() {
+        Some(
+            tx.query_row(
+                "SELECT COUNT(1) FROM browser_visits WHERE content_id = ?1 AND visit_id <> ?2",
+                params![content_id, visit_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(StoreError::db)?,
+        )
+    } else {
+        None
+    };
+    let mut snapshot_hashes: Vec<String> = existing
+        .as_ref()
+        .and_then(|item| serde_json::from_str(&item.1).ok())
+        .unwrap_or_default();
+    for hash in event
+        .artifacts
+        .iter()
+        .filter_map(|artifact| artifact.content_hash.clone())
+    {
+        if !snapshot_hashes.contains(&hash) {
+            snapshot_hashes.push(hash);
+        }
+    }
+    let snapshot_hashes = serde_json::to_string(&snapshot_hashes).map_err(StoreError::json)?;
+    let now = Utc::now().to_rfc3339();
+    tx.execute(
+        r#"INSERT INTO browser_visits
+           (visit_id, document_id, content_id, url, opened_at, document_ready_at,
+            first_visible_at, last_visible_at, closed_at, active_ms, visible_ms,
+            background_ms, max_scroll_ratio, revisit_index, opener_tab_id, referrer,
+            transition, close_reason, extraction_status, snapshot_hashes, updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                   ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+           ON CONFLICT(visit_id) DO UPDATE SET
+             document_id=COALESCE(excluded.document_id, browser_visits.document_id),
+             content_id=COALESCE(excluded.content_id, browser_visits.content_id),
+             url=COALESCE(excluded.url, browser_visits.url),
+             opened_at=COALESCE(browser_visits.opened_at, excluded.opened_at),
+             document_ready_at=COALESCE(browser_visits.document_ready_at, excluded.document_ready_at),
+             first_visible_at=COALESCE(browser_visits.first_visible_at, excluded.first_visible_at),
+             last_visible_at=COALESCE(excluded.last_visible_at, browser_visits.last_visible_at),
+             closed_at=COALESCE(excluded.closed_at, browser_visits.closed_at),
+             active_ms=COALESCE(excluded.active_ms, browser_visits.active_ms),
+             visible_ms=COALESCE(excluded.visible_ms, browser_visits.visible_ms),
+             background_ms=COALESCE(excluded.background_ms, browser_visits.background_ms),
+             max_scroll_ratio=CASE
+               WHEN excluded.max_scroll_ratio IS NULL THEN browser_visits.max_scroll_ratio
+               WHEN browser_visits.max_scroll_ratio IS NULL THEN excluded.max_scroll_ratio
+               ELSE MAX(browser_visits.max_scroll_ratio, excluded.max_scroll_ratio)
+             END,
+             revisit_index=COALESCE(excluded.revisit_index, browser_visits.revisit_index),
+             opener_tab_id=COALESCE(excluded.opener_tab_id, browser_visits.opener_tab_id),
+             referrer=COALESCE(excluded.referrer, browser_visits.referrer),
+             transition=COALESCE(excluded.transition, browser_visits.transition),
+             close_reason=COALESCE(excluded.close_reason, browser_visits.close_reason),
+             extraction_status=COALESCE(excluded.extraction_status, browser_visits.extraction_status),
+             snapshot_hashes=excluded.snapshot_hashes,
+             updated_at=excluded.updated_at"#,
+        params![
+            visit_id.to_string(),
+            event.payload.get("document_id").and_then(serde_json::Value::as_str),
+            content_id,
+            event.payload.get("url").and_then(serde_json::Value::as_str),
+            is_navigation.then(|| event.ts.to_rfc3339()),
+            is_ready.then(|| event.ts.to_rfc3339()),
+            visible_now.then(|| event.ts.to_rfc3339()),
+            visible_now.then(|| event.ts.to_rfc3339()),
+            is_close.then(|| event.ts.to_rfc3339()),
+            active_ms,
+            visible_ms,
+            background_ms,
+            max_scroll,
+            revisit_index,
+            json_i64(data.get("opener_tab_id")),
+            data.get("referrer").and_then(serde_json::Value::as_str),
+            data.get("transition").and_then(serde_json::Value::as_str),
+            data.get("close_reason").and_then(serde_json::Value::as_str),
+            data.get("extraction_status").and_then(serde_json::Value::as_str),
+            snapshot_hashes,
+            now,
+        ],
+    )
+    .map_err(StoreError::db)?;
     Ok(())
+}
+
+fn json_i64(value: Option<&serde_json::Value>) -> Option<i64> {
+    value.and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_f64().map(|number| number.round() as i64))
+    })
+}
+
+fn optional_sql_ts(value: Option<String>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+        .map(|value| value.with_timezone(&Utc))
 }
 
 fn load_artifacts(conn: &Connection, event_id: Uuid) -> Result<Vec<ArtifactRef>, StoreError> {
@@ -1543,6 +2023,230 @@ mod tests {
             store.blobs().read_relative(&got.artifacts[0].path).unwrap(),
             b"png-bytes"
         );
+    }
+
+    #[tokio::test]
+    async fn idempotent_artifact_batch_can_be_replayed_without_duplication() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let event = SourceEvent::new(
+            SourceKind::Browser,
+            "browser.document_ready.v1",
+            json!({"url": "https://example.test/article"}),
+        );
+        let input = EventWithArtifacts {
+            event: event.clone(),
+            artifacts: vec![ArtifactInput {
+                media_type: "text/markdown".into(),
+                bytes: b"Synthetic article body".to_vec(),
+            }],
+        };
+
+        let first = store
+            .append_idempotent_with_artifacts(vec![input.clone()])
+            .unwrap();
+        let mut conflicting_replay = input;
+        conflicting_replay.artifacts[0].bytes = b"Conflicting replay body".to_vec();
+        let replay = store
+            .append_idempotent_with_artifacts(vec![conflicting_replay])
+            .unwrap();
+
+        assert_eq!((first.accepted, first.duplicates), (1, 0));
+        assert_eq!((replay.accepted, replay.duplicates), (0, 1));
+        let stored = store.get(event.id).await.unwrap().unwrap();
+        assert_eq!(stored.artifacts.len(), 1);
+        assert_eq!(
+            store
+                .blobs()
+                .read_relative(&stored.artifacts[0].path)
+                .unwrap(),
+            b"Synthetic article body"
+        );
+        assert_eq!(store.blobs().total_bytes().unwrap(), b"Synthetic article body".len() as u64);
+    }
+
+    #[test]
+    fn concurrent_blob_intake_cannot_race_past_the_limit() {
+        let dir = tempdir().unwrap();
+        let store = std::sync::Arc::new(SqliteStore::open(dir.path()).unwrap());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for body in [b"body-one".to_vec(), b"body-two".to_vec()] {
+            let store = std::sync::Arc::clone(&store);
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let record = EventWithArtifacts {
+                    event: SourceEvent::new(
+                        SourceKind::Browser,
+                        "browser.document_ready.v1",
+                        json!({}),
+                    ),
+                    artifacts: vec![ArtifactInput {
+                        media_type: "text/markdown".into(),
+                        bytes: body,
+                    }],
+                };
+                barrier.wait();
+                store
+                    .append_idempotent_with_artifacts_up_to(vec![record], 8)
+                    .unwrap()
+            }));
+        }
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, BlobLimitedAppendOutcome::Appended(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, BlobLimitedAppendOutcome::LimitExceeded))
+                .count(),
+            1
+        );
+        assert_eq!(store.blobs().total_bytes().unwrap(), 8);
+    }
+
+    #[tokio::test]
+    async fn source_export_uses_a_monotonic_cursor() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store
+            .append(vec![
+                SourceEvent::new(SourceKind::Screen, event_kind::SCREENSHOT_V1, json!({})),
+                SourceEvent::new(
+                    SourceKind::Browser,
+                    "browser.navigation_committed.v1",
+                    json!({"visit_id": "00000000-0000-4000-8000-000000000010"}),
+                ),
+                SourceEvent::new(
+                    SourceKind::Browser,
+                    "browser.visit_closed.v1",
+                    json!({"visit_id": "00000000-0000-4000-8000-000000000010"}),
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let first = store
+            .list_source_after_cursor(&SourceKind::Browser, 0, 1)
+            .unwrap();
+        let second = store
+            .list_source_after_cursor(&SourceKind::Browser, first[0].cursor, 10)
+            .unwrap();
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert!(second[0].cursor > first[0].cursor);
+        assert_eq!(second[0].event.kind, "browser.visit_closed.v1");
+    }
+
+    #[test]
+    fn browser_visit_projection_is_updated_from_accepted_events() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let visit_id = Uuid::parse_str("00000000-0000-4000-8000-000000000301").unwrap();
+        let mut opened = SourceEvent::new(
+            SourceKind::Browser,
+            "browser.navigation_committed.v1",
+            json!({
+                "visit_id": visit_id,
+                "document_id": "fixture-document",
+                "url": "https://example.test/article",
+                "data": {"transition": "typed", "opener_tab_id": 7}
+            }),
+        );
+        opened.session_id = Some(visit_id);
+        let mut ready = SourceEvent::new(
+            SourceKind::Browser,
+            "browser.document_ready.v1",
+            json!({
+                "visit_id": visit_id,
+                "document_id": "fixture-document",
+                "url": "https://example.test/article",
+                "data": {
+                    "canonical": "https://example.test/article",
+                    "referrer": "https://example.test/index",
+                    "extraction_status": "success"
+                }
+            }),
+        );
+        ready.session_id = Some(visit_id);
+        let mut visible = SourceEvent::new(
+            SourceKind::Browser,
+            "browser.visibility_focus_change.v1",
+            json!({
+                "visit_id": visit_id,
+                "document_id": "fixture-document",
+                "url": "https://example.test/article",
+                "data": {"visible": true, "focused": true, "max_scroll_ratio": 0.5}
+            }),
+        );
+        visible.session_id = Some(visit_id);
+        let mut closed = SourceEvent::new(
+            SourceKind::Browser,
+            "browser.visit_closed.v1",
+            json!({
+                "visit_id": visit_id,
+                "document_id": "fixture-document",
+                "url": "https://example.test/article",
+                "data": {
+                    "active_ms": 12000.0,
+                    "visible_ms": 15000.0,
+                    "background_ms": 3000.0,
+                    "visible_at_close": true,
+                    "max_scroll_ratio": 0.75,
+                    "close_reason": "pagehide"
+                }
+            }),
+        );
+        closed.session_id = Some(visit_id);
+
+        store
+            .append_idempotent_with_artifacts(vec![
+                EventWithArtifacts {
+                    event: opened,
+                    artifacts: vec![],
+                },
+                EventWithArtifacts {
+                    event: ready,
+                    artifacts: vec![ArtifactInput {
+                        media_type: "text/markdown".into(),
+                        bytes: b"fixture body".to_vec(),
+                    }],
+                },
+                EventWithArtifacts {
+                    event: visible,
+                    artifacts: vec![],
+                },
+                EventWithArtifacts {
+                    event: closed,
+                    artifacts: vec![],
+                },
+            ])
+            .unwrap();
+
+        let visit = store.get_browser_visit(visit_id).unwrap().unwrap();
+        assert_eq!(visit.document_id.as_deref(), Some("fixture-document"));
+        assert_eq!(visit.active_ms, Some(12_000));
+        assert_eq!(visit.visible_ms, Some(15_000));
+        assert_eq!(visit.background_ms, Some(3_000));
+        assert_eq!(visit.max_scroll_ratio, Some(0.75));
+        assert!(visit.content_id.is_some());
+        assert!(visit.first_visible_at.is_some());
+        assert!(visit.last_visible_at.is_some());
+        assert_eq!(visit.revisit_index, Some(0));
+        assert_eq!(visit.opener_tab_id, Some(7));
+        assert_eq!(visit.referrer.as_deref(), Some("https://example.test/index"));
+        assert_eq!(visit.transition.as_deref(), Some("typed"));
+        assert_eq!(visit.snapshot_hashes.len(), 1);
+        assert_eq!(visit.close_reason.as_deref(), Some("pagehide"));
     }
 
     #[tokio::test]
