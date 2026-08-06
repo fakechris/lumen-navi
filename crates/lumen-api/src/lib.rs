@@ -23,6 +23,39 @@ pub struct HealthResponse {
     /// Store schema version.
     #[serde(default)]
     pub schema_version: i64,
+    /// Browser loopback intake status when configured.
+    #[serde(default)]
+    pub browser: Option<BrowserHealthResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserHealthResponse {
+    pub enabled: bool,
+    pub configured: bool,
+    pub paused: bool,
+    pub accepted_events: u64,
+    pub duplicate_events: u64,
+    pub rejected_batches: u64,
+    pub last_ingest_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserIngestResponse {
+    pub schema_version: u32,
+    pub accepted: usize,
+    pub duplicates: usize,
+    #[serde(default)]
+    pub rejected_artifacts: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserPolicyResponse {
+    pub schema_version: u32,
+    pub capture_allowed: bool,
+    pub content_allow_hosts: Vec<String>,
+    pub excluded_hosts: Vec<String>,
+    pub max_batch_size: usize,
+    pub max_artifact_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,9 +70,15 @@ pub struct SourceStatus {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
     Health,
-    Pause { source: Option<String> },
-    Resume { source: Option<String> },
-    ListEvents { limit: usize },
+    Pause {
+        source: Option<String>,
+    },
+    Resume {
+        source: Option<String>,
+    },
+    ListEvents {
+        limit: usize,
+    },
     Wipe,
     Permissions,
     /// Full-text search over OCR (`ocr_docs` / FTS5).
@@ -57,7 +96,9 @@ pub enum ControlRequest {
 pub enum ControlResponse {
     Health(HealthResponse),
     Ack,
-    Events { events: Vec<EventSummary> },
+    Events {
+        events: Vec<EventSummary>,
+    },
     OcrSearch {
         query: String,
         hits: Vec<OcrSearchHitDto>,
@@ -105,6 +146,7 @@ impl HealthResponse {
             stored_events,
             ocr_docs,
             schema_version,
+            browser: None,
         }
     }
 }

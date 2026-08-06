@@ -136,7 +136,7 @@ to a single rev in the workspace `Cargo.toml`:
 | Crate | When |
 |-------|------|
 | `lumen-sources-media` | **Now** — screen / audio / video |
-| `lumen-sources-browser` | Later |
+| `lumen-sources-browser` | Browser batch contract, URL redaction, positive content gate |
 | `lumen-sources-agent` | Later |
 | `lumen-act` | Optional act via cua-driver |
 | `apps/desktop` | **Now** — Tauri shell |
@@ -148,7 +148,7 @@ types ← config | platform | intake | store | process | api
 intake ← sources-media
 platform-macos → platform
 process → lumen-asr-engine, lumen-transcript   (shared, git)
-daemon  → config, platform-*, intake, sources-media, store, process, api
+daemon  → config, platform-*, intake, sources-media, sources-browser, store, process, api
           + lumen-asr-engine, lumen-models     (shared, git)
 ```
 
@@ -184,6 +184,14 @@ $data_dir/
 ```
 
 Implemented by `lumen_store::SqliteStore` + `BlobStore` (Phase S1).
+
+### Browser capture (Phase B1)
+
+- Adapter: `lumen-sources-browser` validates schema, event kinds, redacted URLs, artifact type/size, excluded hosts, and positive Markdown policy.
+- Transport: authenticated loopback HTTP; browser pause is independent from other Observe sources.
+- Store: append-only browser events plus rebuildable schema-v5 `browser_visits` projection.
+- Export: cursor-based NDJSON with events, completed visit projections, health/gap records, and artifact manifests.
+- Extension: `extensions/browser` WXT/MV3 background + content + popup surfaces. It reads no input values, selections, clipboard data, or DOM link graph, and sends no HTML.
 
 ### Screen capture (Phase S2)
 

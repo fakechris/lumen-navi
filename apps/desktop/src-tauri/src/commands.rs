@@ -122,6 +122,7 @@ pub async fn get_health(state: State<'_, AppState>) -> Result<HealthResponse, St
         stored_events: n,
         ocr_docs,
         schema_version: SCHEMA_VERSION,
+        browser: None,
     })
 }
 

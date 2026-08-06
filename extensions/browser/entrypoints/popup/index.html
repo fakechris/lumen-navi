@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lumen Navi Browser</title>
+    <style>
+      body { width: 320px; margin: 0; padding: 16px; color: #172033; background: #f7f6f2; font: 13px/1.45 system-ui, sans-serif; }
+      h1 { margin: 0 0 12px; font-size: 16px; }
+      .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+      .status { padding: 8px; border: 1px solid #d8d4ca; border-radius: 8px; background: #fff; }
+      button { border: 1px solid #b8b2a7; border-radius: 7px; background: #fff; padding: 7px 10px; cursor: pointer; }
+      button.active { color: #fff; background: #9f4f24; border-color: #9f4f24; }
+      input, textarea { box-sizing: border-box; width: 100%; border: 1px solid #b8b2a7; border-radius: 6px; padding: 6px; }
+      textarea { min-height: 54px; resize: vertical; }
+      label { display: block; margin-top: 8px; color: #5d625f; }
+      details { margin-top: 12px; }
+      #message { min-height: 18px; color: #7a3b1d; }
+    </style>
+  </head>
+  <body>
+    <h1>Lumen Navi Browser</h1>
+    <div id="status" class="status">正在读取本地状态…</div>
+    <div class="row"><button id="dashboard">查看浏览记录</button></div>
+    <div class="row">
+      <button id="pause">暂停采集</button>
+      <button id="exclude">排除本域</button>
+    </div>
+    <div class="row">
+      <button id="flag">标记此页</button>
+      <button id="dismiss">不相关</button>
+    </div>
+    <div id="message"></div>
+    <details open>
+      <summary>采集设置</summary>
+      <label>允许保存正文的网站<textarea id="allow" placeholder="example.com&#10;docs.example.org"></textarea></label>
+      <p>未列入的网站只保存标题、URL 和停留行为；数据先保存在扩展本机数据库。</p>
+    </details>
+    <details>
+      <summary>连接 Lumen Navi（可选）</summary>
+      <label>本地地址<input id="daemon-url" type="url" autocomplete="off" /></label>
+      <label>配对 token<input id="token" type="password" autocomplete="off" /></label>
+      <p>不连接 Navi 也会继续采集；连接后会把本地副本同步到 Navi 数据库。</p>
+    </details>
+    <div class="row"><button id="save">保存设置</button></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

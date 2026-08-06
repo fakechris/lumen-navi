@@ -24,6 +24,8 @@ pub struct Config {
     #[serde(default)]
     pub api: ApiConfig,
     #[serde(default)]
+    pub browser: BrowserConfig,
+    #[serde(default)]
     pub audio: AudioConfig,
     #[serde(default)]
     pub asr: AsrConfig,
@@ -288,6 +290,48 @@ impl Default for ApiConfig {
     }
 }
 
+/// Local browser-extension intake. Content is off until hosts are explicitly allowed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserConfig {
+    /// Shared secret expected in `Authorization: Bearer ...` on loopback ingest.
+    pub ingest_token: String,
+    /// Hosts allowed to send Readability Markdown. Empty means metadata only.
+    pub content_allow_hosts: Vec<String>,
+    /// Hosts rejected before any browser observation is persisted.
+    pub excluded_hosts: Vec<String>,
+    pub max_batch_size: usize,
+    pub max_artifact_bytes: usize,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            ingest_token: String::new(),
+            content_allow_hosts: Vec::new(),
+            excluded_hosts: vec![
+                "mail.google.com".into(),
+                "outlook.office.com".into(),
+                "slack.com".into(),
+                "discord.com".into(),
+                "web.whatsapp.com".into(),
+                "web.telegram.org".into(),
+            ],
+            max_batch_size: 100,
+            max_artifact_bytes: 2 * 1024 * 1024,
+        }
+    }
+}
+
+impl BrowserConfig {
+    pub fn effective_ingest_token(&self) -> String {
+        std::env::var("LUMEN_NAVI_BROWSER_TOKEN")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| self.ingest_token.clone())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourcesConfig {
     pub screen: bool,
@@ -429,6 +473,7 @@ impl Default for Config {
             },
             ocr: OcrConfig::default(),
             api: ApiConfig::default(),
+            browser: BrowserConfig::default(),
             audio: AudioConfig::default(),
             asr: AsrConfig::default(),
             assistant: AssistantConfig::default(),
@@ -509,5 +554,30 @@ mod tests {
         assert_eq!(decoded.assistant.base_url, "https://api.deepseek.com/v1");
         assert_eq!(decoded.assistant.model, "deepseek-chat");
         assert_eq!(decoded.assistant.target_lang, "English");
+    }
+
+    #[test]
+    fn browser_ingest_is_disabled_until_a_token_is_configured() {
+        let config = Config::default();
+        assert!(!config.sources.browser);
+        assert!(config.browser.effective_ingest_token().is_empty());
+        assert!(config.browser.content_allow_hosts.is_empty());
+    }
+
+    #[test]
+    fn browser_privacy_lists_survive_toml_roundtrip() {
+        let mut config = Config::default();
+        config.sources.browser = true;
+        config.browser.ingest_token = "fixture-token".into();
+        config.browser.content_allow_hosts = vec!["example.test".into()];
+        config.browser.excluded_hosts = vec!["private.example.test".into()];
+
+        let encoded = toml::to_string_pretty(&config).unwrap();
+        let decoded: Config = toml::from_str(&encoded).unwrap();
+
+        assert!(decoded.sources.browser);
+        assert_eq!(decoded.browser.ingest_token, "fixture-token");
+        assert_eq!(decoded.browser.content_allow_hosts, vec!["example.test"]);
+        assert_eq!(decoded.browser.excluded_hosts, vec!["private.example.test"]);
     }
 }

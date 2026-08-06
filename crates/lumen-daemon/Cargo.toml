@@ -14,6 +14,8 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
 lumen-api = { workspace = true }
 lumen-asr-engine = { workspace = true }
 lumen-config = { workspace = true }
@@ -23,6 +25,7 @@ lumen-platform = { workspace = true }
 lumen-platform-macos = { workspace = true }
 lumen-process = { workspace = true }
 lumen-sources-media = { workspace = true }
+lumen-sources-browser = { workspace = true }
 lumen-store = { workspace = true }
 lumen-types = { workspace = true }
 serde = { workspace = true }
@@ -30,4 +33,9 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
 
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

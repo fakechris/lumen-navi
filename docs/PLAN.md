@@ -99,10 +99,15 @@ Product: [`docs/OCR_PRODUCT.md`](OCR_PRODUCT.md)
 
 ---
 
-## Phase B1 — Chrome (explicitly later)
+## Phase B1 — Chrome Observe MVP
 
-- MV3 extension + native messaging / loopback  
-- `SourceKind::Browser` only — **no core trait changes** if API stayed versioned  
+- [x] WXT/MV3 extension + authenticated loopback intake
+- [x] Metadata-first lifecycle events, persistent queue, pause/exclude/feedback controls
+- [x] Positive content allow-list; Readability Markdown only; no HTML or DOM-link enumeration
+- [x] Idempotent SQLite/blob persistence, visit projection, health/gap events, cursor NDJSON export
+- [ ] Manual browser/daemon soak and policy audit
+
+Product contract and setup: [`BROWSER_CAPTURE.md`](BROWSER_CAPTURE.md).
 
 ---
 

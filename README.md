@@ -32,7 +32,8 @@ Full write-up: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · roadmap: [`docs
 | S4 Vision OCR + FTS API | ✅ |
 | **U1 Tauri Mac app** | ✅ shell (control + search + start/stop daemon) |
 | S4.1 OCR helper isolation | optional later |
-| System audio / Chrome / Act | later |
+| Chrome Observe MVP | ✅ implementation; manual soak pending |
+| System audio / Act | later |
 
 ## Workspace
 
@@ -40,7 +41,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · roadmap: [`docs
 lumen-navi/
 ├── crates/          # daemon + libraries
 ├── apps/desktop/    # Tauri 2 Mac shell
-├── extensions/      # Chrome later
+├── extensions/      # Chrome Browser Observe MVP
 └── docs/
 ```
 
@@ -74,6 +75,12 @@ cargo run -p lumen-navi-desktop
 
 See [`docs/DESKTOP.md`](docs/DESKTOP.md).
 
+## Browser Observe
+
+The Chrome MV3 extension records a privacy-gated lifecycle stream into its own local IndexedDB archive and can optionally sync a transport copy into the local daemon. Standalone capture needs no token or daemon. Page content remains metadata-only unless its host appears in an explicit extension or daemon allow-list. The extension includes a local full-page archive for activity, domain, attention, and source-detail review. No HTML, input values, selections, clipboard data, or DOM link lists are collected.
+
+Setup, build, API, and privacy contract: [`docs/BROWSER_CAPTURE.md`](docs/BROWSER_CAPTURE.md).
+
 ### Release DMG
 
 ```bash
@@ -100,6 +107,8 @@ Install notes: [`docs/MACOS_RELEASE_NOTES.md`](docs/MACOS_RELEASE_NOTES.md).
 | `asr.enabled` / `locale` | true / `zh-CN` |
 | `ocr.enabled` | true |
 | `api.bind` | `127.0.0.1:7420` |
+| `sources.browser` | `false` |
+| `browser.content_allow_hosts` | `[]` (metadata only) |
 
 **cua-driver is not used for capture/OCR/ASR.**
 

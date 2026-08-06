@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>浏览记录 · Lumen Navi</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#timeline">跳到浏览记录</a>
+    <header class="masthead">
+      <div class="identity">
+        <div class="mark" aria-hidden="true">L</div>
+        <div>
+          <p class="eyebrow">Lumen Navi · Browser Archive</p>
+          <h1>浏览记录</h1>
+        </div>
+      </div>
+      <div class="mast-actions">
+        <span id="archive-status" class="archive-status" aria-live="polite">正在读取本机档案…</span>
+        <button id="refresh" class="text-button" type="button">刷新记录</button>
+      </div>
+    </header>
+
+    <section class="ledger" aria-label="浏览摘要">
+      <div><span id="metric-today">—</span><small>今日页面</small></div>
+      <div><span id="metric-deep">—</span><small>深度阅读</small></div>
+      <div><span id="metric-content">—</span><small>保存正文</small></div>
+      <div><span id="metric-time">—</span><small>有效阅读</small></div>
+    </section>
+
+    <main class="archive-layout">
+      <aside class="context-rail" aria-label="活动概览与站点筛选">
+        <section>
+          <div class="section-heading">
+            <h2>最近 28 天</h2>
+            <span id="active-days">— 活跃日</span>
+          </div>
+          <div id="heatmap" class="heatmap" aria-label="每日浏览热力图"></div>
+          <div class="heat-legend" aria-hidden="true"><span>少</span><i></i><i></i><i></i><i></i><span>多</span></div>
+        </section>
+
+        <section class="domain-section">
+          <div class="section-heading">
+            <h2>关注站点</h2>
+            <button id="clear-domain" class="quiet-button" type="button" hidden>清除</button>
+          </div>
+          <div id="domains" class="domain-list"></div>
+        </section>
+
+        <p class="local-note">这里显示扩展本机保存的原始记录。主题聚类、日报与知识图谱会在连接 Navi 后进入分析层。</p>
+      </aside>
+
+      <section class="record-column" aria-labelledby="records-title">
+        <div class="record-toolbar">
+          <div>
+            <p class="eyebrow">Local Archive</p>
+            <h2 id="records-title">阅读轨迹</h2>
+          </div>
+          <div class="filters">
+            <label class="search-field">
+              <span class="sr-only">搜索标题、域名或 URL</span>
+              <input id="search" type="search" placeholder="搜索标题、域名或 URL" />
+            </label>
+            <label>
+              <span class="sr-only">阅读深度</span>
+              <select id="tier-filter">
+                <option value="">全部深度</option>
+                <option value="deep">深读</option>
+                <option value="scan">浏览</option>
+                <option value="brief">短访</option>
+              </select>
+            </label>
+            <label>
+              <span class="sr-only">时间范围</span>
+              <select id="range-filter">
+                <option value="7">最近 7 天</option>
+                <option value="28" selected>最近 28 天</option>
+                <option value="all">全部记录</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div id="timeline" class="timeline" tabindex="-1"></div>
+      </section>
+
+      <aside id="detail" class="detail-rail" aria-label="访问详情">
+        <div class="detail-empty">
+          <p class="eyebrow">Source Detail</p>
+          <h2>选择一条记录</h2>
+          <p>查看来源、阅读深度、采集范围和本机保存的正文。</p>
+        </div>
+      </aside>
+    </main>
+
+    <template id="empty-template">
+      <div class="empty-state">
+        <p class="eyebrow">No local evidence</p>
+        <h3>还没有符合条件的记录</h3>
+        <p>继续浏览网页，或调整上方筛选条件。</p>
+      </div>
+    </template>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

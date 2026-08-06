@@ -1,6 +1,6 @@
 //! SQLite schema for meta/navi.db
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 6;
 
 pub const MIGRATE_V1: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -113,4 +113,40 @@ CREATE TABLE IF NOT EXISTS ocr_docs (
 
 CREATE INDEX IF NOT EXISTS idx_ocr_docs_session ON ocr_docs(session_id);
 CREATE INDEX IF NOT EXISTS idx_ocr_docs_event_ts ON ocr_docs(event_ts);
+"#;
+
+/// Rebuildable browser visit projection derived from append-only browser events.
+pub const MIGRATE_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS browser_visits (
+  visit_id TEXT PRIMARY KEY NOT NULL,
+  document_id TEXT,
+  url TEXT,
+  opened_at TEXT,
+  document_ready_at TEXT,
+  closed_at TEXT,
+  active_ms INTEGER,
+  visible_ms INTEGER,
+  max_scroll_ratio REAL,
+  close_reason TEXT,
+  extraction_status TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_browser_visits_opened ON browser_visits(opened_at);
+CREATE INDEX IF NOT EXISTS idx_browser_visits_closed ON browser_visits(closed_at);
+"#;
+
+/// Complete the neutral browser visit projection without changing raw events.
+pub const MIGRATE_V6: &str = r#"
+ALTER TABLE browser_visits ADD COLUMN content_id TEXT;
+ALTER TABLE browser_visits ADD COLUMN first_visible_at TEXT;
+ALTER TABLE browser_visits ADD COLUMN last_visible_at TEXT;
+ALTER TABLE browser_visits ADD COLUMN background_ms INTEGER;
+ALTER TABLE browser_visits ADD COLUMN revisit_index INTEGER;
+ALTER TABLE browser_visits ADD COLUMN opener_tab_id INTEGER;
+ALTER TABLE browser_visits ADD COLUMN referrer TEXT;
+ALTER TABLE browser_visits ADD COLUMN transition TEXT;
+ALTER TABLE browser_visits ADD COLUMN snapshot_hashes TEXT NOT NULL DEFAULT '[]';
+
+CREATE INDEX IF NOT EXISTS idx_browser_visits_content ON browser_visits(content_id);
 "#;

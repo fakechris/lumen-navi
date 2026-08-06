@@ -1,39 +1,373 @@
 //! Loopback HTTP control plane for health + OCR search.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::{DateTime, Utc};
 use lumen_api::{
-    ControlRequest, ControlResponse, EventSummary, HealthResponse, OcrSearchHitDto, SourceStatus,
-    API_VERSION,
+    BrowserHealthResponse, BrowserIngestResponse, BrowserPolicyResponse, ControlRequest,
+    ControlResponse, EventSummary, HealthResponse, OcrSearchHitDto, SourceStatus, API_VERSION,
 };
-use lumen_store::{EventStore, SCHEMA_VERSION, SqliteStore};
+use lumen_sources_browser::{
+    validate_batch, BrowserBatch, BrowserIngestPolicy, BROWSER_SCHEMA_VERSION,
+};
+use lumen_store::{
+    ArtifactInput, BlobLimitedAppendOutcome, EventStore, EventWithArtifacts, SqliteStore,
+    SCHEMA_VERSION,
+};
+use lumen_types::SourceKind;
 use serde::Deserialize;
+use serde_json::json;
 use tracing::{info, warn};
 
 #[derive(Clone)]
 pub struct ControlState {
     pub store: Arc<SqliteStore>,
-    pub paused: bool,
+    pub paused: Arc<AtomicBool>,
+    closed_eyes: bool,
+    max_blob_bytes: u64,
+    screen_locked: Arc<dyn Fn() -> bool + Send + Sync>,
     pub sources: Vec<SourceStatus>,
+    pub browser: BrowserRuntimeState,
+}
+
+#[derive(Debug, Clone)]
+pub struct BrowserRuntimeConfig {
+    pub enabled: bool,
+    pub token: String,
+    pub policy: BrowserIngestPolicy,
+}
+
+#[derive(Debug, Default)]
+struct BrowserMetrics {
+    accepted_events: u64,
+    duplicate_events: u64,
+    rejected_batches: u64,
+    last_ingest_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone)]
+pub struct BrowserRuntimeState {
+    enabled: bool,
+    token: String,
+    policy: BrowserIngestPolicy,
+    paused: Arc<AtomicBool>,
+    metrics: Arc<Mutex<BrowserMetrics>>,
+}
+
+impl ControlState {
+    pub fn new(
+        store: Arc<SqliteStore>,
+        paused: bool,
+        closed_eyes: bool,
+        max_blob_bytes: u64,
+        sources: Vec<SourceStatus>,
+        browser: BrowserRuntimeConfig,
+    ) -> Self {
+        Self {
+            store,
+            paused: Arc::new(AtomicBool::new(paused)),
+            closed_eyes,
+            max_blob_bytes,
+            screen_locked: Arc::new(lumen_platform_macos::is_screen_locked),
+            sources,
+            browser: BrowserRuntimeState {
+                enabled: browser.enabled,
+                token: browser.token,
+                policy: browser.policy,
+                paused: Arc::new(AtomicBool::new(false)),
+                metrics: Arc::new(Mutex::new(BrowserMetrics::default())),
+            },
+        }
+    }
 }
 
 pub async fn serve(bind: SocketAddr, state: ControlState) -> anyhow::Result<()> {
-    let app = Router::new()
-        .route("/health", get(get_health))
-        .route("/v1/health", get(get_health))
-        .route("/v1/ocr/search", get(get_ocr_search))
-        .route("/v1/control", post(post_control))
-        .with_state(state);
+    let app = router(state);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     info!(%bind, "control API listening");
     axum::serve(listener, app).await?;
+    Ok(())
+}
+
+pub fn router(state: ControlState) -> Router {
+    Router::new()
+        .route("/health", get(get_health))
+        .route("/v1/health", get(get_health))
+        .route("/v1/ocr/search", get(get_ocr_search))
+        .route("/v1/browser/batches", post(post_browser_batch))
+        .route("/v1/browser/policy", get(get_browser_policy))
+        .route("/v1/browser/export", get(get_browser_export))
+        .route("/v1/control", post(post_control))
+        .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
+        .with_state(state)
+}
+
+async fn get_browser_policy(
+    State(st): State<ControlState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(status) = authorize_browser(&st, &headers) {
+        return status.into_response();
+    }
+    Json(BrowserPolicyResponse {
+        schema_version: BROWSER_SCHEMA_VERSION,
+        capture_allowed: !st.paused.load(Ordering::Relaxed)
+            && !st.browser.paused.load(Ordering::Relaxed)
+            && !st.closed_eyes
+            && !(st.screen_locked)(),
+        content_allow_hosts: st.browser.policy.content_allow_hosts.clone(),
+        excluded_hosts: st.browser.policy.excluded_hosts.clone(),
+        max_batch_size: st.browser.policy.max_batch_size,
+        max_artifact_bytes: st.browser.policy.max_artifact_bytes,
+    })
+    .into_response()
+}
+
+async fn post_browser_batch(
+    State(st): State<ControlState>,
+    headers: HeaderMap,
+    Json(batch): Json<BrowserBatch>,
+) -> impl IntoResponse {
+    if let Err(status) = authorize_browser(&st, &headers) {
+        return status.into_response();
+    }
+    if st.paused.load(Ordering::Relaxed)
+        || st.browser.paused.load(Ordering::Relaxed)
+        || st.closed_eyes
+        || (st.screen_locked)()
+    {
+        return StatusCode::LOCKED.into_response();
+    }
+
+    let validated = match validate_batch(batch, &st.browser.policy) {
+        Ok(value) => value,
+        Err(error) => {
+            if let Ok(mut metrics) = st.browser.metrics.lock() {
+                metrics.rejected_batches += 1;
+            }
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    let validation_rejected_artifacts = validated.rejected_artifacts;
+    let mut artifacts_by_event: HashMap<_, Vec<ArtifactInput>> = HashMap::new();
+    for artifact in validated.artifacts {
+        artifacts_by_event
+            .entry(artifact.event_id)
+            .or_default()
+            .push(ArtifactInput {
+                media_type: artifact.media_type,
+                bytes: artifact.bytes,
+            });
+    }
+    let records: Vec<EventWithArtifacts> = validated
+        .events
+        .into_iter()
+        .map(|event| EventWithArtifacts {
+            artifacts: artifacts_by_event.remove(&event.id).unwrap_or_default(),
+            event,
+        })
+        .collect();
+    let rejected_artifacts = records.iter().map(|record| record.artifacts.len()).sum::<usize>();
+    let fallback_records = records.clone();
+    let (outcome, rejected_artifacts) = match st
+        .store
+        .append_idempotent_with_artifacts_up_to(records, st.max_blob_bytes)
+    {
+        Ok(BlobLimitedAppendOutcome::Appended(value)) => {
+            (value, validation_rejected_artifacts)
+        }
+        Ok(BlobLimitedAppendOutcome::LimitExceeded) => {
+            let metadata_only = fallback_records
+                .into_iter()
+                .map(|mut record| {
+                    if !record.artifacts.is_empty() {
+                        record.artifacts.clear();
+                        if let Some(data) = record
+                            .event
+                            .payload
+                            .get_mut("data")
+                            .and_then(serde_json::Value::as_object_mut)
+                        {
+                            data.insert(
+                                "extraction_status".into(),
+                                json!("retention_blocked"),
+                            );
+                            data.insert("privacy_gate".into(), json!("metadata_only"));
+                        }
+                    }
+                    record
+                })
+                .collect();
+            match st
+                .store
+                .append_idempotent_with_artifacts_up_to(metadata_only, st.max_blob_bytes)
+            {
+                Ok(BlobLimitedAppendOutcome::Appended(value)) => {
+                    (value, validation_rejected_artifacts + rejected_artifacts)
+                }
+                Ok(BlobLimitedAppendOutcome::LimitExceeded) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "metadata-only fallback exceeded blob limit"})),
+                    )
+                        .into_response();
+                }
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": error.to_string()})),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    if let Ok(mut metrics) = st.browser.metrics.lock() {
+        metrics.accepted_events += outcome.accepted as u64;
+        metrics.duplicate_events += outcome.duplicates as u64;
+        metrics.last_ingest_at = Some(Utc::now());
+    }
+    (
+        StatusCode::OK,
+        Json(BrowserIngestResponse {
+            schema_version: BROWSER_SCHEMA_VERSION,
+            accepted: outcome.accepted,
+            duplicates: outcome.duplicates,
+            rejected_artifacts,
+        }),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserExportQuery {
+    #[serde(default)]
+    after: i64,
+    #[serde(default = "default_export_limit")]
+    limit: usize,
+}
+
+fn default_export_limit() -> usize {
+    1_000
+}
+
+async fn get_browser_export(
+    State(st): State<ControlState>,
+    headers: HeaderMap,
+    Query(query): Query<BrowserExportQuery>,
+) -> impl IntoResponse {
+    if let Err(status) = authorize_browser(&st, &headers) {
+        return status.into_response();
+    }
+    let events =
+        match st
+            .store
+            .list_source_after_cursor(&SourceKind::Browser, query.after, query.limit)
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": error.to_string()})),
+                )
+                    .into_response();
+            }
+        };
+    let next_cursor = events.last().map(|item| item.cursor).unwrap_or(query.after);
+    let mut records = Vec::with_capacity(events.len() * 2);
+    for item in events {
+        let source_event_id = item.event.id;
+        let projection = if item.event.kind == "browser.visit_closed.v1" {
+            item.event
+                .session_id
+                .and_then(|visit_id| st.store.get_browser_visit(visit_id).ok().flatten())
+        } else {
+            None
+        };
+        records.push(
+            serde_json::to_string(&json!({
+                "record_type": "event",
+                "cursor": item.cursor,
+                "event": item.event,
+            }))
+            .expect("event serialization"),
+        );
+        if let Some(visit) = projection {
+            records.push(
+                serde_json::to_string(&json!({
+                    "record_type": "visit_projection",
+                    "source_event_id": source_event_id,
+                    "visit": visit,
+                }))
+                .expect("visit projection serialization"),
+            );
+        }
+    }
+    let records_body = records.join("\n");
+    let checksum = blake3::hash(records_body.as_bytes()).to_hex().to_string();
+    let mut lines = Vec::with_capacity(records.len() + 2);
+    lines.push(
+        serde_json::to_string(&json!({
+            "record_type": "export_header",
+            "export_schema_version": 1,
+            "browser_schema_version": BROWSER_SCHEMA_VERSION,
+            "navi_version": env!("CARGO_PKG_VERSION"),
+            "generated_at": Utc::now(),
+            "after": query.after,
+            "record_count": records.len(),
+            "records_checksum": checksum,
+            "checksum_algorithm": "blake3",
+        }))
+        .expect("export header serialization"),
+    );
+    lines.extend(records);
+    lines.push(
+        serde_json::to_string(&json!({
+            "record_type": "export_cursor",
+            "next_cursor": next_cursor,
+        }))
+        .expect("export cursor serialization"),
+    );
+    (
+        [(header::CONTENT_TYPE, "application/x-ndjson")],
+        lines.join("\n") + "\n",
+    )
+        .into_response()
+}
+
+fn authorize_browser(st: &ControlState, headers: &HeaderMap) -> Result<(), StatusCode> {
+    if !st.browser.enabled || st.browser.token.is_empty() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let expected = format!("Bearer {}", st.browser.token);
+    if headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        != Some(expected.as_str())
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     Ok(())
 }
 
@@ -79,8 +413,19 @@ async fn get_ocr_search(
 
 async fn post_control(
     State(st): State<ControlState>,
+    headers: HeaderMap,
     Json(req): Json<ControlRequest>,
 ) -> impl IntoResponse {
+    let controls_browser = matches!(
+        &req,
+        ControlRequest::Pause { source } | ControlRequest::Resume { source }
+            if source.as_deref() == Some("browser")
+    );
+    if controls_browser {
+        if let Err(status) = authorize_browser(&st, &headers) {
+            return status.into_response();
+        }
+    }
     match handle_control(&st, req).await {
         Ok(resp) => {
             let code = match &resp {
@@ -130,8 +475,20 @@ async fn handle_control(
             st.store.wipe_all().await?;
             Ok(ControlResponse::Ack)
         }
-        ControlRequest::Pause { .. } | ControlRequest::Resume { .. } => {
-            // Privacy pause is config-driven in this phase; acknowledge only.
+        ControlRequest::Pause { source } => {
+            if source.as_deref() == Some("browser") {
+                st.browser.paused.store(true, Ordering::Relaxed);
+            } else {
+                st.paused.store(true, Ordering::Relaxed);
+            }
+            Ok(ControlResponse::Ack)
+        }
+        ControlRequest::Resume { source } => {
+            if source.as_deref() == Some("browser") {
+                st.browser.paused.store(false, Ordering::Relaxed);
+            } else {
+                st.paused.store(false, Ordering::Relaxed);
+            }
             Ok(ControlResponse::Ack)
         }
         ControlRequest::Permissions => Ok(ControlResponse::Error {
@@ -143,14 +500,28 @@ async fn handle_control(
 async fn build_health(st: &ControlState) -> Result<HealthResponse, anyhow::Error> {
     let stored = st.store.len().await?;
     let ocr_docs = st.store.ocr_doc_count().unwrap_or(0);
+    let browser_metrics = st
+        .browser
+        .metrics
+        .lock()
+        .map_err(|_| anyhow::anyhow!("browser metrics lock poisoned"))?;
     Ok(HealthResponse {
         api_version: API_VERSION,
         product: "lumen-navi".into(),
         sources: st.sources.clone(),
-        paused: st.paused,
+        paused: st.paused.load(Ordering::Relaxed),
         stored_events: stored,
         ocr_docs,
         schema_version: SCHEMA_VERSION,
+        browser: Some(BrowserHealthResponse {
+            enabled: st.browser.enabled,
+            configured: !st.browser.token.is_empty(),
+            paused: st.browser.paused.load(Ordering::Relaxed),
+            accepted_events: browser_metrics.accepted_events,
+            duplicate_events: browser_metrics.duplicate_events,
+            rejected_batches: browser_metrics.rejected_batches,
+            last_ingest_at: browser_metrics.last_ingest_at,
+        }),
     })
 }
 
@@ -191,4 +562,220 @@ pub fn spawn(bind: &str, state: ControlState) -> Option<tokio::task::JoinHandle<
             warn!(error = %e, "control API stopped");
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use chrono::Utc;
+    use http_body_util::BodyExt;
+    use lumen_sources_browser::{
+        BrowserArtifact, BrowserBatch, BrowserIngestPolicy, BrowserObservation,
+        BROWSER_SCHEMA_VERSION,
+    };
+    use serde_json::json;
+    use tempfile::tempdir;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    use super::{router, BrowserRuntimeConfig, ControlState};
+
+    fn state() -> (tempfile::TempDir, ControlState) {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(lumen_store::SqliteStore::open(dir.path()).unwrap());
+        let state = ControlState::new(
+            store,
+            false,
+            false,
+            1024 * 1024,
+            vec![],
+            BrowserRuntimeConfig {
+                enabled: true,
+                token: "fixture-browser-token".into(),
+                policy: BrowserIngestPolicy::default(),
+            },
+        );
+        (dir, state)
+    }
+
+    fn request_body() -> Vec<u8> {
+        serde_json::to_vec(&BrowserBatch {
+            installation_id: "00000000-0000-4000-8000-000000000001".into(),
+            schema_version: BROWSER_SCHEMA_VERSION,
+            capture_profile_version: "browser-mvp-v1".into(),
+            config_hash: "fixture-config-hash".into(),
+            observations: vec![BrowserObservation {
+                id: Uuid::parse_str("00000000-0000-4000-8000-000000000101").unwrap(),
+                kind: "browser.navigation_committed.v1".into(),
+                ts: Utc::now(),
+                visit_id: Uuid::parse_str("00000000-0000-4000-8000-000000000201").unwrap(),
+                document_id: Some("fixture-document".into()),
+                url: Some("https://example.test/article?token=secret".into()),
+                payload: json!({"transition": "typed"}),
+            }],
+            artifacts: vec![],
+        })
+        .unwrap()
+    }
+
+    fn ingest_request(token: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/v1/browser/batches")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder.body(Body::from(request_body())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn browser_ingest_requires_token_and_is_replay_safe() {
+        let (_dir, state) = state();
+        let app = router(state);
+
+        let unauthorized = app.clone().oneshot(ingest_request(None)).await.unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let unauthorized_pause = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/control")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"op":"pause","source":"browser"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized_pause.status(), StatusCode::UNAUTHORIZED);
+
+        let policy = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/browser/policy")
+                    .header("authorization", "Bearer fixture-browser-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(policy.status(), StatusCode::OK);
+
+        let accepted = app
+            .clone()
+            .oneshot(ingest_request(Some("fixture-browser-token")))
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let accepted_body = accepted.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&accepted_body).unwrap()["accepted"],
+            1
+        );
+
+        let replay = app
+            .clone()
+            .oneshot(ingest_request(Some("fixture-browser-token")))
+            .await
+            .unwrap();
+        let replay_body = replay.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&replay_body).unwrap()["duplicates"],
+            1
+        );
+
+        let export = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/browser/export?after=0&limit=10")
+                    .header("authorization", "Bearer fixture-browser-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(export.status(), StatusCode::OK);
+        let export_body = export.into_body().collect().await.unwrap().to_bytes();
+        let export_text = String::from_utf8(export_body.to_vec()).unwrap();
+        let header: serde_json::Value =
+            serde_json::from_str(export_text.lines().next().unwrap()).unwrap();
+        assert_eq!(header["navi_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(header["checksum_algorithm"], "blake3");
+        assert!(header["records_checksum"].as_str().unwrap().len() >= 64);
+        assert!(export_text.contains("browser.navigation_committed.v1"));
+        assert!(!export_text.contains("secret"));
+        assert!(export_text.contains("export_cursor"));
+    }
+
+    #[tokio::test]
+    async fn closed_eyes_is_a_hard_browser_write_gate() {
+        let (_dir, mut state) = state();
+        state.closed_eyes = true;
+        let response = router(state)
+            .oneshot(ingest_request(Some("fixture-browser-token")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::LOCKED);
+    }
+
+    #[tokio::test]
+    async fn artifact_intake_respects_the_blob_retention_limit() {
+        let (_dir, mut state) = state();
+        state.max_blob_bytes = 1;
+        state.browser.policy.content_allow_hosts = vec!["example.test".into()];
+        let event_id = Uuid::parse_str("00000000-0000-4000-8000-000000000102").unwrap();
+        let body = serde_json::to_vec(&BrowserBatch {
+            installation_id: "00000000-0000-4000-8000-000000000001".into(),
+            schema_version: BROWSER_SCHEMA_VERSION,
+            capture_profile_version: "browser-mvp-v1".into(),
+            config_hash: "fixture-config-hash".into(),
+            observations: vec![BrowserObservation {
+                id: event_id,
+                kind: "browser.document_ready.v1".into(),
+                ts: Utc::now(),
+                visit_id: Uuid::parse_str("00000000-0000-4000-8000-000000000202").unwrap(),
+                document_id: Some("fixture-document".into()),
+                url: Some("https://example.test/article".into()),
+                payload: json!({
+                    "privacy_gate": "allowed",
+                    "extraction_status": "success",
+                    "has_password_input": false,
+                    "has_email_input": false,
+                    "has_contenteditable": false,
+                    "noindex": false
+                }),
+            }],
+            artifacts: vec![BrowserArtifact {
+                event_id,
+                media_type: "text/markdown".into(),
+                body: "too large for retention".into(),
+                content_hash: None,
+            }],
+        })
+        .unwrap();
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/browser/batches")
+                    .header("authorization", "Bearer fixture-browser-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["rejected_artifacts"],
+            1
+        );
+    }
 }

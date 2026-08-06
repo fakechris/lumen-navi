@@ -23,6 +23,7 @@ use lumen_platform_macos::{
 use lumen_process::{
     OcrWorker, OcrWorkerConfig, TranscribeWorker, TranscribeWorkerConfig, JOB_KIND_TRANSCRIBE_AUDIO,
 };
+use lumen_sources_browser::BrowserIngestPolicy;
 use lumen_sources_media::{AudioOrchestrator, CaptureOrchestrator, CapturedBatch};
 use lumen_store::{EventStore, SCHEMA_VERSION, SqliteStore};
 use lumen_types::{SourceEvent, SourceKind, TriggerReason};
@@ -61,6 +62,9 @@ async fn main() -> Result<()> {
         ticks_audio = config.audio.ticks,
         api = config.api.enabled,
         api_bind = %config.api.bind,
+        browser = config.sources.browser,
+        browser_configured = !config.browser.effective_ingest_token().is_empty(),
+        browser_content_hosts = config.browser.content_allow_hosts.len(),
         "config"
     );
 
@@ -217,11 +221,33 @@ async fn main() -> Result<()> {
     let _api_handle = if config.api.enabled {
         control_server::spawn(
             &config.api.bind,
-            control_server::ControlState {
-                store: Arc::clone(&store),
-                paused: config.privacy.paused,
-                sources: vec![screen_status.clone(), audio_status.clone()],
-            },
+            control_server::ControlState::new(
+                Arc::clone(&store),
+                config.privacy.paused,
+                config.privacy.closed_eyes,
+                config.retention.max_blob_mb.saturating_mul(1024 * 1024),
+                vec![
+                    screen_status.clone(),
+                    audio_status.clone(),
+                    SourceStatus {
+                        id: "browser".into(),
+                        enabled: config.sources.browser,
+                        running: config.sources.browser
+                            && !config.browser.effective_ingest_token().is_empty(),
+                        last_error: None,
+                    },
+                ],
+                control_server::BrowserRuntimeConfig {
+                    enabled: config.sources.browser,
+                    token: config.browser.effective_ingest_token(),
+                    policy: BrowserIngestPolicy {
+                        content_allow_hosts: config.browser.content_allow_hosts.clone(),
+                        excluded_hosts: config.browser.excluded_hosts.clone(),
+                        max_batch_size: config.browser.max_batch_size,
+                        max_artifact_bytes: config.browser.max_artifact_bytes,
+                    },
+                },
+            ),
         )
     } else {
         None

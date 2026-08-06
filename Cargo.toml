@@ -7,6 +7,7 @@ members = [
   "crates/lumen-platform-macos",
   "crates/lumen-intake",
   "crates/lumen-sources-media",
+  "crates/lumen-sources-browser",
   "crates/lumen-store",
   "crates/lumen-process",
   "crates/lumen-api",
@@ -20,6 +21,7 @@ default-members = [
   "crates/lumen-platform-macos",
   "crates/lumen-intake",
   "crates/lumen-sources-media",
+  "crates/lumen-sources-browser",
   "crates/lumen-store",
   "crates/lumen-process",
   "crates/lumen-api",
@@ -50,6 +52,7 @@ toml = { version = "0.8", features = ["parse", "display"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
 
 lumen-types = { path = "crates/lumen-types" }
 lumen-config = { path = "crates/lumen-config" }
@@ -63,6 +66,7 @@ lumen-models = { git = "https://github.com/fakechris/lumen-suite.git", rev = "ef
 lumen-transcript = { git = "https://github.com/fakechris/lumen-suite.git", rev = "ef449465d18865d3d819309a64b1e723ae329817" }
 lumen-intake = { path = "crates/lumen-intake" }
 lumen-sources-media = { path = "crates/lumen-sources-media" }
+lumen-sources-browser = { path = "crates/lumen-sources-browser" }
 lumen-store = { path = "crates/lumen-store" }
 lumen-process = { path = "crates/lumen-process" }
 lumen-api = { path = "crates/lumen-api" }

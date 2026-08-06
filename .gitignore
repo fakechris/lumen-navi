@@ -23,6 +23,8 @@
 # Node (extensions later)
 node_modules/
 dist/
+.output/
+.wxt/
 *.log
 
 # ── Agent local instructions (NEVER commit) ──
