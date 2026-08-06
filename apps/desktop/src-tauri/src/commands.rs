@@ -6,13 +6,12 @@ use std::process::{Command, Stdio};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chrono::{DateTime, Utc};
 use lumen_api::{
-    BrowserHealthResponse, EventSummary, HealthResponse, OcrSearchHitDto, SourceStatus,
-    API_VERSION,
+    BrowserHealthResponse, EventSummary, HealthResponse, OcrSearchHitDto, SourceStatus, API_VERSION,
 };
 use lumen_config::Config;
 use lumen_platform::PermissionProbe;
 use lumen_platform_macos::MacPermissions;
-use lumen_store::{EventStore, SCHEMA_VERSION, TimelineQuery};
+use lumen_store::{EventStore, TimelineQuery, SCHEMA_VERSION};
 use lumen_types::event_kind;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -36,6 +35,7 @@ pub struct ConfigSummary {
     pub config_path: String,
     pub screen: bool,
     pub audio: bool,
+    pub browser: bool,
     pub ocr: bool,
     pub asr: bool,
     pub paused: bool,
@@ -62,6 +62,7 @@ pub struct BrowserPairingDto {
 pub struct SourcesUpdate {
     pub screen: Option<bool>,
     pub audio: Option<bool>,
+    pub browser: Option<bool>,
     pub ocr: Option<bool>,
     pub asr: Option<bool>,
     pub paused: Option<bool>,
@@ -237,6 +238,7 @@ pub fn get_config_summary(state: State<'_, AppState>) -> Result<ConfigSummary, S
         config_path: state.config_path.display().to_string(),
         screen: cfg.sources.screen,
         audio: cfg.sources.audio,
+        browser: cfg.sources.browser,
         ocr: cfg.ocr.enabled,
         asr: cfg.asr.enabled,
         paused,
@@ -266,6 +268,7 @@ pub fn enable_browser_pairing(
     let mut cfg = state.load_config().map_err(err)?;
     ensure_browser_pairing(&mut cfg, rotate);
     state.save_config(&cfg).map_err(err)?;
+    reload_local_service(&state, &cfg)?;
     Ok(browser_pairing_dto(&cfg))
 }
 
@@ -273,11 +276,8 @@ fn ensure_browser_pairing(cfg: &mut Config, rotate: bool) {
     cfg.api.enabled = true;
     cfg.sources.browser = true;
     if rotate || cfg.browser.ingest_token.is_empty() {
-        cfg.browser.ingest_token = format!(
-            "{}{}",
-            Uuid::new_v4().simple(),
-            Uuid::new_v4().simple()
-        );
+        cfg.browser.ingest_token =
+            format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     }
 }
 
@@ -371,6 +371,9 @@ pub fn update_sources_config(
     if let Some(v) = update.audio {
         cfg.sources.audio = v;
     }
+    if let Some(v) = update.browser {
+        cfg.sources.browser = v;
+    }
     if let Some(v) = update.ocr {
         cfg.ocr.enabled = v;
     }
@@ -409,8 +412,18 @@ pub fn update_sources_config(
         cfg.asr.fallback_speech = v;
     }
     state.save_config(&cfg).map_err(err)?;
-    // Observe child must be restarted to pick up source flags.
+    reload_local_service(&state, &cfg)?;
     get_config_summary(state)
+}
+
+fn reload_local_service(state: &AppState, cfg: &Config) -> Result<(), String> {
+    observe_stop_inner(state)?;
+    let has_active_source =
+        cfg.sources.screen || cfg.sources.audio || cfg.sources.video || cfg.sources.browser;
+    if has_active_source {
+        observe_start_inner(state)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -427,9 +440,7 @@ pub fn generate_day_summary(
         serde_json::json!({ "day": day, "kind": "day" }),
     );
     let eid = event.id;
-    tauri::async_runtime::block_on(async {
-        state.store.append(vec![event]).await.map_err(err)
-    })?;
+    tauri::async_runtime::block_on(async { state.store.append(vec![event]).await.map_err(err) })?;
     state
         .store
         .insert_derived(eid, "summary.v1", body.clone())
@@ -495,6 +506,7 @@ pub fn set_privacy_paused(state: State<'_, AppState>, paused: bool) -> Result<()
     cfg.privacy.paused = paused;
     state.save_config(&cfg).map_err(err)?;
     *state.paused.lock().map_err(err)? = paused;
+    reload_local_service(&state, &cfg)?;
     Ok(())
 }
 
@@ -568,6 +580,10 @@ pub fn observe_start(state: State<'_, AppState>) -> Result<ObserveStatus, String
 
 #[tauri::command]
 pub fn observe_stop(state: State<'_, AppState>) -> Result<ObserveStatus, String> {
+    observe_stop_inner(&state)
+}
+
+fn observe_stop_inner(state: &AppState) -> Result<ObserveStatus, String> {
     let mut guard = state.observe_child.lock().map_err(err)?;
     if let Some(mut child) = guard.take() {
         let _ = child.kill();
@@ -599,7 +615,10 @@ pub fn get_onboarding(state: State<'_, AppState>) -> Result<OnboardingState, Str
 }
 
 #[tauri::command]
-pub fn set_onboarding_step(state: State<'_, AppState>, step: u32) -> Result<OnboardingState, String> {
+pub fn set_onboarding_step(
+    state: State<'_, AppState>,
+    step: u32,
+) -> Result<OnboardingState, String> {
     {
         let mut shell = state.shell.lock().map_err(err)?;
         shell.onboarding_step = step.min(4);
@@ -660,6 +679,11 @@ pub fn set_launch_observe(state: State<'_, AppState>, enabled: bool) -> Result<(
 #[tauri::command]
 pub fn request_screen_permission() -> Result<bool, String> {
     Ok(lumen_platform_macos::request_screen_recording())
+}
+
+#[tauri::command]
+pub fn request_microphone_permission() -> Result<(), String> {
+    lumen_platform_macos::request_microphone_access().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -739,8 +763,14 @@ mod command_tests {
 
     #[test]
     fn daemon_health_url_accepts_bind_or_url() {
-        assert_eq!(daemon_health_url("127.0.0.1:7420"), "http://127.0.0.1:7420/health");
-        assert_eq!(daemon_health_url("http://127.0.0.1:7420/"), "http://127.0.0.1:7420/health");
+        assert_eq!(
+            daemon_health_url("127.0.0.1:7420"),
+            "http://127.0.0.1:7420/health"
+        );
+        assert_eq!(
+            daemon_health_url("http://127.0.0.1:7420/"),
+            "http://127.0.0.1:7420/health"
+        );
     }
 
     #[test]
@@ -778,9 +808,8 @@ fn resolve_daemon_binary() -> Option<PathBuf> {
     candidates.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target/release/lumen-daemon"),
     );
-    candidates.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target/debug/lumen-daemon"),
-    );
+    candidates
+        .push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target/debug/lumen-daemon"));
 
     for c in &candidates {
         if c.is_file() {
@@ -974,11 +1003,7 @@ pub fn assistant_run(
 
 #[tauri::command]
 pub fn assistant_cancel(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let handle = state
-        .assistant_tasks
-        .lock()
-        .map_err(err)?
-        .remove(&id);
+    let handle = state.assistant_tasks.lock().map_err(err)?.remove(&id);
     if let Some(h) = handle {
         h.abort();
     }

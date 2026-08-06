@@ -15,7 +15,7 @@ const STEPS = [
   },
   {
     title: "屏幕录制",
-    body: "Observe 需要 Screen Recording 权限才能截取屏幕。点击下方按钮打开系统设置并授权本应用。",
+    body: "屏幕通道需要 Screen Recording 权限才能截取屏幕。点击下方按钮请求权限并打开系统设置。",
     kind: "screen" as const,
   },
   {
@@ -29,7 +29,7 @@ const STEPS = [
   },
   {
     title: "准备就绪",
-    body: "可以随时在概览页开始/停止 Observe。也可在设置里重新打开本引导。",
+    body: "可以随时在概览页分别开关屏幕、麦克风与浏览器通道。配置会自动生效。",
   },
 ];
 
@@ -156,6 +156,34 @@ export function Onboarding({
     }
   }
 
+  async function requestScreen() {
+    setBusy(true);
+    try {
+      await api.requestScreenPermission();
+      await api.openPrivacySettings("screen");
+      setPerms(await api.getPermissions());
+      setError(null);
+    } catch (e) {
+      setError(`请求屏幕录制权限失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function requestMicrophone() {
+    setBusy(true);
+    try {
+      await api.requestMicrophonePermission();
+      await api.openPrivacySettings("microphone");
+      setPerms(await api.getPermissions());
+      setError(null);
+    } catch (e) {
+      setError(`请求麦克风权限失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="onboard-backdrop">
       <div className="onboard-card" style={{ width: "min(560px, 100%)" }}>
@@ -173,10 +201,7 @@ export function Onboarding({
             <button
               className="btn primary"
               disabled={busy}
-              onClick={() => {
-                void api.requestScreenPermission();
-                void api.openPrivacySettings("screen");
-              }}
+              onClick={() => void requestScreen()}
             >
               请求 / 打开屏幕权限
             </button>
@@ -190,11 +215,11 @@ export function Onboarding({
                 Mic {perms?.microphone ?? "…"}
               </span>
               <button
-                className="btn"
+                className="btn primary"
                 disabled={busy}
-                onClick={() => void api.openPrivacySettings("microphone")}
+                onClick={() => void requestMicrophone()}
               >
-                麦克风设置
+                请求 / 打开麦克风权限
               </button>
               <button
                 className="btn"
@@ -431,7 +456,7 @@ export function Onboarding({
               checked={launch}
               onChange={(e) => setLaunch(e.target.checked)}
             />
-            以后启动应用时自动开始 Observe
+            以后启动应用时运行本地服务（仅采集已开启的通道）
           </label>
         )}
 
@@ -465,14 +490,9 @@ export function Onboarding({
                 下一步
               </button>
             ) : (
-              <>
-                <button className="btn" disabled={busy} onClick={() => void finish(false)}>
-                  完成
-                </button>
-                <button className="btn primary" disabled={busy} onClick={() => void finish(true)}>
-                  完成并开始 Observe
-                </button>
-              </>
+              <button className="btn primary" disabled={busy} onClick={() => void finish(false)}>
+                完成
+              </button>
             )}
           </div>
         </div>

@@ -62,6 +62,7 @@ export interface ConfigSummary {
   config_path: string;
   screen: boolean;
   audio: boolean;
+  browser: boolean;
   ocr: boolean;
   asr: boolean;
   paused: boolean;
@@ -79,6 +80,7 @@ export interface ConfigSummary {
 export interface SourcesUpdate {
   screen?: boolean;
   audio?: boolean;
+  browser?: boolean;
   ocr?: boolean;
   asr?: boolean;
   paused?: boolean;

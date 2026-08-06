@@ -12,6 +12,10 @@ use lumen_types::{event_kind, SourceEvent, SourceKind};
 use serde_json::json;
 use uuid::Uuid;
 
+const VOICE_FRAME_MS: u64 = 20;
+const MIN_VOICE_RUN_MS: u64 = 160;
+const MAX_VOICE_ZERO_CROSSING_RATE: f32 = 0.35;
+
 /// One audio chunk ready to persist.
 #[derive(Debug, Clone)]
 pub struct CapturedAudio {
@@ -91,14 +95,13 @@ impl AudioOrchestrator {
         // Enforce max chunk duration (trim tail if needed).
         let chunk = clamp_chunk_duration(chunk, self.config.max_chunk_ms);
 
-        let voice = chunk.rms >= self.config.vad_rms_threshold;
+        let voice = is_probable_voice(&chunk, self.config.vad_rms_threshold);
         let now = Instant::now();
 
         if self.config.is_session_mode() {
             // Force-close long sessions before accepting more voice.
             if let (Some(started), Some(_)) = (self.session_started, self.session_id) {
-                if now.duration_since(started)
-                    >= Duration::from_millis(self.config.max_session_ms)
+                if now.duration_since(started) >= Duration::from_millis(self.config.max_session_ms)
                 {
                     self.close_session();
                 }
@@ -126,8 +129,7 @@ impl AudioOrchestrator {
                 self.open_session();
             } else if let Some(started) = self.session_started {
                 // continuous: roll session id every max_session_ms for grouping hygiene
-                if now.duration_since(started)
-                    >= Duration::from_millis(self.config.max_session_ms)
+                if now.duration_since(started) >= Duration::from_millis(self.config.max_session_ms)
                 {
                     self.close_session();
                     self.open_session();
@@ -195,16 +197,14 @@ impl AudioOrchestrator {
     fn apply_idle_session_timeouts(&mut self) {
         let now = Instant::now();
         if let Some(started) = self.session_started {
-            if now.duration_since(started) >= Duration::from_millis(self.config.max_session_ms)
-            {
+            if now.duration_since(started) >= Duration::from_millis(self.config.max_session_ms) {
                 self.close_session();
                 return;
             }
         }
         if self.config.is_session_mode() {
             if let Some(last) = self.last_voice {
-                if now.duration_since(last)
-                    >= Duration::from_millis(self.config.session_silence_ms)
+                if now.duration_since(last) >= Duration::from_millis(self.config.session_silence_ms)
                 {
                     self.close_session();
                 }
@@ -246,6 +246,51 @@ fn clamp_chunk_duration(mut chunk: PcmChunk, max_ms: u64) -> PcmChunk {
         chunk.peak = peak;
     }
     chunk
+}
+
+/// Cheap pre-persist speech gate. RMS alone classifies low-level fan noise and
+/// short microphone impulses as voice, creating WAVs that are useless to both
+/// people and ASR. Require a sustained active region and reject noise-like
+/// zero-crossing rates before allocating or storing WAV bytes.
+fn is_probable_voice(chunk: &PcmChunk, rms_threshold: f32) -> bool {
+    if chunk.sample_rate == 0
+        || chunk.samples.is_empty()
+        || !chunk.rms.is_finite()
+        || chunk.rms < rms_threshold
+    {
+        return false;
+    }
+
+    let frame_samples = ((u64::from(chunk.sample_rate) * VOICE_FRAME_MS) / 1_000).max(1) as usize;
+    let active_threshold = (rms_threshold * 2.0).max(rms_threshold + 0.005);
+    let mut longest_active_frames = 0usize;
+    let mut active_frames = 0usize;
+
+    for frame in chunk.samples.chunks(frame_samples) {
+        let (frame_rms, _) = lumen_platform::pcm_rms_peak(frame);
+        if frame_rms >= active_threshold {
+            active_frames += 1;
+            longest_active_frames = longest_active_frames.max(active_frames);
+        } else {
+            active_frames = 0;
+        }
+    }
+
+    // Short test/probe chunks should still be classifiable. Product capture
+    // chunks are normally 3 seconds and require the full sustained run.
+    let required_run_ms = MIN_VOICE_RUN_MS.min((chunk.duration_ms / 2).max(60));
+    let sustained = longest_active_frames as u64 * VOICE_FRAME_MS >= required_run_ms;
+    if !sustained {
+        return false;
+    }
+
+    let crossings = chunk
+        .samples
+        .windows(2)
+        .filter(|pair| (pair[0] < 0 && pair[1] >= 0) || (pair[0] >= 0 && pair[1] < 0))
+        .count();
+    let zero_crossing_rate = crossings as f32 / (chunk.samples.len() - 1).max(1) as f32;
+    zero_crossing_rate <= MAX_VOICE_ZERO_CROSSING_RATE
 }
 
 /// Build a synthetic mono tone chunk (tests).
@@ -360,9 +405,85 @@ mod tests {
             },
             PrivacyConfig::default(),
         );
-        assert!(orch
-            .on_chunk(synthetic_silence_chunk(16_000, 50))
-            .is_none());
+        assert!(orch.on_chunk(synthetic_silence_chunk(16_000, 50)).is_none());
         assert_eq!(orch.stats().chunks_dropped_silent, 1);
+    }
+
+    #[test]
+    fn drops_low_level_impulses_before_wav_persist() {
+        let sample_rate = 16_000;
+        let mut samples = vec![0i16; sample_rate as usize * 3];
+        for start_ms in [620usize, 890, 1_160, 1_430] {
+            let start = start_ms * sample_rate as usize / 1_000;
+            let end = start + 120 * sample_rate as usize / 1_000;
+            for (offset, sample) in samples[start..end].iter_mut().enumerate() {
+                let t = offset as f32 / sample_rate as f32;
+                let value = (t * 240.0 * std::f32::consts::TAU).sin() * 0.08;
+                *sample = (value * 32767.0) as i16;
+            }
+        }
+        let chunk = PcmChunk::from_mono_i16(samples, sample_rate, "impulse-noise");
+        assert!(
+            chunk.rms >= 0.01,
+            "fixture must defeat the old RMS-only gate"
+        );
+
+        let mut orch = AudioOrchestrator::new(
+            AudioConfig {
+                mode: "continuous".into(),
+                drop_silent_chunks: true,
+                vad_rms_threshold: 0.01,
+                ..AudioConfig::default()
+            },
+            PrivacyConfig::default(),
+        );
+        assert!(orch.on_chunk(chunk).is_none());
+        assert_eq!(orch.stats().chunks_dropped_silent, 1);
+    }
+
+    #[test]
+    fn drops_sustained_white_noise_before_wav_persist() {
+        let sample_rate = 16_000;
+        let mut state = 0x1234_5678u32;
+        let samples = (0..sample_rate as usize * 3)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let unit = ((state >> 16) as f32 / u16::MAX as f32) * 2.0 - 1.0;
+                (unit * 0.08 * 32767.0) as i16
+            })
+            .collect();
+        let chunk = PcmChunk::from_mono_i16(samples, sample_rate, "white-noise");
+        assert!(
+            chunk.rms >= 0.01,
+            "fixture must defeat the old RMS-only gate"
+        );
+
+        let mut orch = AudioOrchestrator::new(
+            AudioConfig {
+                mode: "continuous".into(),
+                drop_silent_chunks: true,
+                vad_rms_threshold: 0.01,
+                ..AudioConfig::default()
+            },
+            PrivacyConfig::default(),
+        );
+        assert!(orch.on_chunk(chunk).is_none());
+        assert_eq!(orch.stats().chunks_dropped_silent, 1);
+    }
+
+    #[test]
+    fn keeps_a_sustained_quiet_voice_like_signal() {
+        let sample_rate = 16_000;
+        let mut samples = vec![0i16; sample_rate as usize * 3];
+        let start = 900 * sample_rate as usize / 1_000;
+        let end = start + 400 * sample_rate as usize / 1_000;
+        for (offset, sample) in samples[start..end].iter_mut().enumerate() {
+            let t = offset as f32 / sample_rate as f32;
+            let envelope = (offset as f32 / (end - start) as f32 * std::f32::consts::PI).sin();
+            let value = (t * 180.0 * std::f32::consts::TAU).sin() * envelope * 0.08;
+            *sample = (value * 32767.0) as i16;
+        }
+        let chunk = PcmChunk::from_mono_i16(samples, sample_rate, "quiet-voice");
+        assert!(is_probable_voice(&chunk, 0.01));
     }
 }
