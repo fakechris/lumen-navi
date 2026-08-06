@@ -5,6 +5,7 @@ import type {
   AssistantAction,
   AssistantConfig,
   AssistantUpdate,
+  BrowserPairing,
   ConfigSummary,
   EventSummary,
   Health,
@@ -41,6 +42,9 @@ export const api = {
     invoke<string | null>("get_event_image_data_url", { eventId }),
   reindexSearch: () => invoke<number>("reindex_search"),
   getConfigSummary: () => invoke<ConfigSummary>("get_config_summary"),
+  getBrowserPairing: () => invoke<BrowserPairing>("get_browser_pairing"),
+  enableBrowserPairing: (rotate = false) =>
+    invoke<BrowserPairing>("enable_browser_pairing", { rotate }),
   updateSourcesConfig: (update: SourcesUpdate) =>
     invoke<ConfigSummary>("update_sources_config", { update }),
   generateDaySummary: (day?: string) =>
@@ -61,6 +65,7 @@ export const api = {
   setLaunchObserve: (enabled: boolean) =>
     invoke<void>("set_launch_observe", { enabled }),
   requestScreenPermission: () => invoke<boolean>("request_screen_permission"),
+  requestMicrophonePermission: () => invoke<void>("request_microphone_permission"),
   openPrivacySettings: (kind: string) =>
     invoke<void>("open_privacy_settings", { kind }),
   checkAsrModelStatus: () => invoke<AsrModelStatus>("check_asr_model_status"),

@@ -1,4 +1,4 @@
-//! System tray for background Observe control.
+//! System tray for the local background service.
 
 use tauri::{
     image::Image,
@@ -9,21 +9,22 @@ use tauri::{
 
 pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Lumen Navi", true, None::<&str>)?;
-    let start = MenuItem::with_id(app, "observe_start", "Start Observe", true, None::<&str>)?;
-    let stop = MenuItem::with_id(app, "observe_stop", "Stop Observe", true, None::<&str>)?;
-    let pause = MenuItem::with_id(app, "toggle_pause", "Toggle Privacy Pause", true, None::<&str>)?;
+    let pause = MenuItem::with_id(
+        app,
+        "toggle_pause",
+        "Toggle Privacy Pause",
+        true,
+        None::<&str>,
+    )?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
 
-    let menu = Menu::with_items(app, &[&show, &sep, &start, &stop, &pause, &sep, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &sep, &pause, &sep, &quit])?;
 
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .or_else(|| {
-            // Fallback: load png from resources if default missing.
-            Image::from_bytes(include_bytes!("../icons/32x32.png")).ok()
-        });
+    let icon = app.default_window_icon().cloned().or_else(|| {
+        // Fallback: load png from resources if default missing.
+        Image::from_bytes(include_bytes!("../icons/32x32.png")).ok()
+    });
 
     let mut builder = TrayIconBuilder::new()
         .menu(&menu)
@@ -31,12 +32,6 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .on_menu_event(|app, event| {
             match event.id.as_ref() {
                 "show" => show_main(app),
-                "observe_start" => {
-                    let _ = app.emit("tray://observe-start", ());
-                }
-                "observe_stop" => {
-                    let _ = app.emit("tray://observe-stop", ());
-                }
                 "toggle_pause" => {
                     let _ = app.emit("tray://toggle-pause", ());
                 }

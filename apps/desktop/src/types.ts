@@ -15,6 +15,24 @@ export interface Health {
   stored_events: number;
   ocr_docs: number;
   schema_version: number;
+  browser: BrowserHealth | null;
+}
+
+export interface BrowserHealth {
+  enabled: boolean;
+  configured: boolean;
+  paused: boolean;
+  accepted_events: number;
+  duplicate_events: number;
+  rejected_batches: number;
+  last_ingest_at: string | null;
+}
+
+export interface BrowserPairing {
+  enabled: boolean;
+  configured: boolean;
+  endpoint: string;
+  token: string;
 }
 
 export interface Permissions {
@@ -44,6 +62,7 @@ export interface ConfigSummary {
   config_path: string;
   screen: boolean;
   audio: boolean;
+  browser: boolean;
   ocr: boolean;
   asr: boolean;
   paused: boolean;
@@ -61,6 +80,7 @@ export interface ConfigSummary {
 export interface SourcesUpdate {
   screen?: boolean;
   audio?: boolean;
+  browser?: boolean;
   ocr?: boolean;
   asr?: boolean;
   paused?: boolean;

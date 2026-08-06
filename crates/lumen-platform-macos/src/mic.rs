@@ -125,12 +125,7 @@ fn open_mic(cfg: MicOpenConfig) -> Result<MicStream, PlatformError> {
     Ok(MicStream::new(rx, stop, join))
 }
 
-type BuiltStream = (
-    cpal::Stream,
-    Arc<Mutex<Vec<i16>>>,
-    u32,
-    u16,
-);
+type BuiltStream = (cpal::Stream, Arc<Mutex<Vec<i16>>>, u32, u16);
 
 fn try_build_stream(
     device: &cpal::Device,
@@ -204,10 +199,7 @@ fn try_build_stream(
                     if epoch_cb.load(Ordering::Relaxed) != my_epoch {
                         return;
                     }
-                    append_samples(
-                        &buf_cb,
-                        data.iter().map(|s| (*s as i32 - 32768) as i16),
-                    );
+                    append_samples(&buf_cb, data.iter().map(|s| (*s as i32 - 32768) as i16));
                     flush_if_ready(
                         &buf_cb,
                         samples_per_chunk,
@@ -302,4 +294,16 @@ pub fn default_input_available() -> bool {
     host.default_input_device()
         .and_then(|d| d.default_input_config().ok())
         .is_some()
+}
+
+/// Open a short-lived real input stream so macOS registers and prompts for
+/// microphone access. Enumerating devices alone does not create a TCC entry.
+pub fn request_microphone_access() -> Result<(), PlatformError> {
+    let stream = MacMicCapturer.open(MicOpenConfig {
+        chunk_ms: 200,
+        ..MicOpenConfig::default()
+    })?;
+    let _ = stream.recv_timeout(Duration::from_millis(250));
+    stream.stop();
+    Ok(())
 }

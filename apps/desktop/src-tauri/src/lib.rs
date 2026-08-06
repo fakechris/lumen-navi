@@ -14,8 +14,8 @@ use tracing_subscriber::EnvFilter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "lumen_navi_desktop=info,warn".into());
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| "lumen_navi_desktop=info,warn".into());
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 
     let state = AppState::open().expect("open app state");
@@ -64,6 +64,8 @@ pub fn run() {
             commands::get_event_image_data_url,
             commands::reindex_search,
             commands::get_config_summary,
+            commands::get_browser_pairing,
+            commands::enable_browser_pairing,
             commands::update_sources_config,
             commands::generate_day_summary,
             commands::export_session_transcript,
@@ -79,6 +81,7 @@ pub fn run() {
             commands::reopen_onboarding,
             commands::set_launch_observe,
             commands::request_screen_permission,
+            commands::request_microphone_permission,
             commands::open_privacy_settings,
             asr_models::check_asr_model_status,
             asr_models::list_local_asr_models,

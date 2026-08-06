@@ -20,12 +20,14 @@ import type {
   AsrModelStatus,
   AssistantConfig,
   AssistantUpdate,
+  BrowserPairing,
   ConfigSummary,
   Health,
   ObserveStatus,
   OnboardingState,
   Permissions,
   SearchHit,
+  SourcesUpdate,
   TabId,
   TimelineItem,
 } from "./types";
@@ -44,7 +46,7 @@ const NAV: {
     icon: "layers",
     eyebrow: "Overview",
     title: "概览",
-    blurb: "权限 · 摄入状态 · 一键开始 Observe",
+    blurb: "权限 · 数据通道 · 本地服务状态",
   },
   {
     id: "search",
@@ -108,10 +110,11 @@ export default function App() {
   const [asrModels, setAsrModels] = useState<AsrModelStatus | null>(null);
   const [assistant, setAssistant] = useState<AssistantConfig | null>(null);
   const [assistantKey, setAssistantKey] = useState("");
+  const [browserPairing, setBrowserPairing] = useState<BrowserPairing | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [h, p, c, o, ob, models, asst] = await Promise.all([
+      const [h, p, c, o, ob, models, asst, browser] = await Promise.all([
         api.getHealth(),
         api.getPermissions(),
         api.getConfigSummary(),
@@ -119,6 +122,7 @@ export default function App() {
         api.getOnboarding(),
         api.checkAsrModelStatus(),
         api.assistantGetConfig(),
+        api.getBrowserPairing(),
       ]);
       setHealth(h);
       setPerms(p);
@@ -127,11 +131,86 @@ export default function App() {
       setOnboarding(ob);
       setAsrModels(models);
       setAssistant(asst);
+      setBrowserPairing(browser);
       setError(null);
     } catch (e) {
       setError(String(e));
     }
   }, []);
+
+  async function openPrivacySettings(kind: string) {
+    try {
+      await api.openPrivacySettings(kind);
+      setStatusNote("已打开 macOS 隐私与安全设置。授权后 Navi 会自动刷新状态。");
+      setError(null);
+    } catch (e) {
+      setError(`无法打开系统设置：${String(e)}`);
+    }
+  }
+
+  async function requestAccessibility() {
+    setBusy(true);
+    try {
+      const granted = await api.requestAccessibilityPermission();
+      if (!granted) await api.openPrivacySettings("accessibility");
+      setAssistant(await api.assistantGetConfig());
+      setStatusNote(
+        granted
+          ? "辅助功能权限已生效。"
+          : "请在系统设置中允许 Lumen Navi；返回后状态会自动刷新。",
+      );
+      setError(null);
+    } catch (e) {
+      setError(`请求辅助功能权限失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function requestScreenRecording() {
+    setBusy(true);
+    try {
+      await api.requestScreenPermission();
+      await api.openPrivacySettings("screen");
+      setStatusNote("请在屏幕录制列表中允许 Lumen Navi；更改后可能需要重启 App。");
+      setError(null);
+    } catch (e) {
+      setError(`请求屏幕录制权限失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function requestMicrophone() {
+    setBusy(true);
+    try {
+      await api.requestMicrophonePermission();
+      await api.openPrivacySettings("microphone");
+      setStatusNote("请在麦克风列表中允许 Lumen Navi；授权状态会自动刷新。");
+      setError(null);
+    } catch (e) {
+      setError(`请求麦克风权限失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function configureBrowserPairing(rotate = false) {
+    setBusy(true);
+    try {
+      const pairing = await api.enableBrowserPairing(rotate);
+      setBrowserPairing(pairing);
+      setStatusNote(
+        "浏览通道已启用，本地服务已自动重载。把下方地址和 token 填入扩展即可联动。",
+      );
+      await refresh();
+      setError(null);
+    } catch (e) {
+      setError(`配置浏览器联动失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     void refresh();
@@ -175,17 +254,15 @@ export default function App() {
 
   const nav = NAV.find((n) => n.id === tab)!;
 
-  const startObserve = useCallback(async () => {
+  const updateRuntimeConfig = useCallback(async (
+    update: SourcesUpdate,
+    note: string,
+  ) => {
     setBusy(true);
-    setStatusNote(null);
     try {
-      const o = await api.observeStart();
-      setObserve(o);
-      setStatusNote(
-        o.running
-          ? `Observe 已启动${o.pid ? ` (pid ${o.pid})` : ""}`
-          : "未能启动",
-      );
+      const next = await api.updateSourcesConfig(update);
+      setCfg(next);
+      setStatusNote(note);
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -194,19 +271,20 @@ export default function App() {
     }
   }, [refresh]);
 
-  const stopObserve = useCallback(async () => {
-    setBusy(true);
-    try {
-      const o = await api.observeStop();
-      setObserve(o);
-      setStatusNote("Observe 已停止");
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
+  const updateChannel = useCallback(async (
+    channel: "screen" | "audio" | "browser",
+    enabled: boolean,
+    label: string,
+  ) => {
+    if (channel === "browser" && enabled && !browserPairing?.configured) {
+      await configureBrowserPairing(false);
+      return;
     }
-  }, [refresh]);
+    await updateRuntimeConfig(
+      { [channel]: enabled },
+      `${label}通道已${enabled ? "开启" : "关闭"}，本地服务已自动重载。`,
+    );
+  }, [browserPairing?.configured, updateRuntimeConfig]);
 
   const togglePause = useCallback(async () => {
     if (!cfg) return;
@@ -234,22 +312,15 @@ export default function App() {
     }
   }, []);
 
-  // Tray menu → UI actions
   useEffect(() => {
-    const unsubs: Array<() => void> = [];
-    void listen("tray://observe-start", () => {
-      void startObserve();
-    }).then((u) => unsubs.push(u));
-    void listen("tray://observe-stop", () => {
-      void stopObserve();
-    }).then((u) => unsubs.push(u));
+    let unlisten: (() => void) | undefined;
     void listen("tray://toggle-pause", () => {
       void togglePause();
-    }).then((u) => unsubs.push(u));
-    return () => {
-      unsubs.forEach((u) => u());
-    };
-  }, [startObserve, stopObserve, togglePause]);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, [togglePause]);
 
   async function onSearch() {
     setBusy(true);
@@ -338,15 +409,6 @@ export default function App() {
           {tab === "overview" && (
             <div className="stack">
               <div className="row">
-                {observe?.running ? (
-                  <Button variant="danger" icon="close" disabled={busy} onClick={() => void stopObserve()}>
-                    停止 Observe
-                  </Button>
-                ) : (
-                  <Button variant="primary" icon="play" disabled={busy} onClick={() => void startObserve()}>
-                    开始 Observe
-                  </Button>
-                )}
                 <Button variant="secondary" disabled={busy} onClick={() => void refresh()}>
                   刷新
                 </Button>
@@ -355,9 +417,51 @@ export default function App() {
                 </Button>
                 <StatusDot
                   status={observe?.running ? "running" : "idle"}
-                  label={observe?.running ? "运行中" : "已停止"}
+                  label={
+                    observe?.running
+                      ? "本地服务运行中"
+                      : cfg?.screen || cfg?.audio || cfg?.browser
+                        ? "本地服务未运行"
+                        : "所有通道已关闭"
+                  }
                 />
                 {cfg?.paused && <Pill tone="warn">已暂停</Pill>}
+              </div>
+
+              <div className="card mt">
+                <h3>数据通道</h3>
+                <p className="meta mt">
+                  各通道独立控制；修改后会自动重载本地服务，不需要手动开始或停止。
+                </p>
+                <div className="row mt">
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={!!cfg?.screen}
+                      disabled={busy}
+                      onChange={(e) => void updateChannel("screen", e.target.checked, "屏幕")}
+                    />
+                    屏幕截图
+                  </label>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={!!cfg?.audio}
+                      disabled={busy}
+                      onChange={(e) => void updateChannel("audio", e.target.checked, "麦克风")}
+                    />
+                    麦克风音频
+                  </label>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={!!cfg?.browser}
+                      disabled={busy}
+                      onChange={(e) => void updateChannel("browser", e.target.checked, "浏览器")}
+                    />
+                    浏览器行为
+                  </label>
+                </div>
               </div>
 
               <div className="grid mt">
@@ -392,6 +496,24 @@ export default function App() {
                   value={cfg?.audio ? (cfg.asr ? "转写" : "仅摄入") : "关闭"}
                   hint={`${cfg?.asr_engine ?? "sensevoice"} · ${cfg?.asr_locale ?? ""} · ${cfg?.audio_chunk_ms ?? "—"}ms`}
                 />
+                <StatCard
+                  label="Browser"
+                  tone={health?.browser?.last_ingest_at ? "accent" : "default"}
+                  value={
+                    health?.browser?.last_ingest_at
+                      ? "已联动"
+                      : health?.browser?.configured
+                        ? "等待扩展"
+                        : browserPairing?.configured
+                          ? "等待本地服务"
+                          : "未配对"
+                  }
+                  hint={
+                    health?.browser
+                      ? `${health.browser.accepted_events} events · ${fmtTime(health.browser.last_ingest_at)}`
+                      : "扩展仍可独立采集"
+                  }
+                />
               </div>
 
               <div className="card mt">
@@ -414,6 +536,20 @@ export default function App() {
                   首次截屏或录音时，系统会请求授权。语音识别权限用于本机转写，不做听写注入。
                   听写产品见 Lumen ASR。
                 </p>
+                <div className="row mt">
+                  <Button variant="secondary" disabled={busy} onClick={() => void requestScreenRecording()}>
+                    请求屏幕录制
+                  </Button>
+                  <Button variant="secondary" disabled={busy} onClick={() => void requestMicrophone()}>
+                    请求麦克风
+                  </Button>
+                  <Button variant="secondary" disabled={busy} onClick={() => void requestAccessibility()}>
+                    请求辅助功能
+                  </Button>
+                  <Button variant="secondary" disabled={busy} onClick={() => void openPrivacySettings("accessibility")}>
+                    辅助功能设置
+                  </Button>
+                </div>
               </div>
             </div>
           )}
@@ -520,7 +656,7 @@ export default function App() {
               <div className="list">
                 {timeline.length === 0 && (
                   <EmptyState icon="transcript" title="暂无事件">
-                    启动 Observe 后，屏幕与音频会持续写入这里。
+                    开启屏幕、麦克风或浏览器通道后，数据会持续写入这里。
                   </EmptyState>
                 )}
                 {timeline.map((e) => (
@@ -574,12 +710,76 @@ export default function App() {
                 </div>
               </div>
               <div className="card">
+                <h3>Browser extension</h3>
+                <div className="stack mt">
+                  <StatusDot
+                    status={health?.browser?.last_ingest_at ? "done" : "idle"}
+                    label={
+                      health?.browser?.last_ingest_at
+                        ? `已联动 · 最后同步 ${fmtTime(health.browser.last_ingest_at)}`
+                        : health?.browser?.configured
+                          ? "Navi 已就绪，等待扩展发送数据"
+                          : browserPairing?.configured
+                            ? "配对已配置；开启浏览器通道后提供同步 API"
+                            : "扩展尚未与 Navi 配对"
+                    }
+                  />
+                  <p className="meta">
+                    扩展始终先写自己的 IndexedDB。只有填入下方地址与 token 后，Navi
+                    才能看到同步事件；未配对时 App 无法读取扩展内部数据。
+                  </p>
+                  {browserPairing?.configured && (
+                    <>
+                      <label className="field">
+                        <span className="meta">本地地址</span>
+                        <input className="input mono" readOnly value={browserPairing.endpoint} />
+                      </label>
+                      <label className="field">
+                        <span className="meta">配对 token</span>
+                        <input className="input mono" type="password" readOnly value={browserPairing.token} />
+                      </label>
+                      <div className="meta">
+                        已接收 {health?.browser?.accepted_events ?? 0} · 重复 {health?.browser?.duplicate_events ?? 0} · 拒绝批次 {health?.browser?.rejected_batches ?? 0}
+                      </div>
+                    </>
+                  )}
+                  <div className="row">
+                    <Button variant="primary" disabled={busy} onClick={() => void configureBrowserPairing(false)}>
+                      {browserPairing?.configured ? "重新应用配置" : "启用并生成 token"}
+                    </Button>
+                    {browserPairing?.configured && (
+                      <>
+                        <Button
+                          variant="secondary"
+                          disabled={busy}
+                          onClick={() => {
+                            void navigator.clipboard
+                              .writeText(`${browserPairing.endpoint}\n${browserPairing.token}`)
+                              .then(() => setStatusNote("地址和 token 已复制。"))
+                              .catch((err) => setError(`复制失败：${String(err)}`));
+                          }}
+                        >
+                          复制连接信息
+                        </Button>
+                        <Button variant="secondary" disabled={busy} onClick={() => void configureBrowserPairing(true)}>
+                          轮换 token
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                  <p className="meta">
+                    在扩展弹窗展开“连接 Lumen Navi（可选）”，分别粘贴地址和 token，保存后会立即尝试同步。
+                  </p>
+                </div>
+              </div>
+              <div className="card">
                 <h3>Sources / engines</h3>
                 <div className="stack mt">
                   {(
                     [
                       ["screen", "屏幕截图", cfg?.screen],
                       ["audio", "麦克风", cfg?.audio],
+                      ["browser", "浏览器行为", cfg?.browser],
                       ["ocr", "OCR", cfg?.ocr],
                       ["asr", "ASR 转写", cfg?.asr],
                     ] as const
@@ -590,17 +790,14 @@ export default function App() {
                         checked={!!val}
                         onChange={(e) => {
                           const checked = e.target.checked;
-                          setBusy(true);
-                          void api
-                            .updateSourcesConfig({ [key]: checked })
-                            .then((c) => {
-                              setCfg(c);
-                              setStatusNote(
-                                "配置已写入。若 Observe 正在运行，请 Stop 再 Start 以生效。",
-                              );
-                            })
-                            .catch((err) => setError(String(err)))
-                            .finally(() => setBusy(false));
+                          if (key === "screen" || key === "audio" || key === "browser") {
+                            void updateChannel(key, checked, label);
+                          } else {
+                            void updateRuntimeConfig(
+                              { [key]: checked },
+                              `${label}已${checked ? "开启" : "关闭"}，本地服务已自动重载。`,
+                            );
+                          }
                         }}
                       />
                       {label}
@@ -638,17 +835,10 @@ export default function App() {
                       value={cfg?.asr_engine ?? "sensevoice"}
                       onChange={(e) => {
                         const asr_engine = e.target.value;
-                        setBusy(true);
-                        void api
-                          .updateSourcesConfig({ asr_engine })
-                          .then((c) => {
-                            setCfg(c);
-                            setStatusNote(
-                              `ASR 引擎 → ${asr_engine}。Stop/Start Observe 后生效。`,
-                            );
-                          })
-                          .catch((err) => setError(String(err)))
-                          .finally(() => setBusy(false));
+                          void updateRuntimeConfig(
+                            { asr_engine },
+                            `ASR 引擎 → ${asr_engine}，本地服务已自动重载。`,
+                          );
                       }}
                     >
                       <option value="sensevoice">SenseVoice（本地 sherpa，默认）</option>
@@ -962,23 +1152,13 @@ export default function App() {
                           <button
                             className="btn"
                             disabled={busy}
-                            onClick={() => {
-                              setBusy(true);
-                              void api
-                                .requestAccessibilityPermission()
-                                .then(() => api.assistantGetConfig())
-                                .then((a) => setAssistant(a))
-                                .catch((err) => setError(String(err)))
-                                .finally(() => setBusy(false));
-                            }}
+                            onClick={() => void requestAccessibility()}
                           >
                             请求权限
                           </button>
                           <button
                             className="btn"
-                            onClick={() =>
-                              void api.openPrivacySettings("accessibility")
-                            }
+                            onClick={() => void openPrivacySettings("accessibility")}
                           >
                             打开系统设置
                           </button>
@@ -1104,7 +1284,7 @@ export default function App() {
                         .then(() => refresh());
                     }}
                   />
-                  启动应用时自动开始 Observe
+                  启动应用时运行本地服务（仅采集已开启的通道）
                 </label>
                 <div className="row mt">
                   <button
@@ -1124,7 +1304,7 @@ export default function App() {
                   </a>
                   （独立产品，不合并 monorepo）
                 </p>
-                <p className="meta">菜单栏托盘可 Start/Stop Observe、暂停与退出。</p>
+                <p className="meta">菜单栏托盘可打开 Navi、切换隐私暂停与退出。</p>
               </div>
             </div>
           )}
