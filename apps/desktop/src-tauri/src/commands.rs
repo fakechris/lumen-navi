@@ -9,8 +9,7 @@ use lumen_api::{
     BrowserHealthResponse, EventSummary, HealthResponse, OcrSearchHitDto, SourceStatus, API_VERSION,
 };
 use lumen_config::Config;
-use lumen_platform::PermissionProbe;
-use lumen_platform_macos::MacPermissions;
+use lumen_platform_macos::{accessibility_permission_state, microphone_permission_state};
 use lumen_store::{EventStore, TimelineQuery, SCHEMA_VERSION};
 use lumen_types::event_kind;
 use serde::{Deserialize, Serialize};
@@ -169,13 +168,22 @@ fn daemon_health_url(api_bind: &str) -> String {
 }
 
 #[tauri::command]
-pub async fn get_permissions() -> Result<PermissionsDto, String> {
-    let p = MacPermissions;
-    let st = p.status().await.map_err(|e| e.to_string())?;
+pub async fn get_permissions(state: State<'_, AppState>) -> Result<PermissionsDto, String> {
+    let microphone = microphone_permission_state();
+    let accessibility = accessibility_permission_state();
+    let cua = state.cua.clone();
+    let screen_recording = tauri::async_runtime::spawn_blocking(move || cua.status())
+        .await
+        .map_err(err)?
+        .map(|status| format!("{:?}", status.screen_recording))
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "Lumen Cua permission status unavailable");
+            "Unavailable".into()
+        });
     Ok(PermissionsDto {
-        screen_recording: format!("{:?}", st.screen_recording),
-        microphone: format!("{:?}", st.microphone),
-        accessibility: format!("{:?}", st.accessibility),
+        screen_recording,
+        microphone: format!("{microphone:?}"),
+        accessibility: format!("{accessibility:?}"),
     })
 }
 
@@ -579,12 +587,31 @@ pub fn observe_start_inner(state: &AppState) -> Result<ObserveStatus, String> {
     let stdout = std::fs::File::create(log_path.join("daemon.stdout.log")).map_err(err)?;
     let stderr = std::fs::File::create(log_path.join("daemon.stderr.log")).map_err(err)?;
 
-    let child = Command::new(&daemon)
+    let cua_ready = if cfg.sources.screen {
+        match state.cua.ensure_running() {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(%error, "screen channel unavailable; starting other Observe channels");
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    let mut daemon_command = Command::new(&daemon);
+    daemon_command
         .current_dir(&state.data_dir)
         .env("LUMEN_NAVI_CONFIG", state.config_path.display().to_string())
         .stdin(Stdio::null())
         .stdout(stdout)
-        .stderr(stderr)
+        .stderr(stderr);
+    if cua_ready {
+        daemon_command
+            .env("LUMEN_CUA_SOCKET", state.cua.socket_path())
+            .env("LUMEN_CUA_TOKEN_FILE", state.cua.token_file());
+    }
+    let child = daemon_command
         .spawn()
         .map_err(|e| format!("spawn lumen-daemon: {e}"))?;
 
@@ -701,8 +728,11 @@ pub fn set_launch_observe(state: State<'_, AppState>, enabled: bool) -> Result<(
 }
 
 #[tauri::command]
-pub fn request_screen_permission() -> Result<bool, String> {
-    Ok(lumen_platform_macos::request_screen_recording())
+pub async fn request_screen_permission(state: State<'_, AppState>) -> Result<bool, String> {
+    let cua = state.cua.clone();
+    tauri::async_runtime::spawn_blocking(move || cua.request_screen_permission())
+        .await
+        .map_err(|error| format!("Lumen Cua permission task failed: {error}"))?
 }
 
 #[tauri::command]

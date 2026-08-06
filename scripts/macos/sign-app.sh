@@ -17,51 +17,55 @@ fi
 
 IDENTITY="$("$ROOT/scripts/macos/resolve-identity.sh")"
 ENTITLEMENTS="${LUMEN_CODESIGN_ENTITLEMENTS:-$ROOT/scripts/macos/entitlements.dev.plist}"
+if [[ "$IDENTITY" == "-" ]]; then
+  echo "ERROR: Lumen Cua requires a certificate-backed identity; refusing ad-hoc fallback." >&2
+  echo "Run scripts/macos/ensure-local-identity.sh, then trust Lumen Local Codesign." >&2
+  exit 1
+fi
 
 xattr -cr "$APP" 2>/dev/null || true
 
-ARGS=(--force --deep --sign "$IDENTITY" --timestamp=none)
-
+SIGN_OPTIONS=(--force --timestamp=none)
 if [[ "${LUMEN_CODESIGN_HARDENED:-0}" == "1" ]]; then
-  ARGS+=(--options runtime)
-fi
-if [[ -f "$ENTITLEMENTS" ]]; then
-  ARGS+=(--entitlements "$ENTITLEMENTS")
+  SIGN_OPTIONS+=(--options runtime)
 fi
 
 echo "Signing: $APP"
-if [[ "$IDENTITY" == "-" ]]; then
-  echo "  identity: ad-hoc (-)"
-  echo "  WARN: ad-hoc changes cdhash every rebuild → Screen/Accessibility often need re-grant."
-  echo "  Fix: trust \"Lumen Local Codesign\" in Keychain Access, or renew free Apple Development."
-else
-  echo "  identity: $IDENTITY"
-fi
+echo "  identity: $IDENTITY"
+
+sign_all() {
+  local identity="$1"
+  local cua_app="$APP/Contents/Resources/helpers/Lumen Cua.app"
+  local cua_binary="$cua_app/Contents/MacOS/lumen-cua"
+  local daemon="$APP/Contents/MacOS/lumen-daemon"
+
+  # Nested code has its own identity and entitlement boundary. Sign from the
+  # inside out; applying Navi's entitlements to Lumen Cua would blur TCC ownership.
+  if [[ -x "$cua_binary" ]]; then
+    codesign "${SIGN_OPTIONS[@]}" --sign "$identity" "$cua_binary"
+    codesign "${SIGN_OPTIONS[@]}" --sign "$identity" "$cua_app"
+  fi
+  if [[ -x "$daemon" ]]; then
+    codesign "${SIGN_OPTIONS[@]}" --sign "$identity" "$daemon"
+  fi
+
+  local outer_args=("${SIGN_OPTIONS[@]}" --sign "$identity")
+  if [[ -f "$ENTITLEMENTS" ]]; then
+    outer_args+=(--entitlements "$ENTITLEMENTS")
+  fi
+  codesign "${outer_args[@]}" "$APP"
+}
 
 # codesign can hang on keychain UI — fail fast if possible
-if ! codesign "${ARGS[@]}" "$APP"; then
+if ! sign_all "$IDENTITY"; then
   echo "ERROR: codesign failed for identity: $IDENTITY" >&2
-  if [[ "$IDENTITY" != "-" ]]; then
-    echo "Retrying ad-hoc so the app at least launches…" >&2
-    codesign --force --deep --sign - --timestamp=none "$APP"
-    IDENTITY="-"
-  else
-    exit 1
-  fi
+  exit 1
 fi
 
 echo "Verify:"
-if codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tail -8; then
-  :
-else
-  echo "WARN: strict verify failed (common for ad-hoc); app may still run locally." >&2
-fi
+codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tail -8
 codesign -dv --verbose=2 "$APP" 2>&1 | grep -iE "Authority|Signature|TeamIdentifier|Identifier|Format|flags=" || true
 
-if [[ "$IDENTITY" != "-" ]]; then
-  REQ="$(codesign -d -r- "$APP" 2>&1 | grep 'designated =>' || true)"
-  echo "Requirement: $REQ"
-  echo "OK: signed with stable identity (TCC should survive rebuilds)."
-else
-  echo "OK: ad-hoc signed. Prefer stable identity for daily work — see docs/MACOS_LOCAL_SIGNING.md"
-fi
+REQ="$(codesign -d -r- "$APP" 2>&1 | grep 'designated =>' || true)"
+echo "Requirement: $REQ"
+echo "OK: signed with stable identity (TCC should survive rebuilds)."

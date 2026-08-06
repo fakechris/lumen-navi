@@ -1,8 +1,8 @@
 # macOS local signing (no paid Apple Developer Program)
 
-> Daily development loop on one machine. Public/CI builds stay **ad-hoc**
-> (`signingIdentity: "-"` in `tauri.conf.json`) — see
-> [MACOS_RELEASE_NOTES.md](./MACOS_RELEASE_NOTES.md). A stable local identity
+> Daily development loop on one machine. Public/CI builds use a Developer ID
+> identity and notarization — see [MACOS_RELEASE_NOTES.md](./MACOS_RELEASE_NOTES.md).
+> A stable local identity
 > keeps macOS TCC permissions (Screen Recording, Accessibility, Microphone)
 > alive across rebuilds; ad-hoc breaks them every rebuild because each
 > re-sign mints a new cdhash.
@@ -16,7 +16,9 @@
 
 ## Identity resolution
 
-`scripts/macos/resolve-identity.sh` picks, in order:
+`tauri.conf.json` defaults to `Lumen Local Codesign`; CI overrides it with a
+Developer ID identity imported from release secrets. `scripts/macos/resolve-identity.sh`
+picks, in order:
 
 1. `$LUMEN_CODESIGN_IDENTITY` (explicit override)
 2. **Lumen Local Codesign** — self-signed cert, shared with other Lumen apps
@@ -33,6 +35,7 @@ scripts/macos/ensure-local-identity.sh
 
 # build a DMG signed with the stable identity
 scripts/macos/prepare-daemon-binary.sh aarch64-apple-darwin
+scripts/macos/prepare-cua-app.sh aarch64-apple-darwin
 cd apps/desktop
 APPLE_SIGNING_IDENTITY="$(../../scripts/macos/resolve-identity.sh)" \
   npm run tauri -- build --target aarch64-apple-darwin --bundles dmg
@@ -41,8 +44,8 @@ APPLE_SIGNING_IDENTITY="$(../../scripts/macos/resolve-identity.sh)" \
 scripts/macos/sign-app.sh
 ```
 
-`tauri.conf.json` keeps `"signingIdentity": "-"` so CI/release DMGs need no
-certificate; the env var only overrides local builds. Verify any build with:
+`tauri.conf.json` defaults to the stable local identity; the env var overrides
+it for Apple Development or Developer ID builds. Verify any build with:
 
 ```bash
 codesign -dv --verbose=2 "target/aarch64-apple-darwin/release/bundle/macos/Lumen Navi.app" 2>&1 | grep Authority

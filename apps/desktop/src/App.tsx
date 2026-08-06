@@ -239,7 +239,7 @@ export default function App() {
       } else {
         await api.openPrivacySettings("screen");
         setStatusNote(
-          "系统尚未允许屏幕录制。请在列表中开启 Lumen Navi；未授权时不会再保存只有壁纸的错误截图。",
+          "系统尚未允许屏幕录制。请在列表中开启 Lumen Cua；未授权时不会保存受限截图。",
         );
       }
       setPerms(await api.getPermissions());
@@ -616,8 +616,8 @@ export default function App() {
                   />
                 </div>
                 <p className="meta mt">
-                  首次截屏或录音时，系统会请求授权。语音识别权限用于本机转写，不做听写注入。
-                  听写产品见 Lumen ASR。
+                  屏幕录制由共享的 Lumen Cua 请求授权；麦克风与辅助功能仍属于 Lumen Navi。
+                  语音识别权限用于本机转写，不做听写注入。
                 </p>
                 <div className="row mt">
                   <Button variant="secondary" disabled={busy} onClick={() => void requestScreenRecording()}>

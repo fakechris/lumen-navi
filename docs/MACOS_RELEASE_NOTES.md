@@ -9,10 +9,7 @@
 
 ### 首次打开
 
-本构建为 **ad-hoc 签名**（未做 Apple Developer ID 公证）。首次启动可能被 macOS 拦截：
-
-1. 打开「系统设置 → 隐私与安全性」
-2. 找到被拦截的 Lumen Navi，点击「仍要打开」
+发布构建使用 **Developer ID 签名并公证**。如果 macOS 仍阻止启动，请先确认安装包来自本仓库发布页且校验值一致，不要绕过来源不明应用的 Gatekeeper 提示。
 
 请只从本仓库的 [GitHub Releases](https://github.com/fakechris/lumen-navi/releases) 下载，并用 `SHA256SUMS.txt` 校验：
 
@@ -30,12 +27,12 @@ grep 'x64\.dmg$' SHA256SUMS.txt | shasum -a 256 --check
 
 | 权限 | 用途 |
 |------|------|
-| 屏幕录制 | 截图 Observe |
+| 屏幕录制（Lumen Cua） | 截图 Observe |
 | 麦克风 | 音频 chunk |
 | 语音识别 | 本地转写（Observe ASR） |
 
 ### 说明
 
-- 应用内嵌 `lumen-daemon`（采集 + OCR + ASR 工人进程）。
+- 应用内嵌 `Lumen Cua.app`（屏幕权限与捕获）和 `lumen-daemon`（策略、存储、OCR、ASR）。
 - 数据默认：`~/Library/Application Support/LumenNavi/`
 - **听写/热键注入** 请用独立产品 [Lumen ASR](https://github.com/fakechris/lumen-asr)，与本仓库无关。

@@ -60,13 +60,44 @@ jobs:
         run: npm ci
         working-directory: apps/desktop
 
-      - name: Prepare bundled lumen-daemon
+      - name: Import Developer ID signing identity
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          : "${MACOS_CERTIFICATE:?MACOS_CERTIFICATE secret is required}"
+          : "${MACOS_CERTIFICATE_PASSWORD:?MACOS_CERTIFICATE_PASSWORD secret is required}"
+          : "${KEYCHAIN_PASSWORD:?KEYCHAIN_PASSWORD secret is required}"
+          certificate_path="$RUNNER_TEMP/lumen-release.p12"
+          keychain_path="$RUNNER_TEMP/lumen-release.keychain-db"
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security list-keychain -d user -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+          identity="$(security find-identity -v -p codesigning "$keychain_path" | awk -F '"' 'NR == 1 { print $2 }')"
+          test -n "$identity"
+          printf 'APPLE_SIGNING_IDENTITY=%s\n' "$identity" >> "$GITHUB_ENV"
+
+      - name: Prepare bundled helpers
         run: |
           chmod +x scripts/macos/*.sh scripts/release/*.mjs
           scripts/macos/prepare-daemon-binary.sh "${{ matrix.target }}"
+          scripts/macos/prepare-cua-app.sh "${{ matrix.target }}"
 
-      - name: Build ad-hoc signed DMG
-        run: npm run tauri -- build --target "${{ matrix.target }}" --bundles dmg
+      - name: Build signed and notarized DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          : "${APPLE_ID:?APPLE_ID secret is required}"
+          : "${APPLE_PASSWORD:?APPLE_PASSWORD secret is required}"
+          : "${APPLE_TEAM_ID:?APPLE_TEAM_ID secret is required}"
+          npm run tauri -- build --target "${{ matrix.target }}" --bundles dmg
         working-directory: apps/desktop
 
       - name: Verify and name release asset

@@ -19,6 +19,7 @@ chrono = { workspace = true }
 lumen-api = { workspace = true }
 lumen-asr-engine = { workspace = true }
 lumen-config = { workspace = true }
+lumen-cua = { workspace = true }
 lumen-models = { workspace = true }
 lumen-intake = { workspace = true }
 lumen-platform = { workspace = true }

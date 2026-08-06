@@ -20,8 +20,8 @@ pub use lock::{is_screen_locked, MacScreenLock};
 pub use mic::{default_input_available, MacMicCapturer};
 pub use ocr::{default_ocr_languages, MacVisionOcr};
 pub use permissions::{
-    request_microphone_access, request_screen_recording, screen_recording_access_granted,
-    MacPermissions,
+    accessibility_permission_state, microphone_permission_state, request_microphone_access,
+    request_screen_recording, screen_recording_access_granted, MacPermissions,
 };
 pub use selection::{
     accessibility_trusted, focused_element_pid, focused_selection, maybe_selection, mouse_location,

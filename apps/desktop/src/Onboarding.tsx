@@ -165,7 +165,7 @@ export function Onboarding({
       setError(
         granted
           ? null
-          : "屏幕录制权限尚未允许，请在系统列表中开启 Lumen Navi。未授权时不会保存受限截图。",
+          : "屏幕录制权限尚未允许，请在系统列表中开启 Lumen Cua。未授权时不会保存受限截图。",
       );
     } catch (e) {
       setError(`请求屏幕录制权限失败：${String(e)}`);

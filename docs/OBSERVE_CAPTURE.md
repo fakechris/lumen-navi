@@ -21,7 +21,7 @@ OCR is a **later process step** (S4). Capture never waits on OCR.
 4. Privacy gates are hard stops — lock / closed-eyes / pause never write.  
 5. Backpressure drops work, does not hang — bounded queue + metrics.  
 6. Sessions group work — open on activity, close on idle.  
-7. Observe does **not** depend on cua-driver (Act plane only, optional later).  
+7. The first-party **Lumen Cua** app owns macOS screen permission and capture calls; the daemon owns policy and persistence.
 8. Fail soft — permission/locked degrade; daemon keeps running.
 
 ---
@@ -37,7 +37,7 @@ FocusPoll + IntervalTick
         │
  VisualProbe (1/N gray distance)   [skip for force triggers]
         │
- FullCapture (all|main displays) → JPEG/PNG
+ Lumen Cua IPC → FullCapture (all|main displays) → JPEG/PNG
         │
  SessionManager
         │
@@ -97,7 +97,7 @@ Not full Timeline L2/L3 — only grouping for later OCR/timeline.
 1. Global pause  
 2. closed_eyes  
 3. screen locked  
-4. missing Screen Recording → request + degrade  
+4. missing Lumen Cua Screen Recording → request through the helper + degrade
 
 ---
 
@@ -133,7 +133,7 @@ closed_eyes = false
 - PII redaction  
 - Timeline semantic layers  
 - System audio / video  
-- cua-driver Act integration  
+- Input automation / computer-use actions
 
 ---
 

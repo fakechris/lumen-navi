@@ -195,10 +195,12 @@ Implemented by `lumen_store::SqliteStore` + `BlobStore` (Phase S1).
 
 ### Screen capture (Phase S2)
 
-- Port: `ScreenCapturer` / `MacScreenCapturer` (`CGDisplayCreateImage` → PNG)
+- Port: `ScreenCapturer` / `CuaCaptureAdapter`; the signed `Lumen Cua.app`
+  owns the screen TCC identity and executes the CoreGraphics capture call.
 - Adapter: `lumen_sources_media::ScreenSource::capture_tick` (interval + `pixel_hash` dedup)
 - Payload kind: `screenshot.v1` with frontmost app metadata
-- **Not** cua-driver — observe plane only; Act plane remains optional/later
+- The helper returns frames only; the Navi daemon remains the sole owner of
+  privacy policy, sessions, SQLite/blob persistence, and OCR jobs.
 
 ### Jobs & derived
 

@@ -3,6 +3,7 @@
 mod asr_models;
 mod assistant;
 mod commands;
+mod cua;
 mod selection_popup;
 mod shell;
 mod state;

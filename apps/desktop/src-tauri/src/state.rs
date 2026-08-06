@@ -9,11 +9,13 @@ use anyhow::{Context, Result};
 use lumen_config::Config;
 use lumen_store::SqliteStore;
 
+use crate::cua::CuaController;
 use crate::shell::{self, ShellConfig};
 
 pub struct AppState {
     pub data_dir: PathBuf,
     pub config_path: PathBuf,
+    pub cua: CuaController,
     pub store: SqliteStore,
     pub paused: Mutex<bool>,
     pub shell: Mutex<ShellConfig>,
@@ -31,6 +33,7 @@ impl AppState {
             .with_context(|| format!("create data_dir {}", data_dir.display()))?;
         let _ = std::fs::create_dir_all(data_dir.join("logs"));
         let config_path = data_dir.join("navi.toml");
+        let cua = CuaController::open()?;
         let config = load_or_write_config(&config_path, &data_dir)?;
         let shell_cfg = shell::load_shell(&data_dir)?;
         let store = SqliteStore::open(&config.data_dir)
@@ -38,6 +41,7 @@ impl AppState {
         Ok(Self {
             data_dir: config.data_dir.clone(),
             config_path,
+            cua,
             store,
             paused: Mutex::new(config.privacy.paused),
             shell: Mutex::new(shell_cfg),

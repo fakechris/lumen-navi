@@ -15,10 +15,11 @@ use lumen_asr_engine::{
     AsrRequest, AsrResult, EngineBuildConfig, EngineKind,
 };
 use lumen_config::{AsrConfig, AudioConfig, Config, PrivacyConfig};
-use lumen_platform::{MicCapturer, MicOpenConfig, OcrEngine, PermissionProbe, PlatformError};
+use lumen_cua::{CuaCaptureAdapter, CuaClient};
+use lumen_platform::{MicCapturer, MicOpenConfig, OcrEngine, PlatformError};
 use lumen_platform_macos::{
-    MacDisplays, MacFrontmost, MacMicCapturer, MacPermissions, MacScreenCapturer, MacScreenLock,
-    MacSpeechAsr, MacVisionOcr,
+    microphone_permission_state, MacFrontmost, MacMicCapturer, MacScreenLock, MacSpeechAsr,
+    MacVisionOcr,
 };
 use lumen_process::{
     OcrWorker, OcrWorkerConfig, TranscribeWorker, TranscribeWorkerConfig, JOB_KIND_TRANSCRIBE_AUDIO,
@@ -31,6 +32,15 @@ use serde_json::json;
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
+
+const CUA_SOCKET_ENV: &str = "LUMEN_CUA_SOCKET";
+const CUA_TOKEN_FILE_ENV: &str = "LUMEN_CUA_TOKEN_FILE";
+
+fn cua_client_from_env() -> Option<CuaClient> {
+    let socket = std::env::var_os(CUA_SOCKET_ENV)?;
+    let token_file = std::env::var_os(CUA_TOKEN_FILE_ENV)?;
+    Some(CuaClient::new(socket, token_file))
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -99,14 +109,34 @@ async fn main() -> Result<()> {
         )])
         .await?;
 
-    let perms = MacPermissions;
-    let status = perms.status().await?;
-    info!(
-        screen = ?status.screen_recording,
-        mic = ?status.microphone,
-        "permissions"
-    );
-    let screen_ready = config.sources.screen && status.can_capture_screen();
+    info!(mic = ?microphone_permission_state(), "permissions");
+    let cua_client = cua_client_from_env();
+    let (screen_ready, screen_error) = if config.sources.screen {
+        match cua_client.as_ref() {
+            Some(client) => {
+                let client = client.clone();
+                match tokio::task::spawn_blocking(move || client.status()).await {
+                    Ok(Ok(status))
+                        if status.screen_recording == lumen_platform::PermissionState::Granted =>
+                    {
+                        (true, None)
+                    }
+                    Ok(Ok(_)) => (
+                        false,
+                        Some("Screen Recording permission is required for Lumen Cua".into()),
+                    ),
+                    Ok(Err(error)) => (false, Some(error.to_string())),
+                    Err(error) => (
+                        false,
+                        Some(format!("Lumen Cua status task failed: {error}")),
+                    ),
+                }
+            }
+            None => (false, Some("Lumen Cua connection was not provided".into())),
+        }
+    } else {
+        (false, None)
+    };
 
     // --- OCR worker ---
     let (ocr_cancel_tx, ocr_cancel_rx) = watch::channel(false);
@@ -204,11 +234,7 @@ async fn main() -> Result<()> {
         id: "screen".into(),
         enabled: config.sources.screen,
         running: false,
-        last_error: if config.sources.screen && !screen_ready {
-            Some("Screen Recording permission is required; restricted frames are not saved".into())
-        } else {
-            None
-        },
+        last_error: screen_error,
     };
     let mut audio_status = SourceStatus {
         id: "audio".into(),
@@ -275,9 +301,12 @@ async fn main() -> Result<()> {
         || (config.sources.audio && config.audio.ticks == 0);
 
     if screen_ready {
+        let capture = CuaCaptureAdapter::new(
+            cua_client.expect("screen_ready requires an initialized Lumen Cua client"),
+        );
         let mut orch = CaptureOrchestrator::new(
-            Arc::new(MacDisplays),
-            Arc::new(MacScreenCapturer),
+            Arc::new(capture.clone()),
+            Arc::new(capture),
             Arc::new(MacFrontmost),
             Arc::new(MacScreenLock),
             config.capture.clone(),

@@ -5,6 +5,7 @@ members = [
   "crates/lumen-config",
   "crates/lumen-platform",
   "crates/lumen-platform-macos",
+  "crates/lumen-cua",
   "crates/lumen-intake",
   "crates/lumen-sources-media",
   "crates/lumen-sources-browser",
@@ -58,6 +59,7 @@ lumen-types = { path = "crates/lumen-types" }
 lumen-config = { path = "crates/lumen-config" }
 lumen-platform = { path = "crates/lumen-platform" }
 lumen-platform-macos = { path = "crates/lumen-platform-macos" }
+lumen-cua = { path = "crates/lumen-cua" }
 # Shared Lumen product-cluster crates (lumen-suite). `cloud` enables the
 # OpenAI-compatible HTTP engine navi has always shipped. Keep all lumen-suite
 # deps on a single rev.

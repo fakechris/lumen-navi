@@ -586,7 +586,7 @@ mod tests {
     fn state() -> (tempfile::TempDir, ControlState) {
         let dir = tempdir().unwrap();
         let store = Arc::new(lumen_store::SqliteStore::open(dir.path()).unwrap());
-        let state = ControlState::new(
+        let mut state = ControlState::new(
             store,
             false,
             false,
@@ -598,6 +598,8 @@ mod tests {
                 policy: BrowserIngestPolicy::default(),
             },
         );
+        // Unit tests must not depend on whether the host Mac happens to be locked.
+        state.screen_locked = Arc::new(|| false);
         (dir, state)
     }
 
