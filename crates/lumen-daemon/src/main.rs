@@ -17,8 +17,8 @@ use lumen_asr_engine::{
 use lumen_config::{AsrConfig, AudioConfig, Config, PrivacyConfig};
 use lumen_platform::{MicCapturer, MicOpenConfig, OcrEngine, PermissionProbe, PlatformError};
 use lumen_platform_macos::{
-    request_screen_recording, MacDisplays, MacFrontmost, MacMicCapturer, MacPermissions,
-    MacScreenCapturer, MacScreenLock, MacSpeechAsr, MacVisionOcr,
+    MacDisplays, MacFrontmost, MacMicCapturer, MacPermissions, MacScreenCapturer, MacScreenLock,
+    MacSpeechAsr, MacVisionOcr,
 };
 use lumen_process::{
     OcrWorker, OcrWorkerConfig, TranscribeWorker, TranscribeWorkerConfig, JOB_KIND_TRANSCRIBE_AUDIO,
@@ -100,17 +100,13 @@ async fn main() -> Result<()> {
         .await?;
 
     let perms = MacPermissions;
-    let mut status = perms.status().await?;
+    let status = perms.status().await?;
     info!(
         screen = ?status.screen_recording,
         mic = ?status.microphone,
         "permissions"
     );
-    if config.sources.screen && !status.can_capture_screen() {
-        let _ = request_screen_recording();
-        status = perms.status().await?;
-        info!(screen = ?status.screen_recording, "after screen request");
-    }
+    let screen_ready = config.sources.screen && status.can_capture_screen();
 
     // --- OCR worker ---
     let (ocr_cancel_tx, ocr_cancel_rx) = watch::channel(false);
@@ -208,7 +204,11 @@ async fn main() -> Result<()> {
         id: "screen".into(),
         enabled: config.sources.screen,
         running: false,
-        last_error: None,
+        last_error: if config.sources.screen && !screen_ready {
+            Some("Screen Recording permission is required; restricted frames are not saved".into())
+        } else {
+            None
+        },
     };
     let mut audio_status = SourceStatus {
         id: "audio".into(),
@@ -271,10 +271,10 @@ async fn main() -> Result<()> {
     };
 
     let mut ran_long_loop = false;
-    let expect_long = (config.sources.screen && config.capture.screen_ticks == 0)
+    let expect_long = (screen_ready && config.capture.screen_ticks == 0)
         || (config.sources.audio && config.audio.ticks == 0);
 
-    if config.sources.screen {
+    if screen_ready {
         let mut orch = CaptureOrchestrator::new(
             Arc::new(MacDisplays),
             Arc::new(MacScreenCapturer),
@@ -526,7 +526,7 @@ async fn main() -> Result<()> {
         info!("Ctrl+C");
     } else if config.api.enabled
         && !expect_long
-        && !config.sources.screen
+        && !screen_ready
         && !config.sources.audio
     {
         info!(

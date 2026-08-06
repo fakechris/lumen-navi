@@ -62,6 +62,7 @@ pub fn run() {
             commands::list_events,
             commands::list_timeline,
             commands::get_event_image_data_url,
+            commands::get_event_media_data_url,
             commands::reindex_search,
             commands::get_config_summary,
             commands::get_browser_pairing,
