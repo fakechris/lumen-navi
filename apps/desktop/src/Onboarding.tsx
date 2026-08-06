@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
 import type {
@@ -51,6 +51,7 @@ export function Onboarding({
   const [customPath, setCustomPath] = useState("");
   const [dlMsg, setDlMsg] = useState("");
   const [dlPct, setDlPct] = useState<number | null>(null);
+  const screenPermissionPending = useRef(false);
 
   const refreshAsr = useCallback(async () => {
     try {
@@ -65,6 +66,24 @@ export function Onboarding({
   useEffect(() => {
     void api.getPermissions().then(setPerms).catch(() => {});
   }, [step]);
+
+  useEffect(() => {
+    const refreshPendingScreenPermission = async () => {
+      if (!screenPermissionPending.current) return;
+      try {
+        const granted = await api.refreshScreenPermission();
+        setPerms(await api.getPermissions());
+        if (granted) {
+          screenPermissionPending.current = false;
+          setError(null);
+        }
+      } catch (e) {
+        setError(`刷新屏幕录制权限失败：${String(e)}`);
+      }
+    };
+    window.addEventListener("focus", refreshPendingScreenPermission);
+    return () => window.removeEventListener("focus", refreshPendingScreenPermission);
+  }, []);
 
   useEffect(() => {
     if (step === 3) void refreshAsr();
@@ -160,6 +179,7 @@ export function Onboarding({
     setBusy(true);
     try {
       const granted = await api.requestScreenPermission();
+      screenPermissionPending.current = !granted;
       if (!granted) await api.openPrivacySettings("screen");
       setPerms(await api.getPermissions());
       setError(

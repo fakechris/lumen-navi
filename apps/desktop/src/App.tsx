@@ -173,6 +173,7 @@ export default function App() {
   const [assistant, setAssistant] = useState<AssistantConfig | null>(null);
   const [assistantKey, setAssistantKey] = useState("");
   const [browserPairing, setBrowserPairing] = useState<BrowserPairing | null>(null);
+  const screenPermissionPending = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -234,9 +235,11 @@ export default function App() {
     try {
       const granted = await api.requestScreenPermission();
       if (granted) {
+        screenPermissionPending.current = false;
         await api.updateSourcesConfig({ screen: cfg?.screen ?? true });
         setStatusNote("屏幕录制权限已生效；采集服务已重载。");
       } else {
+        screenPermissionPending.current = true;
         await api.openPrivacySettings("screen");
         setStatusNote(
           "系统尚未允许屏幕录制。请在列表中开启 Lumen Cua；未授权时不会保存受限截图。",
@@ -291,6 +294,26 @@ export default function App() {
     const t = setInterval(() => void refresh(), 4000);
     return () => clearInterval(t);
   }, [refresh]);
+
+  useEffect(() => {
+    const refreshPendingScreenPermission = async () => {
+      if (!screenPermissionPending.current) return;
+      try {
+        const granted = await api.refreshScreenPermission();
+        setPerms(await api.getPermissions());
+        if (!granted) return;
+        screenPermissionPending.current = false;
+        await api.updateSourcesConfig({ screen: cfg?.screen ?? true });
+        setStatusNote("Lumen Cua 屏幕录制权限已生效；采集服务已自动重载。");
+        setError(null);
+        await refresh();
+      } catch (e) {
+        setError(`刷新屏幕录制权限失败：${String(e)}`);
+      }
+    };
+    window.addEventListener("focus", refreshPendingScreenPermission);
+    return () => window.removeEventListener("focus", refreshPendingScreenPermission);
+  }, [cfg?.screen, refresh]);
 
   const loadTimeline = useCallback(async () => {
     try {

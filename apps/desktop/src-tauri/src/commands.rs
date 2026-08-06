@@ -736,6 +736,14 @@ pub async fn request_screen_permission(state: State<'_, AppState>) -> Result<boo
 }
 
 #[tauri::command]
+pub async fn refresh_screen_permission(state: State<'_, AppState>) -> Result<bool, String> {
+    let cua = state.cua.clone();
+    tauri::async_runtime::spawn_blocking(move || cua.refresh_screen_permission())
+        .await
+        .map_err(|error| format!("Lumen Cua permission refresh task failed: {error}"))?
+}
+
+#[tauri::command]
 pub async fn request_microphone_permission() -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(lumen_platform_macos::request_microphone_access)
         .await

@@ -7,6 +7,9 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct CuaPaths {
+    /// Standalone runtime bundle. Keeping this outside any caller's `.app`
+    /// bundle gives Lumen Cua its own TCC attribution.
+    pub app: PathBuf,
     pub socket: PathBuf,
     pub token_file: PathBuf,
 }
@@ -26,8 +29,10 @@ impl CuaPaths {
     }
 
     pub fn under(data_dir: impl AsRef<Path>) -> Self {
-        let run_dir = data_dir.as_ref().join("run");
+        let root = data_dir.as_ref();
+        let run_dir = root.join("run");
         Self {
+            app: root.join("Lumen Cua.app"),
             socket: run_dir.join("cua.sock"),
             token_file: run_dir.join("cua.token"),
         }
@@ -142,5 +147,14 @@ mod tests {
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn shared_app_path_is_outside_the_ipc_run_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = CuaPaths::under(temp.path());
+
+        assert_eq!(paths.app, temp.path().join("Lumen Cua.app"));
+        assert_eq!(paths.socket, temp.path().join("run/cua.sock"));
     }
 }
