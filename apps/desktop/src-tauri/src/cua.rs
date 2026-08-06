@@ -96,7 +96,6 @@ impl CuaController {
     }
 
     pub fn request_screen_permission(&self) -> Result<bool, String> {
-        self.require_tcc_manageable_signing()?;
         let _guard = self
             .lifecycle
             .lock()
@@ -110,28 +109,6 @@ impl CuaController {
         // TCC may expose the new grant only after the requesting process exits.
         // Restart the small capability app, never the Navi UI or daemon.
         self.restart_and_read_permission(client)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn require_tcc_manageable_signing(&self) -> Result<(), String> {
-        let output = Command::new("/usr/bin/codesign")
-            .arg("-dvvv")
-            .arg(&self.app)
-            .output()
-            .map_err(|error| format!("inspect Lumen Cua code signature: {error}"))?;
-        let signing_info = String::from_utf8_lossy(&output.stderr);
-        if output.status.success() && signing_team_identifier(&signing_info).is_some() {
-            return Ok(());
-        }
-        Err(
-            "Lumen Cua 当前是无 Team ID 的本地自签名构建；macOS 不会把它加入屏幕录制设置。需要使用 Apple Development 或 Developer ID Application 签名后重新安装。"
-                .into(),
-        )
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn require_tcc_manageable_signing(&self) -> Result<(), String> {
-        Err("Lumen Cua screen capture currently requires macOS".into())
     }
 
     /// Re-read a grant changed in System Settings. Screen Recording grants are
@@ -169,13 +146,6 @@ fn wait_for_path_state(path: &Path, exists: bool, timeout: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(50));
     }
     path.exists() == exists
-}
-
-fn signing_team_identifier(signing_info: &str) -> Option<&str> {
-    signing_info.lines().find_map(|line| {
-        let value = line.trim().strip_prefix("TeamIdentifier=")?.trim();
-        (!value.is_empty() && value != "not set").then_some(value)
-    })
 }
 
 #[cfg(target_os = "macos")]
@@ -347,16 +317,4 @@ mod tests {
         assert!(Arc::ptr_eq(&controller.lifecycle, &cloned.lifecycle));
     }
 
-    #[test]
-    fn signing_info_requires_a_real_team_identifier() {
-        assert!(signing_team_identifier(
-            "Authority=Developer ID Application: Example (ABCDE12345)\nTeamIdentifier=ABCDE12345\n"
-        )
-        .is_some());
-        assert!(signing_team_identifier(
-            "Authority=Lumen Local Codesign\nTeamIdentifier=not set\n"
-        )
-        .is_none());
-        assert!(signing_team_identifier("Authority=Lumen Local Codesign\n").is_none());
-    }
 }

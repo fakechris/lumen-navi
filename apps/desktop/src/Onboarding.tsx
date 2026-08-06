@@ -185,7 +185,7 @@ export function Onboarding({
       setError(
         granted
           ? null
-          : "屏幕录制权限尚未允许，请在系统列表中开启 Lumen Cua。未授权时不会保存受限截图。",
+          : "首次授权请点击系统列表下方的 +，选择 /Applications/Lumen Cua.app，然后开启它。未授权时不会保存受限截图。",
       );
     } catch (e) {
       setError(`请求屏幕录制权限失败：${String(e)}`);

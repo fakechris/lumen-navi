@@ -242,7 +242,7 @@ export default function App() {
         screenPermissionPending.current = true;
         await api.openPrivacySettings("screen");
         setStatusNote(
-          "系统尚未允许屏幕录制。请在列表中开启 Lumen Cua；未授权时不会保存受限截图。",
+          "首次授权请点击列表下方的 +，选择 /Applications/Lumen Cua.app，然后开启它；未授权时不会保存受限截图。",
         );
       }
       setPerms(await api.getPermissions());

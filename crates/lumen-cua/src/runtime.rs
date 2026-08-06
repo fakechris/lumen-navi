@@ -25,7 +25,15 @@ impl CuaPaths {
         let root = home.join("Library/Application Support/Lumen/Cua");
         #[cfg(not(target_os = "macos"))]
         let root = home.join(".lumen/cua");
-        Self::under(root)
+        let mut paths = Self::under(root);
+        #[cfg(target_os = "macos")]
+        {
+            // Screen Recording's manual `+` picker starts in /Applications.
+            // Keep the shared capability bundle visible there while its token
+            // and socket remain private in Application Support.
+            paths.app = PathBuf::from("/Applications/Lumen Cua.app");
+        }
+        paths
     }
 
     pub fn under(data_dir: impl AsRef<Path>) -> Self {
@@ -156,5 +164,12 @@ mod tests {
 
         assert_eq!(paths.app, temp.path().join("Lumen Cua.app"));
         assert_eq!(paths.socket, temp.path().join("run/cua.sock"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn current_user_helper_is_installed_where_privacy_settings_can_browse_it() {
+        let paths = CuaPaths::for_current_user();
+        assert_eq!(paths.app, PathBuf::from("/Applications/Lumen Cua.app"));
     }
 }
