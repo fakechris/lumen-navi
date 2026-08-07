@@ -50,16 +50,20 @@ impl CuaClient {
     }
 
     pub fn status(&self) -> Result<CuaStatus, CuaError> {
-        match self.call(Command::Status)?.0 {
-            ResponseResult::Status { status } => Ok(status),
-            other => Err(unexpected(other)),
-        }
-    }
-
-    pub fn request_screen_permission(&self) -> Result<(bool, CuaStatus), CuaError> {
-        match self.call(Command::RequestScreenPermission)?.0 {
-            ResponseResult::PermissionRequest { granted, status } => Ok((granted, status)),
-            other => Err(unexpected(other)),
+        let current = self.call_with_protocol(Command::Status, PROTOCOL_VERSION);
+        match current {
+            Ok((ResponseResult::Status { status }, _)) => Ok(status),
+            Ok((other, _)) => Err(unexpected(other)),
+            Err(CuaError::Protocol(_)) | Err(CuaError::Request(_)) if PROTOCOL_VERSION > 1 => {
+                match self
+                    .call_with_protocol(Command::Status, PROTOCOL_VERSION - 1)?
+                    .0
+                {
+                    ResponseResult::Status { status } => Ok(status),
+                    other => Err(unexpected(other)),
+                }
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -136,13 +140,32 @@ impl CuaClient {
     }
 
     pub fn shutdown(&self) -> Result<(), CuaError> {
-        match self.call(Command::Shutdown)?.0 {
-            ResponseResult::Ack => Ok(()),
-            other => Err(unexpected(other)),
+        let current = self.call_with_protocol(Command::Shutdown, PROTOCOL_VERSION);
+        match current {
+            Ok((ResponseResult::Ack, _)) => Ok(()),
+            Ok((other, _)) => Err(unexpected(other)),
+            Err(CuaError::Protocol(_)) | Err(CuaError::Request(_)) if PROTOCOL_VERSION > 1 => {
+                match self
+                    .call_with_protocol(Command::Shutdown, PROTOCOL_VERSION - 1)?
+                    .0
+                {
+                    ResponseResult::Ack => Ok(()),
+                    other => Err(unexpected(other)),
+                }
+            }
+            Err(error) => Err(error),
         }
     }
 
     fn call(&self, command: Command) -> Result<(ResponseResult, Vec<u8>), CuaError> {
+        self.call_with_protocol(command, PROTOCOL_VERSION)
+    }
+
+    fn call_with_protocol(
+        &self,
+        command: Command,
+        protocol_version: u16,
+    ) -> Result<(ResponseResult, Vec<u8>), CuaError> {
         #[cfg(unix)]
         {
             use std::os::unix::net::UnixStream;
@@ -151,7 +174,7 @@ impl CuaClient {
                 .map_err(|e| CuaError::Unavailable(format!("read token: {e}")))?;
             let request_id = Uuid::new_v4().to_string();
             let request = RequestEnvelope {
-                protocol_version: PROTOCOL_VERSION,
+                protocol_version,
                 request_id: request_id.clone(),
                 token: token.trim().to_owned(),
                 command,
@@ -183,7 +206,7 @@ impl CuaClient {
             }
             let response: ResponseEnvelope =
                 serde_json::from_slice(&header).map_err(|e| CuaError::Protocol(e.to_string()))?;
-            if response.protocol_version != PROTOCOL_VERSION || response.request_id != request_id {
+            if response.protocol_version != protocol_version || response.request_id != request_id {
                 return Err(CuaError::Protocol("response identity mismatch".into()));
             }
             if !response.ok {
@@ -205,7 +228,7 @@ impl CuaClient {
         }
         #[cfg(not(unix))]
         {
-            let _ = command;
+            let _ = (command, protocol_version);
             Err(CuaError::Unsupported)
         }
     }
@@ -264,6 +287,59 @@ mod tests {
         assert_eq!(frame.media_type, "image/jpeg");
         assert_eq!((frame.width, frame.height), (2, 1));
         assert_eq!(frame.display_id, DisplayId(7));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn shutdown_retries_the_previous_protocol_for_upgrade_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = CuaPaths::under(temp.path());
+        ensure_token_file(&paths.token_file).unwrap();
+        std::fs::create_dir_all(paths.socket.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut current_stream, _) = listener.accept().unwrap();
+            let mut current_line = String::new();
+            BufReader::new(current_stream.try_clone().unwrap())
+                .read_line(&mut current_line)
+                .unwrap();
+            let current: RequestEnvelope = serde_json::from_str(&current_line).unwrap();
+            assert_eq!(current.protocol_version, PROTOCOL_VERSION);
+            let current_response = ResponseEnvelope {
+                protocol_version: 1,
+                request_id: current.request_id,
+                ok: false,
+                error: Some("unsupported protocol version".into()),
+                result: None,
+                payload_len: 0,
+            };
+            let mut header = serde_json::to_vec(&current_response).unwrap();
+            header.push(b'\n');
+            current_stream.write_all(&header).unwrap();
+
+            let (mut legacy_stream, _) = listener.accept().unwrap();
+            let mut legacy_line = String::new();
+            BufReader::new(legacy_stream.try_clone().unwrap())
+                .read_line(&mut legacy_line)
+                .unwrap();
+            let legacy: RequestEnvelope = serde_json::from_str(&legacy_line).unwrap();
+            assert_eq!(legacy.protocol_version, 1);
+            let legacy_response = ResponseEnvelope {
+                protocol_version: 1,
+                request_id: legacy.request_id,
+                ok: true,
+                error: None,
+                result: Some(ResponseResult::Ack),
+                payload_len: 0,
+            };
+            let mut header = serde_json::to_vec(&legacy_response).unwrap();
+            header.push(b'\n');
+            legacy_stream.write_all(&header).unwrap();
+        });
+
+        CuaClient::new(&paths.socket, &paths.token_file)
+            .shutdown()
+            .unwrap();
         server.join().unwrap();
     }
 }

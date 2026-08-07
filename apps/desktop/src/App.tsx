@@ -242,7 +242,7 @@ export default function App() {
         screenPermissionPending.current = true;
         await api.openPrivacySettings("screen");
         setStatusNote(
-          "首次授权请点击列表下方的 +，选择 /Applications/Lumen Cua.app，然后开启它；未授权时不会保存受限截图。",
+          "macOS 尚未允许 Lumen Cua。请在已打开的屏幕与系统音频录制设置中开启它；如果系统没有自动列出，再使用 + 选择 /Applications/Lumen Cua.app。",
         );
       }
       setPerms(await api.getPermissions());
@@ -303,8 +303,7 @@ export default function App() {
         setPerms(await api.getPermissions());
         if (!granted) return;
         screenPermissionPending.current = false;
-        await api.updateSourcesConfig({ screen: cfg?.screen ?? true });
-        setStatusNote("Lumen Cua 屏幕录制权限已生效；采集服务已自动重载。");
+        setStatusNote("Lumen Cua 基础屏幕权限已生效；请再次点击“请求屏幕录制”完成实际捕获验证。");
         setError(null);
         await refresh();
       } catch (e) {
@@ -630,6 +629,18 @@ export default function App() {
                     label={`屏幕录制 · ${perms?.screen_recording ?? "—"}`}
                   />
                   <StatusDot
+                    status={
+                      perms?.screen_capture_ready === true
+                        ? "done"
+                        : perms?.direct_capture_status === "unavailable" ||
+                            perms?.direct_capture_status === "probe_failed" ||
+                            perms?.direct_capture_status === "timed_out"
+                          ? "failed"
+                          : "idle"
+                    }
+                    label={`实际捕获 · ${perms?.direct_capture_status ?? "—"}`}
+                  />
+                  <StatusDot
                     status={permStatus(perms?.microphone ?? "")}
                     label={`麦克风 · ${perms?.microphone ?? "—"}`}
                   />
@@ -642,6 +653,9 @@ export default function App() {
                   屏幕录制由共享的 Lumen Cua 请求授权；麦克风与辅助功能仍属于 Lumen Navi。
                   语音识别权限用于本机转写，不做听写注入。
                 </p>
+                {perms?.direct_capture_error && (
+                  <p className="meta mt">{perms.direct_capture_error}</p>
+                )}
                 <div className="row mt">
                   <Button variant="secondary" disabled={busy} onClick={() => void requestScreenRecording()}>
                     请求屏幕录制

@@ -185,7 +185,7 @@ export function Onboarding({
       setError(
         granted
           ? null
-          : "首次授权请点击系统列表下方的 +，选择 /Applications/Lumen Cua.app，然后开启它。未授权时不会保存受限截图。",
+          : "macOS 尚未允许 Lumen Cua。请在屏幕与系统音频录制设置中开启它；如果系统没有自动列出，再使用 + 选择 /Applications/Lumen Cua.app。",
       );
     } catch (e) {
       setError(`请求屏幕录制权限失败：${String(e)}`);
@@ -221,6 +221,9 @@ export function Onboarding({
           <div className="row mt">
             <span className={`pill ${permClass(perms?.screen_recording)}`}>
               Screen {perms?.screen_recording ?? "…"}
+            </span>
+            <span className={`pill ${perms?.screen_capture_ready ? "ok" : "warn"}`}>
+              Capture {perms?.direct_capture_status ?? "…"}
             </span>
             <button
               className="btn primary"

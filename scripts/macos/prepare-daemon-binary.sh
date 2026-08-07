@@ -15,7 +15,7 @@ bin_dir="$root/apps/desktop/src-tauri/binaries"
 mkdir -p "$bin_dir"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}"
-export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 
 echo "Building lumen-daemon for $target …"
 cargo build -p lumen-daemon --release --target "$target" --manifest-path "$root/Cargo.toml"

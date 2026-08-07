@@ -23,7 +23,7 @@ contents="$app/Contents"
 macos_dir="$contents/MacOS"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}"
-export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 
 echo "Building lumen-cua for $target …"
 cargo build -p lumen-cua --bin lumen-cua --release --target "$target" --manifest-path "$root/Cargo.toml"
@@ -38,6 +38,7 @@ mkdir -p "$macos_dir"
 cp "$root/apps/cua/Info.plist" "$contents/Info.plist"
 version="$(node -p "require('$root/apps/desktop/src-tauri/tauri.conf.json').version")"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$contents/Info.plist"
 cp "$src" "$macos_dir/lumen-cua"
 chmod +x "$macos_dir/lumen-cua"
 
@@ -49,5 +50,11 @@ if [[ "$identity" == "-" ]]; then
 fi
 codesign --force --sign "$identity" --timestamp=none "$macos_dir/lumen-cua"
 codesign --force --sign "$identity" --timestamp=none "$app"
-codesign --verify --strict --verbose=1 "$app"
+codesign --verify --deep --strict --verbose=1 "$app"
+requirement="$(codesign -d -r- "$app" 2>&1 | sed -n 's/^designated => //p')"
+if [[ -z "$requirement" || "$requirement" == *cdhash* || "$requirement" != *certificate* ]]; then
+  echo "Lumen Cua requires a certificate-backed designated requirement; got: ${requirement:-<none>}" >&2
+  exit 1
+fi
 echo "Prepared $app with identity: $identity"
+echo "Designated requirement: $requirement"

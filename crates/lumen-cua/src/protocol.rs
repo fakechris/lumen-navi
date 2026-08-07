@@ -1,7 +1,7 @@
 use lumen_platform::{DisplayInfo, PermissionState};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_HEADER_BYTES: usize = 64 * 1024;
 pub const MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
@@ -18,7 +18,6 @@ pub(crate) struct RequestEnvelope {
 #[serde(tag = "command", rename_all = "snake_case")]
 pub(crate) enum Command {
     Status,
-    RequestScreenPermission,
     ListDisplays,
     CaptureEncoded {
         display_id: u32,
@@ -49,7 +48,6 @@ pub(crate) struct ResponseEnvelope {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ResponseResult {
     Status { status: CuaStatus },
-    PermissionRequest { granted: bool, status: CuaStatus },
     Displays { displays: Vec<DisplayInfo> },
     EncodedFrame { frame: EncodedFrameMeta },
     RawFrame { frame: RawFrameMeta },
@@ -59,6 +57,35 @@ pub(crate) enum ResponseResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CuaStatus {
     pub screen_recording: PermissionState,
+    #[serde(default)]
+    pub screen_recording_capturable: Option<bool>,
+    #[serde(default)]
+    pub direct_capture_status: DirectCaptureStatus,
+    #[serde(default)]
+    pub direct_capture_error: Option<DirectCaptureError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectCaptureStatus {
+    NotChecked,
+    BlockedByScreenRecording,
+    Ready,
+    Unavailable,
+    TimedOut,
+    ProbeFailed,
+}
+
+impl Default for DirectCaptureStatus {
+    fn default() -> Self {
+        Self::NotChecked
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectCaptureError {
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,5 +125,54 @@ impl ResponseEnvelope {
             result: None,
             payload_len: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn daemon_protocol_does_not_accept_permission_prompt_commands() {
+        let request = serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "request_id": "test-request",
+            "token": "0".repeat(64),
+            "command": "request_screen_permission"
+        });
+
+        assert!(serde_json::from_value::<RequestEnvelope>(request).is_err());
+    }
+
+    #[test]
+    fn status_distinguishes_tcc_from_live_capture_readiness() {
+        let status = CuaStatus {
+            screen_recording: PermissionState::Granted,
+            screen_recording_capturable: None,
+            direct_capture_status: DirectCaptureStatus::NotChecked,
+            direct_capture_error: None,
+        };
+
+        let encoded = serde_json::to_value(status).unwrap();
+        assert_eq!(encoded["screen_recording"], "granted");
+        assert_eq!(encoded["screen_recording_capturable"], Value::Null);
+        assert_eq!(encoded["direct_capture_status"], "not_checked");
+        assert_eq!(encoded["direct_capture_error"], Value::Null);
+    }
+
+    #[test]
+    fn protocol_v1_status_defaults_new_capture_fields_for_migration() {
+        let status: CuaStatus = serde_json::from_value(serde_json::json!({
+            "screen_recording": "granted"
+        }))
+        .unwrap();
+
+        assert_eq!(status.screen_recording_capturable, None);
+        assert_eq!(
+            status.direct_capture_status,
+            DirectCaptureStatus::NotChecked
+        );
+        assert_eq!(status.direct_capture_error, None);
     }
 }

@@ -22,6 +22,9 @@ use crate::state::AppState;
 #[derive(Debug, Serialize)]
 pub struct PermissionsDto {
     pub screen_recording: String,
+    pub screen_capture_ready: Option<bool>,
+    pub direct_capture_status: String,
+    pub direct_capture_error: Option<String>,
     pub microphone: String,
     pub accessibility: String,
 }
@@ -190,16 +193,36 @@ pub async fn get_permissions(state: State<'_, AppState>) -> Result<PermissionsDt
     let microphone = microphone_permission_state();
     let accessibility = accessibility_permission_state();
     let cua = state.cua.clone();
-    let screen_recording = tauri::async_runtime::spawn_blocking(move || cua.status())
+    let cua_status = tauri::async_runtime::spawn_blocking(move || cua.status())
         .await
         .map_err(err)?
-        .map(|status| format!("{:?}", status.screen_recording))
-        .unwrap_or_else(|error| {
+        .map_err(|error| {
             tracing::warn!(%error, "Lumen Cua permission status unavailable");
-            "Unavailable".into()
         });
+    let (screen_recording, screen_capture_ready, direct_capture_status, direct_capture_error) =
+        match cua_status {
+            Ok(status) => {
+                let direct_capture_status = serde_json::to_value(status.direct_capture_status)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unknown".into());
+                let direct_capture_error = status
+                    .direct_capture_error
+                    .map(|error| format!("{}: {}", error.code, error.message));
+                (
+                    format!("{:?}", status.screen_recording),
+                    status.screen_recording_capturable,
+                    direct_capture_status,
+                    direct_capture_error,
+                )
+            }
+            Err(()) => ("Unavailable".into(), None, "unavailable".into(), None),
+        };
     Ok(PermissionsDto {
         screen_recording,
+        screen_capture_ready,
+        direct_capture_status,
+        direct_capture_error,
         microphone: format!("{microphone:?}"),
         accessibility: format!("{accessibility:?}"),
     })

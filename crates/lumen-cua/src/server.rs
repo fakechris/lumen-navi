@@ -1,10 +1,9 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{bail, Context, Result};
-use lumen_platform::{DisplayEnumerator, DisplayId, PermissionState, ScreenCapturer};
-use lumen_platform_macos::{
-    request_screen_recording, screen_recording_access_granted, MacDisplays, MacScreenCapturer,
-};
+use lumen_platform::{DisplayEnumerator, DisplayId, ScreenCapturer};
+use lumen_platform_macos::{MacDisplays, MacScreenCapturer};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::protocol::{
@@ -12,6 +11,8 @@ use crate::protocol::{
     MAX_HEADER_BYTES, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION,
 };
 use crate::CuaStatus;
+
+static LIVE_CAPTURE_READY: AtomicBool = AtomicBool::new(false);
 
 pub async fn serve(socket_path: &Path, token_file: &Path) -> Result<()> {
     #[cfg(unix)]
@@ -128,16 +129,6 @@ async fn handle_connection(stream: tokio::net::UnixStream, token: &str) -> Resul
 async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
     match command {
         Command::Status => Ok((ResponseResult::Status { status: status() }, Vec::new())),
-        Command::RequestScreenPermission => {
-            let granted = request_screen_recording();
-            Ok((
-                ResponseResult::PermissionRequest {
-                    granted,
-                    status: status(),
-                },
-                Vec::new(),
-            ))
-        }
         Command::ListDisplays => {
             let displays = MacDisplays.list_displays().await?;
             Ok((ResponseResult::Displays { displays }, Vec::new()))
@@ -151,6 +142,7 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
             let frame = MacScreenCapturer
                 .capture_display(DisplayId(display_id), max_edge, jpeg, jpeg_quality)
                 .await?;
+            LIVE_CAPTURE_READY.store(true, Ordering::Relaxed);
             let meta = EncodedFrameMeta {
                 media_type: frame.media_type,
                 width: frame.width,
@@ -169,6 +161,7 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
             let frame = MacScreenCapturer
                 .capture_display_raw(DisplayId(display_id), scale_div.max(1))
                 .await?;
+            LIVE_CAPTURE_READY.store(true, Ordering::Relaxed);
             let meta = RawFrameMeta {
                 width: frame.width,
                 height: frame.height,
@@ -182,13 +175,19 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
 }
 
 fn status() -> CuaStatus {
-    CuaStatus {
-        screen_recording: if screen_recording_access_granted() {
-            PermissionState::Granted
-        } else {
-            PermissionState::NotDetermined
-        },
+    status_with_capture_observation(
+        crate::permissions::read_only_status(),
+        LIVE_CAPTURE_READY.load(Ordering::Relaxed),
+    )
+}
+
+fn status_with_capture_observation(mut status: CuaStatus, capture_ready: bool) -> CuaStatus {
+    if capture_ready && status.screen_recording == lumen_platform::PermissionState::Granted {
+        status.screen_recording_capturable = Some(true);
+        status.direct_capture_status = crate::DirectCaptureStatus::Ready;
+        status.direct_capture_error = None;
     }
+    status
 }
 
 #[cfg(all(test, unix))]
@@ -252,5 +251,23 @@ mod tests {
             .unwrap()
             .unwrap();
         first.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn successful_frame_capture_promotes_read_only_status_to_ready() {
+        let status = CuaStatus {
+            screen_recording: lumen_platform::PermissionState::Granted,
+            screen_recording_capturable: None,
+            direct_capture_status: crate::DirectCaptureStatus::NotChecked,
+            direct_capture_error: None,
+        };
+
+        let status = status_with_capture_observation(status, true);
+
+        assert_eq!(status.screen_recording_capturable, Some(true));
+        assert_eq!(
+            status.direct_capture_status,
+            crate::DirectCaptureStatus::Ready
+        );
     }
 }
