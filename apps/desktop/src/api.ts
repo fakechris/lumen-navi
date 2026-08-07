@@ -10,6 +10,7 @@ import type {
   CategoryRule,
   ConfigSummary,
   DayStats,
+  RangeStats,
   EventSummary,
   Health,
   ObserveStatus,
@@ -58,6 +59,8 @@ export const api = {
     invoke<ActivitySegment[]>("activity_segments", { day }),
   activityStats: (day: string) =>
     invoke<DayStats>("activity_stats", { day }),
+  activityRange: (from: string, to: string) =>
+    invoke<RangeStats>("activity_range", { from, to }),
   activityListCategoryRules: () =>
     invoke<CategoryRule[]>("activity_list_category_rules"),
   activitySaveCategoryRules: (rules: CategoryRule[]) =>

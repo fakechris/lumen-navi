@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use lumen_api::{ActivitySegmentDto, AppTotal, CategoryTotal, DayStatsDto};
+use lumen_api::{ActivitySegmentDto, AppTotal, CategoryTotal, DayRollupDto, DayStatsDto, RangeStatsDto};
 use lumen_types::{event_kind, ActivitySession, ArtifactRef, SourceEvent, SourceKind};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
@@ -1359,6 +1359,205 @@ impl SqliteStore {
             by_category,
             top_apps,
             by_hour,
+        })
+    }
+
+    /// Aggregate activity across a date range `[from_day, to_day]` inclusive
+    /// (YYYY-MM-DD). Returns a per-day rollup plus range-wide totals, top apps,
+    /// and category breakdown — the weekly-view payload.
+    pub fn activity_range_stats(
+        &self,
+        from_day: &str,
+        to_day: &str,
+    ) -> Result<RangeStatsDto, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+
+        // Range totals + pulse.
+        let (total_active_ms, total_idle_ms): (i64, i64) = conn
+            .query_row(
+                r#"SELECT
+                       COALESCE(SUM(CASE WHEN is_idle = 0 THEN duration_ms ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN is_idle = 1 THEN duration_ms ELSE 0 END), 0)
+                   FROM activity_segments WHERE day BETWEEN ?1 AND ?2"#,
+                params![from_day, to_day],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(StoreError::db)?;
+
+        let (weighted_sum, classified_ms): (f64, f64) = conn
+            .query_row(
+                r#"SELECT
+                       COALESCE(SUM(CASE productivity_level
+                           WHEN 'productive' THEN duration_ms
+                           WHEN 'neutral' THEN duration_ms * 0.5
+                           WHEN 'distracting' THEN 0
+                           ELSE 0 END), 0.0),
+                       SUM(CASE WHEN productivity_level IS NOT NULL THEN duration_ms ELSE 0 END)
+                   FROM activity_segments
+                   WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0"#,
+                params![from_day, to_day],
+                |row| Ok((row.get::<_, f64>(0)?, row.get::<_, Option<f64>>(1)?.unwrap_or(0.0))),
+            )
+            .map_err(StoreError::db)?;
+        let pulse_score = if classified_ms > 0.0 {
+            Some(100.0 * weighted_sum / classified_ms)
+        } else {
+            None
+        };
+
+        // Per-day rollups.
+        let mut day_stmt = conn
+            .prepare(
+                r#"SELECT day,
+                          COALESCE(SUM(CASE WHEN is_idle = 0 THEN duration_ms ELSE 0 END), 0),
+                          COALESCE(SUM(CASE WHEN is_idle = 1 THEN duration_ms ELSE 0 END), 0),
+                          COUNT(CASE WHEN is_idle = 0 THEN 1 END)
+                   FROM activity_segments
+                   WHERE day BETWEEN ?1 AND ?2
+                   GROUP BY day
+                   ORDER BY day ASC"#,
+            )
+            .map_err(StoreError::db)?;
+        let day_rows = day_stmt
+            .query_map(params![from_day, to_day], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(StoreError::db)?;
+
+        let mut days: Vec<DayRollupDto> = Vec::new();
+        // Collect each day's category breakdown in a follow-up query for efficiency.
+        let mut cat_stmt = conn
+            .prepare(
+                r#"SELECT day, COALESCE(category, 'Uncategorized'), productivity_level,
+                          SUM(duration_ms)
+                   FROM activity_segments
+                   WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0
+                   GROUP BY day, COALESCE(category, 'Uncategorized'), productivity_level"#,
+            )
+            .map_err(StoreError::db)?;
+        let cat_rows: std::result::Result<Vec<_>, _> = cat_stmt
+            .query_map(params![from_day, to_day], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(StoreError::db)?
+            .collect();
+        let cat_rows = cat_rows.map_err(StoreError::db)?;
+        drop(cat_stmt);
+
+        // Bucket categories by day.
+        use std::collections::BTreeMap;
+        let mut cats_by_day: BTreeMap<String, Vec<CategoryTotal>> = BTreeMap::new();
+        for (day, category, level, ms) in cat_rows {
+            cats_by_day
+                .entry(day)
+                .or_default()
+                .push(CategoryTotal { category, productivity_level: level, ms });
+        }
+        for v in cats_by_day.values_mut() {
+            v.sort_by(|a, b| b.ms.cmp(&a.ms));
+        }
+
+        for r in day_rows {
+            let (day, active, idle, switches) = r.map_err(StoreError::db)?;
+            // Per-day pulse.
+            let day_cats = cats_by_day.get(&day).cloned().unwrap_or_default();
+            let day_pulse = {
+                let (w, c): (f64, f64) = day_cats
+                    .iter()
+                    .filter(|ct| ct.productivity_level.is_some())
+                    .fold((0.0, 0.0), |(w, c), ct| {
+                        let weight = match ct.productivity_level.as_deref() {
+                            Some("productive") => 100.0,
+                            Some("neutral") => 50.0,
+                            Some("distracting") => 0.0,
+                            _ => return (w, c),
+                        };
+                        (w + weight * ct.ms as f64, c + ct.ms as f64)
+                    });
+                if c > 0.0 { Some(100.0 * w / c) } else { None }
+            };
+            days.push(DayRollupDto {
+                day,
+                total_active_ms: active,
+                total_idle_ms: idle,
+                pulse_score: day_pulse,
+                context_switches: switches,
+                by_category: day_cats,
+            });
+        }
+        drop(day_stmt);
+
+        // Range-wide top apps.
+        let mut app_stmt = conn
+            .prepare(
+                r#"SELECT app_name, bundle_id, SUM(duration_ms), category,
+                          productivity_level, COUNT(1)
+                   FROM activity_segments
+                   WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0 AND app_name IS NOT NULL
+                   GROUP BY app_name
+                   ORDER BY SUM(duration_ms) DESC
+                   LIMIT 15"#,
+            )
+            .map_err(StoreError::db)?;
+        let app_rows = app_stmt
+            .query_map(params![from_day, to_day], |row| {
+                Ok(AppTotal {
+                    app_name: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    bundle_id: row.get(1)?,
+                    ms: row.get(2)?,
+                    category: row.get(3)?,
+                    productivity_level: row.get(4)?,
+                    segment_count: row.get(5)?,
+                })
+            })
+            .map_err(StoreError::db)?;
+        let mut top_apps = Vec::new();
+        for r in app_rows {
+            top_apps.push(r.map_err(StoreError::db)?);
+        }
+
+        // Range-wide category breakdown.
+        let mut rcat_stmt = conn
+            .prepare(
+                r#"SELECT COALESCE(category, 'Uncategorized'), productivity_level,
+                          SUM(duration_ms)
+                   FROM activity_segments
+                   WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0
+                   GROUP BY COALESCE(category, 'Uncategorized'), productivity_level
+                   ORDER BY SUM(duration_ms) DESC"#,
+            )
+            .map_err(StoreError::db)?;
+        let rcat_rows = rcat_stmt
+            .query_map(params![from_day, to_day], |row| {
+                Ok(CategoryTotal {
+                    category: row.get(0)?,
+                    productivity_level: row.get(1)?,
+                    ms: row.get(2)?,
+                })
+            })
+            .map_err(StoreError::db)?;
+        let mut by_category = Vec::new();
+        for r in rcat_rows {
+            by_category.push(r.map_err(StoreError::db)?);
+        }
+
+        Ok(RangeStatsDto {
+            days,
+            total_active_ms,
+            total_idle_ms,
+            pulse_score,
+            top_apps,
+            by_category,
         })
     }
 

@@ -64,6 +64,7 @@ pub fn run() {
             commands::list_timeline,
             commands::activity_segments,
             commands::activity_stats,
+            commands::activity_range,
             commands::activity_list_category_rules,
             commands::activity_save_category_rules,
             commands::get_event_image_data_url,

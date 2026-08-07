@@ -3,11 +3,12 @@ import * as d3 from "d3";
 import { api } from "../api";
 import { Button, Card, EmptyState, IconButton, Input, Select, StatCard } from "../design";
 import type { CategoryRule, MatchField, ProductivityLevel, ActivitySegment, DayStats } from "../types";
+import { WeeklyView } from "./WeeklyView";
 
 // --- helpers --------------------------------------------------------------
 
 /** Format milliseconds as compact human duration: "6h 42m" / "12m 30s" / "45s". */
-function fmtDuration(ms: number): string {
+export function fmtDuration(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
@@ -42,10 +43,10 @@ const categoryColorIndex = (cat: string): number => {
   for (let i = 0; i < cat.length; i++) h = (h * 31 + cat.charCodeAt(i)) >>> 0;
   return h % PALETTE_SIZE + 1;
 };
-const categoryColor = (cat: string): string => `var(--c-${categoryColorIndex(cat)})`;
+export const categoryColor = (cat: string): string => `var(--c-${categoryColorIndex(cat)})`;
 
 /** Read a CSS variable's resolved value from the document root. */
-function readCssVar(name: string): string {
+export function readCssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
@@ -53,6 +54,7 @@ function readCssVar(name: string): string {
 
 export function DashboardView() {
   const [day] = useState(todayStr());
+  const [view, setView] = useState<"today" | "week">("today");
   const [segments, setSegments] = useState<ActivitySegment[] | null>(null);
   const [stats, setStats] = useState<DayStats | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -93,6 +95,16 @@ export function DashboardView() {
 
   return (
     <div className="stack">
+      {/* Today / This week toggle */}
+      <div className="row" style={{ gap: 0, alignSelf: "flex-start", borderRadius: "var(--radius-input)", overflow: "hidden" }}>
+        <ViewTab active={view === "today"} onClick={() => setView("today")} first>今日</ViewTab>
+        <ViewTab active={view === "week"} onClick={() => setView("week")}>本周</ViewTab>
+      </div>
+
+      {view === "week" && <WeeklyView />}
+
+      {view === "today" && (
+        <>
       {loading && (
         <Card pad={16}>
           <div style={{ color: "var(--text-tertiary)" }}>加载今日活动…</div>
@@ -157,7 +169,29 @@ export function DashboardView() {
           启动观察后，这里会显示你一天的时间花在哪。
         </EmptyState>
       )}
+        </>
+      )}
     </div>
+  );
+}
+
+function ViewTab({ active, onClick, children, first }: {
+  active: boolean; onClick: () => void; children: React.ReactNode; first?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        background: active ? "var(--surface)" : "transparent",
+        border: "1px solid var(--border)",
+        borderLeft: first ? "1px solid var(--border)" : "none",
+        fontSize: "var(--text-xs)",
+        fontWeight: active ? 600 : 400,
+        color: active ? "var(--text)" : "var(--text-tertiary)",
+        padding: "5px 14px",
+        cursor: "pointer",
+      }}
+    >{children}</button>
   );
 }
 

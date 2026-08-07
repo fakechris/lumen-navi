@@ -207,6 +207,32 @@ pub struct AppTotal {
     pub segment_count: i64,
 }
 
+/// One day's roll-up inside a range query (the weekly view payload).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DayRollupDto {
+    pub day: String,
+    pub total_active_ms: i64,
+    pub total_idle_ms: i64,
+    pub pulse_score: Option<f64>,
+    pub context_switches: i64,
+    /// ms per category (active only), top entries sorted desc.
+    pub by_category: Vec<CategoryTotal>,
+}
+
+/// Aggregated stats over a date range (e.g. the last 7 days).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RangeStatsDto {
+    pub days: Vec<DayRollupDto>,
+    /// Range-wide totals.
+    pub total_active_ms: i64,
+    pub total_idle_ms: i64,
+    pub pulse_score: Option<f64>,
+    /// ms per app across the whole range, sorted desc (the week's top apps).
+    pub top_apps: Vec<AppTotal>,
+    /// ms per category across the whole range, sorted desc.
+    pub by_category: Vec<CategoryTotal>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

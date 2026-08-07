@@ -42,6 +42,24 @@ export interface DayStats {
   by_hour: number[];
 }
 
+export interface DayRollup {
+  day: string;
+  total_active_ms: number;
+  total_idle_ms: number;
+  pulse_score: number | null;
+  context_switches: number;
+  by_category: CategoryTotal[];
+}
+
+export interface RangeStats {
+  days: DayRollup[];
+  total_active_ms: number;
+  total_idle_ms: number;
+  pulse_score: number | null;
+  top_apps: AppTotal[];
+  by_category: CategoryTotal[];
+}
+
 export type MatchField = "bundle_id" | "app_name" | "domain" | "url" | "title";
 export type ProductivityLevel = "productive" | "neutral" | "distracting";
 

@@ -400,6 +400,11 @@ pub fn activity_stats(state: State<'_, AppState>, day: String) -> Result<lumen_a
 }
 
 #[tauri::command]
+pub fn activity_range(state: State<'_, AppState>, from: String, to: String) -> Result<lumen_api::RangeStatsDto, String> {
+    state.store.activity_range_stats(&from, &to).map_err(err)
+}
+
+#[tauri::command]
 pub fn activity_list_category_rules(state: State<'_, AppState>) -> Result<Vec<lumen_store::CategoryRule>, String> {
     state.store.list_category_rules().map_err(err)
 }

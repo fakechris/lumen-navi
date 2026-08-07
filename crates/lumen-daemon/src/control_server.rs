@@ -109,6 +109,7 @@ pub fn router(state: ControlState) -> Router {
         .route("/v1/control", post(post_control))
         .route("/v1/activity/segments", get(get_activity_segments))
         .route("/v1/activity/stats", get(get_activity_stats))
+        .route("/v1/activity/range", get(get_activity_range))
         .route("/v1/activity/rules", get(get_activity_rules).post(post_activity_rules))
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
@@ -419,6 +420,12 @@ struct ActivityDayQuery {
     day: String,
 }
 
+#[derive(Deserialize)]
+struct ActivityRangeQuery {
+    from: String,
+    to: String,
+}
+
 async fn get_activity_segments(
     State(st): State<ControlState>,
     Query(q): Query<ActivityDayQuery>,
@@ -440,6 +447,22 @@ async fn get_activity_stats(
     Query(q): Query<ActivityDayQuery>,
 ) -> impl IntoResponse {
     match st.store.activity_day_stats(&q.day) {
+        Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ControlResponse::Error {
+                message: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_activity_range(
+    State(st): State<ControlState>,
+    Query(q): Query<ActivityRangeQuery>,
+) -> impl IntoResponse {
+    match st.store.activity_range_stats(&q.from, &q.to) {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
