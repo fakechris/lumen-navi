@@ -97,19 +97,40 @@ impl CuaController {
     }
 
     pub fn request_screen_permission(&self) -> Result<bool, String> {
+        // Always surface System Settings + the Cua bundle first. After
+        // tccutil reset / list removal, macOS often refuses to re-prompt via
+        // CGRequest until reboot; the user must enable Lumen Cua manually.
+        // Opening Settings up front is the product UX, not a failure fallback.
+        let _ = open_screen_recording_settings();
+        let _ = reveal_cua_app_in_finder(&self.app);
+
         let _guard = self
             .lifecycle
             .lock()
             .map_err(|_| "Lumen Cua lifecycle lock was poisoned".to_string())?;
-        let client = self.ensure_running_unlocked()?;
+
+        // Drop any long-lived serve process so the permission host is not
+        // competing with a session that still holds a stale TCC cache.
+        let probe = CuaClient::new(&self.paths.socket, &self.paths.token_file)
+            .with_timeout(Duration::from_millis(400));
+        if probe.status().is_ok() {
+            let live = CuaClient::new(&self.paths.socket, &self.paths.token_file);
+            let _ = live.shutdown();
+            let _ = wait_for_path_state(&self.paths.socket, false, Duration::from_secs(3));
+        }
+
         let status = self.request_screen_permission_via_launch_services()?;
         if !permission_setup_is_ready(&status) {
+            // Restart serve so Navi status probes use a fresh process after the
+            // user flips the toggle in Settings.
+            let _ = self.ensure_running_unlocked();
             return Ok(false);
         }
 
         // TCC may expose the new grant only after the requesting process exits.
         // Restart the small capability app, never the Navi UI or data daemon,
         // and require a real frame before reporting success.
+        let client = self.ensure_running_unlocked()?;
         self.restart_and_verify_capture(client)
     }
 
@@ -695,6 +716,37 @@ fn permission_result_has_payload(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|metadata| metadata.is_file() && metadata.len() > 0)
         .unwrap_or(false)
+}
+
+/// Open Screen Recording settings. Try the classic Security pane URL first
+/// (what CuaDriver uses), then the modern PrivacySecurity extension URL.
+fn open_screen_recording_settings() -> Result<(), String> {
+    const URLS: &[&str] = &[
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+        "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture",
+    ];
+    let mut last_error = String::from("no screen-recording settings URL succeeded");
+    for url in URLS {
+        match Command::new("/usr/bin/open").arg(url).status() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => last_error = format!("open {url} failed with {status}"),
+            Err(error) => last_error = format!("open {url}: {error}"),
+        }
+    }
+    Err(last_error)
+}
+
+fn reveal_cua_app_in_finder(app: &Path) -> Result<(), String> {
+    let status = Command::new("/usr/bin/open")
+        .args(["-R"])
+        .arg(app)
+        .status()
+        .map_err(|error| format!("reveal Lumen Cua in Finder: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("reveal Lumen Cua in Finder failed with {status}"))
+    }
 }
 
 /// Stop a stuck permission-host instance without touching the long-lived serve daemon.

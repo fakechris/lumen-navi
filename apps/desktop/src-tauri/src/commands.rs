@@ -799,17 +799,20 @@ pub fn open_privacy_settings(kind: String) -> Result<(), String> {
 
 fn privacy_settings_url(kind: &str) -> Result<&'static str, String> {
     match kind {
+        // Prefer the classic Security privacy URL (works across more macOS
+        // versions; same as CuaDriver). The modern PrivacySecurity.extension
+        // form is a fallback used by open_screen_recording_settings.
         "screen" => {
-            Ok("x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture")
+            Ok("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
         }
         "microphone" => {
-            Ok("x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone")
+            Ok("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
         }
         "speech" => {
-            Ok("x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_SpeechRecognition")
+            Ok("x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
         }
         "accessibility" => {
-            Ok("x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility")
+            Ok("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         }
         _ => Err(format!("unknown privacy pane: {kind}")),
     }
