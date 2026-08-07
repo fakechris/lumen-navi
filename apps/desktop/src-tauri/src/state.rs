@@ -9,11 +9,13 @@ use anyhow::{Context, Result};
 use lumen_config::Config;
 use lumen_store::SqliteStore;
 
+use crate::cua::CuaController;
 use crate::shell::{self, ShellConfig};
 
 pub struct AppState {
     pub data_dir: PathBuf,
     pub config_path: PathBuf,
+    pub cua: CuaController,
     pub store: SqliteStore,
     pub paused: Mutex<bool>,
     pub shell: Mutex<ShellConfig>,
@@ -31,6 +33,7 @@ impl AppState {
             .with_context(|| format!("create data_dir {}", data_dir.display()))?;
         let _ = std::fs::create_dir_all(data_dir.join("logs"));
         let config_path = data_dir.join("navi.toml");
+        let cua = CuaController::open()?;
         let config = load_or_write_config(&config_path, &data_dir)?;
         let shell_cfg = shell::load_shell(&data_dir)?;
         let store = SqliteStore::open(&config.data_dir)
@@ -38,6 +41,7 @@ impl AppState {
         Ok(Self {
             data_dir: config.data_dir.clone(),
             config_path,
+            cua,
             store,
             paused: Mutex::new(config.privacy.paused),
             shell: Mutex::new(shell_cfg),
@@ -80,6 +84,28 @@ impl AppState {
             false
         }
     }
+
+    pub fn stop_owned_observe(&self) {
+        if let Ok(mut child) = self.observe_child.lock() {
+            stop_observe_child(&mut child);
+        }
+    }
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        if let Ok(child) = self.observe_child.get_mut() {
+            stop_observe_child(child);
+        }
+    }
+}
+
+fn stop_observe_child(slot: &mut Option<Child>) {
+    if let Some(child) = slot.as_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    *slot = None;
 }
 
 fn default_data_dir() -> PathBuf {
@@ -112,4 +138,22 @@ fn load_or_write_config(path: &Path, data_dir: &Path) -> Result<Config> {
     let raw = toml::to_string_pretty(&cfg)?;
     std::fs::write(path, raw)?;
     Ok(cfg)
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn stopping_an_owned_observe_child_reaps_the_process() {
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut slot = Some(child);
+
+        stop_observe_child(&mut slot);
+
+        assert!(slot.is_none());
+    }
 }

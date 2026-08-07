@@ -5,12 +5,9 @@ use std::process::{Command, Stdio};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chrono::{DateTime, Utc};
-use lumen_api::{
-    BrowserHealthResponse, EventSummary, HealthResponse, OcrSearchHitDto, SourceStatus, API_VERSION,
-};
+use lumen_api::{EventSummary, HealthResponse, OcrSearchHitDto, SourceStatus, API_VERSION};
 use lumen_config::Config;
-use lumen_platform::PermissionProbe;
-use lumen_platform_macos::MacPermissions;
+use lumen_platform_macos::{accessibility_permission_state, microphone_permission_state};
 use lumen_store::{EventStore, TimelineQuery, SCHEMA_VERSION};
 use lumen_types::event_kind;
 use serde::{Deserialize, Serialize};
@@ -25,6 +22,9 @@ use crate::state::AppState;
 #[derive(Debug, Serialize)]
 pub struct PermissionsDto {
     pub screen_recording: String,
+    pub screen_capture_ready: Option<bool>,
+    pub direct_capture_status: String,
+    pub direct_capture_error: Option<String>,
     pub microphone: String,
     pub accessibility: String,
 }
@@ -114,28 +114,23 @@ pub async fn get_health(state: State<'_, AppState>) -> Result<HealthResponse, St
     let paused = *state.paused.lock().map_err(err)?;
     let cfg = state.load_config().map_err(err)?;
     let observe = state.observe_running();
-    let browser = if observe {
-        fetch_browser_health(&cfg.api.bind).await
+    let daemon_health = if observe {
+        fetch_daemon_health(&cfg.api.bind).await
     } else {
         None
     };
+    let browser = daemon_health
+        .as_ref()
+        .and_then(|health| health.browser.clone());
     Ok(HealthResponse {
         api_version: API_VERSION,
         product: "lumen-navi".into(),
-        sources: vec![
-            SourceStatus {
-                id: "screen".into(),
-                enabled: cfg.sources.screen,
-                running: observe && cfg.sources.screen,
-                last_error: None,
-            },
-            SourceStatus {
-                id: "audio".into(),
-                enabled: cfg.sources.audio,
-                running: observe && cfg.sources.audio,
-                last_error: None,
-            },
-        ],
+        sources: health_sources(
+            observe,
+            cfg.sources.screen,
+            cfg.sources.audio,
+            daemon_health.as_ref(),
+        ),
         paused,
         stored_events: n,
         ocr_docs,
@@ -144,7 +139,32 @@ pub async fn get_health(state: State<'_, AppState>) -> Result<HealthResponse, St
     })
 }
 
-async fn fetch_browser_health(api_bind: &str) -> Option<BrowserHealthResponse> {
+fn health_sources(
+    observe: bool,
+    screen_enabled: bool,
+    audio_enabled: bool,
+    daemon_health: Option<&HealthResponse>,
+) -> Vec<SourceStatus> {
+    if let Some(health) = daemon_health {
+        return health.sources.clone();
+    }
+    vec![
+        SourceStatus {
+            id: "screen".into(),
+            enabled: screen_enabled,
+            running: false,
+            last_error: observe.then(|| "Local service health is unavailable".into()),
+        },
+        SourceStatus {
+            id: "audio".into(),
+            enabled: audio_enabled,
+            running: false,
+            last_error: observe.then(|| "Local service health is unavailable".into()),
+        },
+    ]
+}
+
+async fn fetch_daemon_health(api_bind: &str) -> Option<HealthResponse> {
     let url = daemon_health_url(api_bind);
     let response = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(750))
@@ -156,7 +176,7 @@ async fn fetch_browser_health(api_bind: &str) -> Option<BrowserHealthResponse> {
         .ok()?
         .error_for_status()
         .ok()?;
-    response.json::<HealthResponse>().await.ok()?.browser
+    response.json::<HealthResponse>().await.ok()
 }
 
 fn daemon_health_url(api_bind: &str) -> String {
@@ -169,13 +189,42 @@ fn daemon_health_url(api_bind: &str) -> String {
 }
 
 #[tauri::command]
-pub async fn get_permissions() -> Result<PermissionsDto, String> {
-    let p = MacPermissions;
-    let st = p.status().await.map_err(|e| e.to_string())?;
+pub async fn get_permissions(state: State<'_, AppState>) -> Result<PermissionsDto, String> {
+    let microphone = microphone_permission_state();
+    let accessibility = accessibility_permission_state();
+    let cua = state.cua.clone();
+    let cua_status = tauri::async_runtime::spawn_blocking(move || cua.status())
+        .await
+        .map_err(err)?
+        .map_err(|error| {
+            tracing::warn!(%error, "Lumen Cua permission status unavailable");
+        });
+    let (screen_recording, screen_capture_ready, direct_capture_status, direct_capture_error) =
+        match cua_status {
+            Ok(status) => {
+                let direct_capture_status = serde_json::to_value(status.direct_capture_status)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unknown".into());
+                let direct_capture_error = status
+                    .direct_capture_error
+                    .map(|error| format!("{}: {}", error.code, error.message));
+                (
+                    format!("{:?}", status.screen_recording),
+                    status.screen_recording_capturable,
+                    direct_capture_status,
+                    direct_capture_error,
+                )
+            }
+            Err(()) => ("Unavailable".into(), None, "unavailable".into(), None),
+        };
     Ok(PermissionsDto {
-        screen_recording: format!("{:?}", st.screen_recording),
-        microphone: format!("{:?}", st.microphone),
-        accessibility: format!("{:?}", st.accessibility),
+        screen_recording,
+        screen_capture_ready,
+        direct_capture_status,
+        direct_capture_error,
+        microphone: format!("{microphone:?}"),
+        accessibility: format!("{accessibility:?}"),
     })
 }
 
@@ -579,12 +628,31 @@ pub fn observe_start_inner(state: &AppState) -> Result<ObserveStatus, String> {
     let stdout = std::fs::File::create(log_path.join("daemon.stdout.log")).map_err(err)?;
     let stderr = std::fs::File::create(log_path.join("daemon.stderr.log")).map_err(err)?;
 
-    let child = Command::new(&daemon)
+    let cua_ready = if cfg.sources.screen {
+        match state.cua.ensure_running() {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(%error, "screen channel unavailable; starting other Observe channels");
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    let mut daemon_command = Command::new(&daemon);
+    daemon_command
         .current_dir(&state.data_dir)
         .env("LUMEN_NAVI_CONFIG", state.config_path.display().to_string())
         .stdin(Stdio::null())
         .stdout(stdout)
-        .stderr(stderr)
+        .stderr(stderr);
+    if cua_ready {
+        daemon_command
+            .env("LUMEN_CUA_SOCKET", state.cua.socket_path())
+            .env("LUMEN_CUA_TOKEN_FILE", state.cua.token_file());
+    }
+    let child = daemon_command
         .spawn()
         .map_err(|e| format!("spawn lumen-daemon: {e}"))?;
 
@@ -701,8 +769,19 @@ pub fn set_launch_observe(state: State<'_, AppState>, enabled: bool) -> Result<(
 }
 
 #[tauri::command]
-pub fn request_screen_permission() -> Result<bool, String> {
-    Ok(lumen_platform_macos::request_screen_recording())
+pub async fn request_screen_permission(state: State<'_, AppState>) -> Result<bool, String> {
+    let cua = state.cua.clone();
+    tauri::async_runtime::spawn_blocking(move || cua.request_screen_permission())
+        .await
+        .map_err(|error| format!("Lumen Cua permission task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn refresh_screen_permission(state: State<'_, AppState>) -> Result<bool, String> {
+    let cua = state.cua.clone();
+    tauri::async_runtime::spawn_blocking(move || cua.refresh_screen_permission())
+        .await
+        .map_err(|error| format!("Lumen Cua permission refresh task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -720,17 +799,20 @@ pub fn open_privacy_settings(kind: String) -> Result<(), String> {
 
 fn privacy_settings_url(kind: &str) -> Result<&'static str, String> {
     match kind {
+        // Prefer the classic Security privacy URL (works across more macOS
+        // versions; same as CuaDriver). The modern PrivacySecurity.extension
+        // form is a fallback used by open_screen_recording_settings.
         "screen" => {
-            Ok("x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture")
+            Ok("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
         }
         "microphone" => {
-            Ok("x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone")
+            Ok("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
         }
         "speech" => {
-            Ok("x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_SpeechRecognition")
+            Ok("x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
         }
         "accessibility" => {
-            Ok("x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility")
+            Ok("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         }
         _ => Err(format!("unknown privacy pane: {kind}")),
     }
@@ -775,8 +857,10 @@ fn open_url(url: &str) -> Result<(), String> {
 #[cfg(test)]
 mod command_tests {
     use super::{
-        daemon_health_url, ensure_browser_pairing, media_allowed, privacy_settings_url, MediaKind,
+        daemon_health_url, ensure_browser_pairing, health_sources, media_allowed,
+        privacy_settings_url, MediaKind,
     };
+    use lumen_api::{HealthResponse, SourceStatus, API_VERSION};
     use lumen_config::Config;
 
     #[test]
@@ -799,6 +883,33 @@ mod command_tests {
         assert_eq!(
             daemon_health_url("http://127.0.0.1:7420/"),
             "http://127.0.0.1:7420/health"
+        );
+    }
+
+    #[test]
+    fn daemon_source_health_overrides_process_level_inference() {
+        let daemon = HealthResponse {
+            api_version: API_VERSION,
+            product: "lumen-navi".into(),
+            sources: vec![SourceStatus {
+                id: "screen".into(),
+                enabled: true,
+                running: false,
+                last_error: Some("Screen Recording permission is required".into()),
+            }],
+            paused: false,
+            stored_events: 0,
+            ocr_docs: 0,
+            schema_version: 0,
+            browser: None,
+        };
+
+        let sources = health_sources(true, true, false, Some(&daemon));
+        let screen = sources.iter().find(|source| source.id == "screen").unwrap();
+        assert!(!screen.running);
+        assert_eq!(
+            screen.last_error.as_deref(),
+            Some("Screen Recording permission is required")
         );
     }
 

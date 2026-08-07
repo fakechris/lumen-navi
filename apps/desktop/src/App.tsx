@@ -173,6 +173,7 @@ export default function App() {
   const [assistant, setAssistant] = useState<AssistantConfig | null>(null);
   const [assistantKey, setAssistantKey] = useState("");
   const [browserPairing, setBrowserPairing] = useState<BrowserPairing | null>(null);
+  const screenPermissionPending = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -231,21 +232,44 @@ export default function App() {
 
   async function requestScreenRecording() {
     setBusy(true);
+    setError(null);
+    // Open Settings immediately so a hung/slow host never looks like a no-op.
+    setStatusNote(
+      "正在打开系统设置并请求 Lumen Cua 屏幕录制…若列表没有 Lumen Cua，请点 + 选择 Finder 中高亮的应用。",
+    );
+    try {
+      await api.openPrivacySettings("screen");
+    } catch {
+      // request_screen_permission also opens Settings; continue.
+    }
     try {
       const granted = await api.requestScreenPermission();
       if (granted) {
+        screenPermissionPending.current = false;
         await api.updateSourcesConfig({ screen: cfg?.screen ?? true });
-        setStatusNote("屏幕录制权限已生效；采集服务已重载。");
+        setStatusNote("屏幕录制权限已生效；实际捕获已验证，采集服务已重载。");
+        setError(null);
       } else {
-        await api.openPrivacySettings("screen");
+        screenPermissionPending.current = true;
+        setError(
+          "macOS 未授予 Lumen Cua 屏幕录制。tccutil reset 之后系统经常不再自动弹框——请在设置中手动开启（没有条目时用 + 选 /Applications/Lumen Cua.app），然后回到 Navi 再点一次。",
+        );
         setStatusNote(
-          "系统尚未允许屏幕录制。请在列表中开启 Lumen Navi；未授权时不会再保存只有壁纸的错误截图。",
+          "系统设置与 Finder 中的 Lumen Cua 应已打开。开启开关后返回 Navi，再点“请求屏幕录制”完成 Ready 验证。",
         );
       }
       setPerms(await api.getPermissions());
-      setError(null);
     } catch (e) {
+      screenPermissionPending.current = true;
+      try {
+        await api.openPrivacySettings("screen");
+      } catch {
+        // still surface the original error below
+      }
       setError(`请求屏幕录制权限失败：${String(e)}`);
+      setStatusNote(
+        "已打开系统设置。请手动开启 Lumen Cua（必要时 + 选择 /Applications/Lumen Cua.app），返回后再点一次。",
+      );
     } finally {
       setBusy(false);
     }
@@ -291,6 +315,25 @@ export default function App() {
     const t = setInterval(() => void refresh(), 4000);
     return () => clearInterval(t);
   }, [refresh]);
+
+  useEffect(() => {
+    const refreshPendingScreenPermission = async () => {
+      if (!screenPermissionPending.current) return;
+      try {
+        const granted = await api.refreshScreenPermission();
+        setPerms(await api.getPermissions());
+        if (!granted) return;
+        screenPermissionPending.current = false;
+        setStatusNote("Lumen Cua 基础屏幕权限已生效；请再次点击“请求屏幕录制”完成实际捕获验证。");
+        setError(null);
+        await refresh();
+      } catch (e) {
+        setError(`刷新屏幕录制权限失败：${String(e)}`);
+      }
+    };
+    window.addEventListener("focus", refreshPendingScreenPermission);
+    return () => window.removeEventListener("focus", refreshPendingScreenPermission);
+  }, [cfg?.screen, refresh]);
 
   const loadTimeline = useCallback(async () => {
     try {
@@ -607,6 +650,18 @@ export default function App() {
                     label={`屏幕录制 · ${perms?.screen_recording ?? "—"}`}
                   />
                   <StatusDot
+                    status={
+                      perms?.screen_capture_ready === true
+                        ? "done"
+                        : perms?.direct_capture_status === "unavailable" ||
+                            perms?.direct_capture_status === "probe_failed" ||
+                            perms?.direct_capture_status === "timed_out"
+                          ? "failed"
+                          : "idle"
+                    }
+                    label={`实际捕获 · ${perms?.direct_capture_status ?? "—"}`}
+                  />
+                  <StatusDot
                     status={permStatus(perms?.microphone ?? "")}
                     label={`麦克风 · ${perms?.microphone ?? "—"}`}
                   />
@@ -616,9 +671,12 @@ export default function App() {
                   />
                 </div>
                 <p className="meta mt">
-                  首次截屏或录音时，系统会请求授权。语音识别权限用于本机转写，不做听写注入。
-                  听写产品见 Lumen ASR。
+                  屏幕录制由共享的 Lumen Cua 请求授权；麦克风与辅助功能仍属于 Lumen Navi。
+                  语音识别权限用于本机转写，不做听写注入。
                 </p>
+                {perms?.direct_capture_error && (
+                  <p className="meta mt">{perms.direct_capture_error}</p>
+                )}
                 <div className="row mt">
                   <Button variant="secondary" disabled={busy} onClick={() => void requestScreenRecording()}>
                     请求屏幕录制

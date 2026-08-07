@@ -70,11 +70,17 @@ app_path="${apps[0]}"
 info_plist="$app_path/Contents/Info.plist"
 
 codesign --verify --deep --strict --verbose=2 "$app_path"
+xcrun stapler validate "$app_path"
+spctl --assess --type execute --verbose=2 "$app_path"
 signature_details="$(codesign -dv --verbose=4 "$app_path" 2>&1)"
 printf '%s\n' "$signature_details"
 
-if ! grep -Fq 'Signature=adhoc' <<<"$signature_details"; then
-  echo "Expected an ad-hoc signature, but Signature=adhoc was not reported" >&2
+if grep -Fq 'Signature=adhoc' <<<"$signature_details"; then
+  echo "Release app is ad-hoc signed; a stable Developer ID identity is required" >&2
+  exit 1
+fi
+if grep -Fq 'TeamIdentifier=not set' <<<"$signature_details"; then
+  echo "Release app has no Apple TeamIdentifier" >&2
   exit 1
 fi
 
@@ -106,6 +112,32 @@ fi
 daemon_archs="$(lipo -archs "$daemon_path")"
 if [[ "$daemon_archs" != "$expected_arch" ]]; then
   echo "Expected $expected_arch daemon, found: $daemon_archs" >&2
+  exit 1
+fi
+
+cua_app="$app_path/Contents/Resources/helpers/Lumen Cua.app"
+cua_plist="$cua_app/Contents/Info.plist"
+cua_path="$cua_app/Contents/MacOS/lumen-cua"
+if [[ ! -x "$cua_path" ]]; then
+  echo "Bundled Lumen Cua missing at $cua_path" >&2
+  exit 1
+fi
+if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$cua_plist")" != "com.lumenopen.cua" ]]; then
+  echo "Bundled Lumen Cua has the wrong bundle identifier" >&2
+  exit 1
+fi
+if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$cua_plist")" != "$expected_version" ]]; then
+  echo "Bundled Lumen Cua version does not match tag $expected_version" >&2
+  exit 1
+fi
+cua_archs="$(lipo -archs "$cua_path")"
+if [[ "$cua_archs" != "$expected_arch" ]]; then
+  echo "Expected $expected_arch Lumen Cua, found: $cua_archs" >&2
+  exit 1
+fi
+cua_signature="$(codesign -dv --verbose=4 "$cua_app" 2>&1)"
+if grep -Fq 'Signature=adhoc' <<<"$cua_signature" || grep -Fq 'TeamIdentifier=not set' <<<"$cua_signature"; then
+  echo "Bundled Lumen Cua does not have a stable Apple code identity" >&2
   exit 1
 fi
 

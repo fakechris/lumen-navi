@@ -68,8 +68,11 @@ Local DMG smoke (Apple Silicon example):
 
 ```bash
 scripts/macos/prepare-daemon-binary.sh aarch64-apple-darwin
+scripts/macos/prepare-cua-app.sh aarch64-apple-darwin
 # or for cargo check only: scripts/macos/ensure-daemon-binary-placeholder.sh
-cd apps/desktop && npm ci && npm run tauri -- build --target aarch64-apple-darwin --bundles dmg
+cd apps/desktop && npm ci
+APPLE_SIGNING_IDENTITY="$(../../scripts/macos/resolve-identity.sh)" \
+  npm run tauri -- build --target aarch64-apple-darwin --bundles dmg
 ```
 
 Install notes: [`docs/MACOS_RELEASE_NOTES.md`](MACOS_RELEASE_NOTES.md).  
@@ -80,12 +83,17 @@ permissions survive rebuilds: [`docs/MACOS_LOCAL_SIGNING.md`](MACOS_LOCAL_SIGNIN
 
 | Permission | Why |
 |------------|-----|
-| Screen Recording | Screenshots |
+| Screen Recording (`Lumen Cua`) | Screenshots |
 | Microphone | Audio chunks |
 | Speech Recognition | Optional ASR engine / SenseVoice fallback |
 | Accessibility | Selection popup (划词助手) — read selected text + mouse-up monitor |
 
-Granted via System Settings after first use; the Overview tab shows probe status.
+Screen Recording is requested by the independently signed `/Applications/Lumen Cua.app`
+(installed from a payload nested in Navi Resources). Click **请求屏幕录制** in Navi —
+do not double-click Lumen Cua itself (it is an `LSUIElement` helper; Navi starts it
+with `serve`). The Overview tab shows base grant vs real capture readiness.
+
+The other permissions belong to Lumen Navi.
 
 ## Tabs
 

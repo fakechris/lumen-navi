@@ -67,6 +67,7 @@ export const api = {
   setLaunchObserve: (enabled: boolean) =>
     invoke<void>("set_launch_observe", { enabled }),
   requestScreenPermission: () => invoke<boolean>("request_screen_permission"),
+  refreshScreenPermission: () => invoke<boolean>("refresh_screen_permission"),
   requestMicrophonePermission: () => invoke<boolean>("request_microphone_permission"),
   openPrivacySettings: (kind: string) =>
     invoke<void>("open_privacy_settings", { kind }),

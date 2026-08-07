@@ -48,3 +48,5 @@ apps/desktop/src-tauri/target/
 # Tauri externalBin artifacts (CI places target-triple binaries here)
 apps/desktop/src-tauri/binaries/lumen-daemon*
 !apps/desktop/src-tauri/binaries/.gitkeep
+apps/desktop/src-tauri/helpers/Lumen Cua.app/
+!apps/desktop/src-tauri/helpers/.gitkeep

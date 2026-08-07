@@ -37,6 +37,9 @@ export interface BrowserPairing {
 
 export interface Permissions {
   screen_recording: string;
+  screen_capture_ready: boolean | null;
+  direct_capture_status: string;
+  direct_capture_error: string | null;
   microphone: string;
   accessibility: string;
 }

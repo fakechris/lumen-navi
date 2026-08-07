@@ -3,6 +3,7 @@
 mod asr_models;
 mod assistant;
 mod commands;
+mod cua;
 mod selection_popup;
 mod shell;
 mod state;
@@ -25,7 +26,7 @@ pub fn run() {
         .map(|s| s.launch_observe && !s.needs_onboarding())
         .unwrap_or(false);
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(state)
         .setup(move |app| {
@@ -82,6 +83,7 @@ pub fn run() {
             commands::reopen_onboarding,
             commands::set_launch_observe,
             commands::request_screen_permission,
+            commands::refresh_screen_permission,
             commands::request_microphone_permission,
             commands::open_privacy_settings,
             asr_models::check_asr_model_status,
@@ -99,6 +101,14 @@ pub fn run() {
             commands::selection_popup_hide,
             commands::selection_popup_current,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Lumen Navi");
+        .build(tauri::generate_context!())
+        .expect("error while building Lumen Navi");
+
+    app.run(|handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            if let Some(state) = handle.try_state::<AppState>() {
+                state.stop_owned_observe();
+            }
+        }
+    });
 }

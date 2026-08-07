@@ -11,13 +11,13 @@ impl PermissionProbe for MacPermissions {
     async fn status(&self) -> Result<PermissionStatus, PlatformError> {
         Ok(PermissionStatus {
             screen_recording: screen_recording_state(),
-            microphone: mic_state(),
-            accessibility: accessibility_state(),
+            microphone: microphone_permission_state(),
+            accessibility: accessibility_permission_state(),
         })
     }
 }
 
-fn mic_state() -> PermissionState {
+pub fn microphone_permission_state() -> PermissionState {
     #[cfg(target_os = "macos")]
     {
         mic_state_from_av_status(unsafe { lumen_microphone_authorization_status() })
@@ -104,7 +104,7 @@ fn screen_recording_state() -> PermissionState {
     }
 }
 
-fn accessibility_state() -> PermissionState {
+pub fn accessibility_permission_state() -> PermissionState {
     #[cfg(target_os = "macos")]
     {
         // AXIsProcessTrusted — optional for intake; used later for window titles.

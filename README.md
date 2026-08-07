@@ -53,7 +53,9 @@ cargo test
 cargo run -p lumen-daemon
 ```
 
-Requires Rust stable (edition 2021+). Grant **Screen Recording** / **Microphone** (and **Speech Recognition** if using `asr.engine = speech` or Speech fallback).
+Requires Rust stable (edition 2021+). Start Observe from the desktop app so its
+bundled **Lumen Cua** helper can request Screen Recording. Microphone and optional
+Speech Recognition permissions remain owned by Lumen Navi.
 
 Default continuous ASR is **SenseVoice** (local sherpa-onnx). Models live under the **shared Lumen cluster** path  
 `~/Library/Application Support/Lumen/models/` (override with `LUMEN_MODELS_DIR` / `asr.models_root`) so navi and asr share one download.  
