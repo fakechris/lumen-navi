@@ -13,6 +13,9 @@ pub enum SourceKind {
     Audio,
     Browser,
     CodingAgent,
+    /// Frontmost-app + window-title + idle heartbeats from the activity
+    /// tracker (time-tracking layer). Lightweight metadata, no pixels.
+    Activity,
     Other(String),
 }
 

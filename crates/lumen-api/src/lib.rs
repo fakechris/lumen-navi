@@ -151,6 +151,62 @@ impl HealthResponse {
     }
 }
 
+// --- Activity / time-tracking ---
+
+/// One continuous activity segment (folded from heartbeats by the projection).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivitySegmentDto {
+    pub seg_id: String,
+    pub day: String,
+    pub app_name: Option<String>,
+    pub bundle_id: Option<String>,
+    pub window_title: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub duration_ms: i64,
+    pub is_idle: bool,
+    pub is_locked: bool,
+    pub category: Option<String>,
+    pub productivity_level: Option<String>,
+    pub event_count: i64,
+}
+
+/// Aggregated stats for one day (the dashboard's `stats` view payload).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DayStatsDto {
+    pub day: String,
+    /// Active time (excludes idle segments).
+    pub total_active_ms: i64,
+    pub total_idle_ms: i64,
+    /// 0–100 weighted average over classified segments; `None` when nothing
+    /// classified (uncategorized time is excluded from the denominator).
+    pub pulse_score: Option<f64>,
+    pub context_switches: i64,
+    /// ms per category (active only).
+    pub by_category: Vec<CategoryTotal>,
+    /// ms per app (active only), sorted descending.
+    pub top_apps: Vec<AppTotal>,
+    /// ms per local hour bucket [0..24] (active only).
+    pub by_hour: [i64; 24],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategoryTotal {
+    pub category: String,
+    pub ms: i64,
+    pub productivity_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppTotal {
+    pub app_name: String,
+    pub bundle_id: Option<String>,
+    pub ms: i64,
+    pub category: Option<String>,
+    pub productivity_level: Option<String>,
+    pub segment_count: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

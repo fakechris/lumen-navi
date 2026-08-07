@@ -1,4 +1,46 @@
-export type TabId = "overview" | "search" | "activity" | "settings";
+export type TabId = "overview" | "dashboard" | "search" | "activity" | "settings";
+
+export interface ActivitySegment {
+  seg_id: string;
+  day: string;
+  app_name: string | null;
+  bundle_id: string | null;
+  window_title: string | null;
+  started_at: string;
+  ended_at: string | null;
+  duration_ms: number;
+  is_idle: boolean;
+  is_locked: boolean;
+  category: string | null;
+  productivity_level: string | null;
+  event_count: number;
+}
+
+export interface CategoryTotal {
+  category: string;
+  ms: number;
+  productivity_level: string | null;
+}
+
+export interface AppTotal {
+  app_name: string;
+  bundle_id: string | null;
+  ms: number;
+  category: string | null;
+  productivity_level: string | null;
+  segment_count: number;
+}
+
+export interface DayStats {
+  day: string;
+  total_active_ms: number;
+  total_idle_ms: number;
+  pulse_score: number | null;
+  context_switches: number;
+  by_category: CategoryTotal[];
+  top_apps: AppTotal[];
+  by_hour: number[];
+}
 
 export interface SourceStatus {
   id: string;

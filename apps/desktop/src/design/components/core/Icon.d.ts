@@ -3,7 +3,7 @@ import React from "react";
 export type IconName =
   | "folder" | "transcript" | "settings" | "upload" | "link" | "microphone"
   | "play" | "chevronRight" | "chevronDown" | "search" | "star" | "sun"
-  | "moon" | "check" | "alert" | "translate" | "layers" | "close";
+  | "moon" | "check" | "alert" | "translate" | "layers" | "close" | "clock";
 
 export interface IconProps extends React.SVGProps<SVGSVGElement> {
   /** Glyph name from the Lumen set. */

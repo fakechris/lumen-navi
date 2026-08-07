@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
 import { Onboarding } from "./Onboarding";
+import { DashboardView } from "./views/Dashboard";
 import {
   Button,
   EmptyState,
@@ -47,6 +48,14 @@ const NAV: {
     eyebrow: "Overview",
     title: "概览",
     blurb: "权限 · 数据通道 · 本地服务状态",
+  },
+  {
+    id: "dashboard",
+    label: "时间",
+    icon: "clock",
+    eyebrow: "Time",
+    title: "时间追踪",
+    blurb: "今天你在哪些 App、哪类事情上花了时间",
   },
   {
     id: "search",
@@ -693,6 +702,10 @@ export default function App() {
                 </div>
               </div>
             </div>
+          )}
+
+          {tab === "dashboard" && (
+            <DashboardView />
           )}
 
           {tab === "search" && (

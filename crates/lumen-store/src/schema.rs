@@ -1,6 +1,6 @@
 //! SQLite schema for meta/navi.db
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 pub const MIGRATE_V1: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -149,4 +149,34 @@ ALTER TABLE browser_visits ADD COLUMN transition TEXT;
 ALTER TABLE browser_visits ADD COLUMN snapshot_hashes TEXT NOT NULL DEFAULT '[]';
 
 CREATE INDEX IF NOT EXISTS idx_browser_visits_content ON browser_visits(content_id);
+"#;
+
+/// Rebuildable activity-segment projection derived from append-only
+/// `activity.focus.v1` events (the time-tracking layer). One row per
+/// continuous run of the same app+title+idle state, with duration derived
+/// from the first/last event ts in the run.
+pub const MIGRATE_V7: &str = r#"
+CREATE TABLE IF NOT EXISTS activity_segments (
+  seg_id TEXT PRIMARY KEY NOT NULL,
+  day TEXT NOT NULL,
+  app_name TEXT,
+  bundle_id TEXT,
+  window_title TEXT,
+  url TEXT,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  is_idle INTEGER NOT NULL DEFAULT 0,
+  is_locked INTEGER NOT NULL DEFAULT 0,
+  category TEXT,
+  project TEXT,
+  productivity_level TEXT,
+  event_count INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_segments_day ON activity_segments(day);
+CREATE INDEX IF NOT EXISTS idx_activity_segments_started ON activity_segments(started_at);
+CREATE INDEX IF NOT EXISTS idx_activity_segments_app ON activity_segments(app_name);
+CREATE INDEX IF NOT EXISTS idx_activity_segments_category ON activity_segments(category);
 "#;

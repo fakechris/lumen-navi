@@ -4,8 +4,13 @@
 //! - [`SqliteStore`] — durable Phase S1 store (SQLite meta + CA blobs)
 
 mod blob;
+mod categorization;
 mod schema;
 mod sqlite;
+
+pub use categorization::{
+    classify, ActivityFields, CategoryRule, Classification, MatchField, ProductivityLevel,
+};
 
 use std::sync::Arc;
 

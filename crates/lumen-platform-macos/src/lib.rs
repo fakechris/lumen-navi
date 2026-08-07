@@ -3,9 +3,11 @@
 //! Observe capture and process enrichment — does **not** use cua-driver.
 
 mod asr;
+pub mod ax;
 mod capture;
 mod clipboard;
 mod frontmost;
+mod idle;
 mod lock;
 mod mic;
 mod ocr;
@@ -16,6 +18,7 @@ pub use asr::MacSpeechAsr;
 pub use capture::{MacDisplays, MacScreenCapturer};
 pub use clipboard::clipboard_grab_selection;
 pub use frontmost::MacFrontmost;
+pub use idle::MacIdle;
 pub use lock::{is_screen_locked, MacScreenLock};
 pub use mic::{default_input_available, MacMicCapturer};
 pub use ocr::{default_ocr_languages, MacVisionOcr};

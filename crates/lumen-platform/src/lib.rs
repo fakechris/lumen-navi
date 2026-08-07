@@ -90,6 +90,13 @@ pub trait FrontmostAppProbe: Send + Sync {
     async fn frontmost(&self) -> Result<Option<FrontmostApp>, PlatformError>;
 }
 
+/// System-wide idle (AFK) detector — seconds since the last keyboard/mouse
+/// input. Needs no TCC permission on macOS (`CGEventSourceSecondsSinceLastEventType`).
+#[async_trait]
+pub trait IdleProbe: Send + Sync {
+    async fn idle_seconds(&self) -> Result<f64, PlatformError>;
+}
+
 #[async_trait]
 pub trait ScreenLockProbe: Send + Sync {
     async fn is_locked(&self) -> Result<bool, PlatformError>;
@@ -480,6 +487,14 @@ pub struct NullScreenLock;
 impl ScreenLockProbe for NullScreenLock {
     async fn is_locked(&self) -> Result<bool, PlatformError> {
         Ok(false)
+    }
+}
+
+pub struct NullIdle;
+#[async_trait]
+impl IdleProbe for NullIdle {
+    async fn idle_seconds(&self) -> Result<f64, PlatformError> {
+        Ok(0.0)
     }
 }
 

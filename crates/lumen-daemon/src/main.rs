@@ -18,7 +18,7 @@ use lumen_config::{AsrConfig, AudioConfig, Config, PrivacyConfig};
 use lumen_cua::{CuaCaptureAdapter, CuaClient};
 use lumen_platform::{MicCapturer, MicOpenConfig, OcrEngine, PlatformError};
 use lumen_platform_macos::{
-    microphone_permission_state, MacFrontmost, MacMicCapturer, MacScreenLock, MacSpeechAsr,
+    microphone_permission_state, MacFrontmost, MacIdle, MacMicCapturer, MacScreenLock, MacSpeechAsr,
     MacVisionOcr,
 };
 use lumen_process::{
@@ -309,6 +309,7 @@ async fn main() -> Result<()> {
             Arc::new(capture),
             Arc::new(MacFrontmost),
             Arc::new(MacScreenLock),
+            Arc::new(MacIdle),
             config.capture.clone(),
             config.privacy.clone(),
         );
@@ -381,6 +382,16 @@ async fn main() -> Result<()> {
                     break;
                 }
                 _ = focus_tick.tick() => {
+                    // Activity tracking: emit a lightweight activity.focus.v1
+                    // heartbeat independent of the screenshot path. This is the
+                    // data source for the time-tracking projection — survives
+                    // even when screenshots are visually-debounced away.
+                    if let Some(ev) = orch.poll_activity().await {
+                        if let Err(e) = store.append_event(ev) {
+                            warn!(error = %e, "append activity event failed");
+                        }
+                    }
+
                     if let Some(reason) = orch.poll_focus_trigger().await {
                         match orch.capture_tick(reason).await {
                             Ok(Some(batch)) => {

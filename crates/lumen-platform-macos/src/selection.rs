@@ -5,8 +5,16 @@
 //!
 //! Requires macOS Accessibility permission (`accessibility_trusted`).
 
+#[cfg(target_os = "macos")]
+use crate::ax::{
+    ax_string_attr, AxUIElementRef, AxValueRef, CFRange, K_AX_VALUE_TYPE_CF_RANGE,
+    K_AX_VALUE_TYPE_CGRECT, ReleaseGuard, AXUIElementCopyAttributeValue,
+    AXUIElementCopyParameterizedAttributeValue, AXUIElementCreateApplication,
+    AXUIElementCreateSystemWide, AXUIElementGetPid, AXUIElementSetAttributeValue, AXValueCreate,
+    AXValueGetValue, AXValueGetType, AXIsProcessTrustedWithOptions,
+};
+#[cfg(target_os = "macos")]
 use std::ffi::c_void;
-
 #[cfg(target_os = "macos")]
 use core_foundation::base::{TCFType, CFTypeRef};
 #[cfg(target_os = "macos")]
@@ -152,58 +160,6 @@ where
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
-type AXUIElementRef = *const c_void;
-#[cfg(target_os = "macos")]
-type AXValueRef = *const c_void;
-/// `AXError` — 0 == kAXErrorSuccess.
-#[cfg(target_os = "macos")]
-type AXError = i32;
-/// `AXValueType` is a CFIndex enum.
-#[cfg(target_os = "macos")]
-type AXValueType = i64;
-
-#[cfg(target_os = "macos")]
-const K_AX_VALUE_TYPE_CGRECT: AXValueType = 3;
-#[cfg(target_os = "macos")]
-const K_AX_VALUE_TYPE_CF_RANGE: AXValueType = 4;
-
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct CFRange {
-    location: isize,
-    length: isize,
-}
-
-#[cfg(target_os = "macos")]
-#[link(name = "ApplicationServices", kind = "framework")]
-extern "C" {
-    fn AXIsProcessTrustedWithOptions(options: core_foundation::dictionary::CFDictionaryRef)
-        -> bool;
-    fn AXUIElementCreateSystemWide() -> AXUIElementRef;
-    fn AXUIElementCopyAttributeValue(
-        element: AXUIElementRef,
-        attribute: CFStringRef,
-        value: *mut CFTypeRef,
-    ) -> AXError;
-    fn AXUIElementCopyParameterizedAttributeValue(
-        element: AXUIElementRef,
-        attribute: CFStringRef,
-        parameter: CFTypeRef,
-        value: *mut CFTypeRef,
-    ) -> AXError;
-    fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
-    fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
-    fn AXUIElementSetAttributeValue(
-        element: AXUIElementRef,
-        attribute: CFStringRef,
-        value: CFTypeRef,
-    ) -> AXError;
-    fn AXValueCreate(the_type: AXValueType, value_ptr: *const c_void) -> AXValueRef;
-    fn AXValueGetType(value: AXValueRef) -> AXValueType;
-    fn AXValueGetValue(value: AXValueRef, the_type: AXValueType, value_ptr: *mut c_void) -> bool;
-}
-
-#[cfg(target_os = "macos")]
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGEventCreate(source: *const c_void) -> *mut c_void;
@@ -211,38 +167,12 @@ extern "C" {
     fn CGEventTapEnable(tap: *const c_void, enable: bool);
 }
 
+// Local aliases keep the call-site names this file already used before the AX
+// FFI was extracted into `ax.rs`.
 #[cfg(target_os = "macos")]
-struct ReleaseGuard(*const c_void);
+type AXUIElementRef = AxUIElementRef;
 #[cfg(target_os = "macos")]
-impl Drop for ReleaseGuard {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe { core_foundation_sys::base::CFRelease(self.0) };
-        }
-    }
-}
-
-/// Read a CFString attribute of an AX element (helper for role/diagnostics).
-#[cfg(target_os = "macos")]
-unsafe fn ax_string_attr(element: AXUIElementRef, name: &str) -> Option<String> {
-    use core_foundation_sys::base::{CFGetTypeID, CFRelease};
-    use core_foundation_sys::string::CFStringGetTypeID;
-
-    let attr = CFString::new(name);
-    let mut value: CFTypeRef = std::ptr::null();
-    if AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value) != 0
-        || value.is_null()
-    {
-        return None;
-    }
-    if CFGetTypeID(value) != CFStringGetTypeID() {
-        CFRelease(value);
-        return None;
-    }
-    let s = CFString::wrap_under_get_rule(value as CFStringRef).to_string();
-    CFRelease(value);
-    Some(s)
-}
+type AXValueRef = AxValueRef;
 
 /// Non-empty AXSelectedText of an element, with the AX error logged.
 #[cfg(target_os = "macos")]

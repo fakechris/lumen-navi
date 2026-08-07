@@ -27,6 +27,7 @@ const PATHS = {
   translate: <><path {...P} d="M4 6h9M8.5 4v2M10.5 6c-.6 4-3 6.8-6.5 8.5M6 10c.9 2 2.8 3.5 5 4.5" /><path {...P} d="M13 20l3.5-8 3.5 8M14.3 17h4.4" /></>,
   layers: <><path {...P} d="M12 3 3 8l9 5 9-5-9-5Z" /><path {...P} d="m3 12 9 5 9-5M3 16l9 5 9-5" /></>,
   close: <path {...P} d="M6 6l12 12M18 6 6 18" />,
+  clock: <><circle {...P} cx="12" cy="12" r="9" /><path {...P} d="M12 7.5V12l3 2" /></>,
 };
 
 export function Icon({ name, size = 20, ...props }) {

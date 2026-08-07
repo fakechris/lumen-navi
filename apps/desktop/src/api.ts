@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ActivitySegment,
   AsrModelCandidate,
   AsrModelStatus,
   AssistantAction,
@@ -7,6 +8,7 @@ import type {
   AssistantUpdate,
   BrowserPairing,
   ConfigSummary,
+  DayStats,
   EventSummary,
   Health,
   ObserveStatus,
@@ -51,6 +53,10 @@ export const api = {
     invoke<ConfigSummary>("update_sources_config", { update }),
   generateDaySummary: (day?: string) =>
     invoke<string>("generate_day_summary", { day: day ?? null }),
+  activitySegments: (day: string) =>
+    invoke<ActivitySegment[]>("activity_segments", { day }),
+  activityStats: (day: string) =>
+    invoke<DayStats>("activity_stats", { day }),
   setPrivacyPaused: (paused: boolean) =>
     invoke<void>("set_privacy_paused", { paused }),
   observeStatus: () => invoke<ObserveStatus>("observe_status"),

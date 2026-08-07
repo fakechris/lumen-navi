@@ -9,6 +9,7 @@ description = "Persistence for raw events and artifacts"
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
+lumen-api = { workspace = true }
 lumen-intake = { workspace = true }
 lumen-types = { workspace = true }
 rusqlite = { workspace = true }

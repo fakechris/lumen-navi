@@ -32,10 +32,21 @@ fn frontmost_native() -> Option<FrontmostApp> {
         .bundleIdentifier()
         .map(|s: objc2::rc::Retained<NSString>| s.to_string())
         .filter(|s| !s.is_empty());
+
+    // Window title via Accessibility (same permission path as the selection
+    // popup). NSRunningApplication::processIdentifier gives the pid we need to
+    // scope the AX query to the frontmost app.
+    let pid = app.processIdentifier();
+    let window_title = if pid > 0 {
+        crate::ax::focused_window_title(pid)
+    } else {
+        None
+    };
+
     Some(FrontmostApp {
         app_name,
         bundle_id,
-        window_title: None,
+        window_title,
     })
 }
 

@@ -390,6 +390,16 @@ pub fn list_timeline(
 }
 
 #[tauri::command]
+pub fn activity_segments(state: State<'_, AppState>, day: String) -> Result<Vec<lumen_api::ActivitySegmentDto>, String> {
+    state.store.list_activity_segments(&day).map_err(err)
+}
+
+#[tauri::command]
+pub fn activity_stats(state: State<'_, AppState>, day: String) -> Result<lumen_api::DayStatsDto, String> {
+    state.store.activity_day_stats(&day).map_err(err)
+}
+
+#[tauri::command]
 pub fn get_event_image_data_url(
     state: State<'_, AppState>,
     event_id: String,

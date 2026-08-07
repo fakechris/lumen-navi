@@ -107,6 +107,8 @@ pub fn router(state: ControlState) -> Router {
         .route("/v1/browser/policy", get(get_browser_policy))
         .route("/v1/browser/export", get(get_browser_export))
         .route("/v1/control", post(post_control))
+        .route("/v1/activity/segments", get(get_activity_segments))
+        .route("/v1/activity/stats", get(get_activity_stats))
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
 }
@@ -401,6 +403,43 @@ async fn get_ocr_search(
 ) -> impl IntoResponse {
     match search_ocr(&st, &q.q, q.limit) {
         Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ControlResponse::Error {
+                message: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ActivityDayQuery {
+    day: String,
+}
+
+async fn get_activity_segments(
+    State(st): State<ControlState>,
+    Query(q): Query<ActivityDayQuery>,
+) -> impl IntoResponse {
+    match st.store.list_activity_segments(&q.day) {
+        Ok(segments) => (StatusCode::OK, Json(segments)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ControlResponse::Error {
+                message: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_activity_stats(
+    State(st): State<ControlState>,
+    Query(q): Query<ActivityDayQuery>,
+) -> impl IntoResponse {
+    match st.store.activity_day_stats(&q.day) {
+        Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ControlResponse::Error {
