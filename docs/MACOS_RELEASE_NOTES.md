@@ -34,5 +34,6 @@ grep 'x64\.dmg$' SHA256SUMS.txt | shasum -a 256 --check
 ### 说明
 
 - 应用内嵌 `Lumen Cua.app`（屏幕权限与捕获）和 `lumen-daemon`（策略、存储、OCR、ASR）。
+- **Lumen Cua** 安装到 `/Applications/Lumen Cua.app`，无窗口；请在 Navi 里点「请求屏幕录制」，不要双击 Cua。
 - 数据默认：`~/Library/Application Support/LumenNavi/`
 - **听写/热键注入** 请用独立产品 [Lumen ASR](https://github.com/fakechris/lumen-asr)，与本仓库无关。

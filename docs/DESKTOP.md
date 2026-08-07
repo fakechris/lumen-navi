@@ -88,8 +88,12 @@ permissions survive rebuilds: [`docs/MACOS_LOCAL_SIGNING.md`](MACOS_LOCAL_SIGNIN
 | Speech Recognition | Optional ASR engine / SenseVoice fallback |
 | Accessibility | Selection popup (划词助手) — read selected text + mouse-up monitor |
 
-Screen Recording is requested by the nested, independently signed `Lumen Cua.app`.
-The other permissions belong to Lumen Navi. The Overview tab shows probe status.
+Screen Recording is requested by the independently signed `/Applications/Lumen Cua.app`
+(installed from a payload nested in Navi Resources). Click **请求屏幕录制** in Navi —
+do not double-click Lumen Cua itself (it is an `LSUIElement` helper; Navi starts it
+with `serve`). The Overview tab shows base grant vs real capture readiness.
+
+The other permissions belong to Lumen Navi.
 
 ## Tabs
 

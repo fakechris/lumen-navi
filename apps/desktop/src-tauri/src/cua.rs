@@ -129,11 +129,15 @@ impl CuaController {
         {
             use std::io::{Read, Seek};
 
+            // Foreground LaunchServices start (no -g): TCC Screen Recording prompts
+            // are frequently suppressed for background accessory processes.
+            // Bounded wait so Navi never appears frozen if the host hangs.
+            const PERMISSION_HOST_WAIT: Duration = Duration::from_secs(120);
+
             let mut result = create_permission_result_file().map_err(|error| error.to_string())?;
-            let status = Command::new("/usr/bin/open")
+            let mut launcher = Command::new("/usr/bin/open")
                 .arg("-n")
                 .arg("-W")
-                .arg("-g")
                 .arg(&self.app)
                 .arg("--args")
                 .arg(PERMISSION_HOST_ARG)
@@ -143,17 +147,42 @@ impl CuaController {
                 .arg(result.device.to_string())
                 .arg("--result-inode")
                 .arg(result.inode.to_string())
-                .status()
+                .spawn()
                 .map_err(|error| {
                     let _ = std::fs::remove_file(&result.path);
                     format!("launch Lumen Cua permission host: {error}")
                 })?;
-            if !status.success() {
-                let _ = std::fs::remove_file(&result.path);
-                return Err(format!(
-                    "Lumen Cua permission host failed to launch with {status}"
-                ));
-            }
+
+            let started = Instant::now();
+            let host_exit_status = loop {
+                match launcher.try_wait() {
+                    Ok(Some(status)) => break Some(status),
+                    Ok(None) => {
+                        if permission_result_has_payload(&result.path) {
+                            // Host finished writing; open -W may still be draining.
+                            let _ = wait_for_child_exit(&mut launcher, Duration::from_secs(3));
+                            break launcher.try_wait().ok().flatten();
+                        }
+                        if started.elapsed() >= PERMISSION_HOST_WAIT {
+                            let executable = self.app.join("Contents/MacOS/lumen-cua");
+                            let _ = terminate_permission_host_process(&executable);
+                            let _ = launcher.kill();
+                            let _ = launcher.wait();
+                            let _ = std::fs::remove_file(&result.path);
+                            return Err(
+                                "Lumen Cua permission host timed out after 120s waiting for TCC / ScreenCaptureKit"
+                                    .into(),
+                            );
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&result.path);
+                        return Err(format!("poll Lumen Cua permission host: {error}"));
+                    }
+                }
+            };
+
             result
                 .file
                 .rewind()
@@ -165,6 +194,14 @@ impl CuaController {
                 .map_err(|error| format!("read Lumen Cua permission result: {error}"));
             let _ = std::fs::remove_file(&result.path);
             read?;
+            if payload.is_empty() {
+                let status_note = host_exit_status
+                    .map(|status| format!(" (open exit {status})"))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "Lumen Cua permission host exited without writing a result{status_note}"
+                ));
+            }
             serde_json::from_slice(&payload)
                 .map_err(|error| format!("decode Lumen Cua permission result: {error}"))
         }
@@ -654,6 +691,43 @@ fn terminate_exact_cua_process(executable: &Path) -> Result<()> {
     Ok(())
 }
 
+fn permission_result_has_payload(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false)
+}
+
+/// Stop a stuck permission-host instance without touching the long-lived serve daemon.
+#[cfg(target_os = "macos")]
+fn terminate_permission_host_process(executable: &Path) -> Result<()> {
+    let output = Command::new("/bin/ps")
+        .args(["-ax", "-o", "pid=,command="])
+        .output()
+        .context("list processes for Lumen Cua permission host")?;
+    if !output.status.success() {
+        bail!("ps failed while locating Lumen Cua permission host");
+    }
+    let needle = format!("{} {}", executable.display(), PERMISSION_HOST_ARG);
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let line = line.trim();
+        let Some((pid_text, command)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        if !command.contains(&needle) {
+            continue;
+        }
+        let pid: u32 = pid_text
+            .trim()
+            .parse()
+            .context("parse Lumen Cua permission host pid")?;
+        let _ = Command::new("/bin/kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status();
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn wait_for_child_exit(child: &mut std::process::Child, timeout: Duration) -> Result<bool> {
     let started = Instant::now();
@@ -755,6 +829,18 @@ mod tests {
 
         assert!(!permission_setup_is_ready(&read_only));
         assert!(permission_setup_is_ready(&ready));
+    }
+
+    #[test]
+    fn permission_result_payload_probe_ignores_empty_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let empty = temp.path().join("empty.json");
+        std::fs::write(&empty, []).unwrap();
+        assert!(!permission_result_has_payload(&empty));
+        let full = temp.path().join("full.json");
+        std::fs::write(&full, b"{\"ok\":true}").unwrap();
+        assert!(permission_result_has_payload(&full));
+        assert!(!permission_result_has_payload(&temp.path().join("missing.json")));
     }
 
     #[test]

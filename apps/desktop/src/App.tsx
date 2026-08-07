@@ -232,23 +232,34 @@ export default function App() {
 
   async function requestScreenRecording() {
     setBusy(true);
+    setError(null);
+    setStatusNote("正在通过 Lumen Cua 请求屏幕录制权限（可能弹出系统授权）…");
     try {
       const granted = await api.requestScreenPermission();
       if (granted) {
         screenPermissionPending.current = false;
         await api.updateSourcesConfig({ screen: cfg?.screen ?? true });
-        setStatusNote("屏幕录制权限已生效；采集服务已重载。");
+        setStatusNote("屏幕录制权限已生效；实际捕获已验证，采集服务已重载。");
       } else {
         screenPermissionPending.current = true;
         await api.openPrivacySettings("screen");
         setStatusNote(
-          "macOS 尚未允许 Lumen Cua。请在已打开的屏幕与系统音频录制设置中开启它；如果系统没有自动列出，再使用 + 选择 /Applications/Lumen Cua.app。",
+          "macOS 尚未允许 Lumen Cua。请在已打开的屏幕与系统音频录制设置中开启它；如果系统没有自动列出，再使用 + 选择 /Applications/Lumen Cua.app。开启后回到 Navi 再点一次。",
         );
       }
       setPerms(await api.getPermissions());
       setError(null);
     } catch (e) {
+      screenPermissionPending.current = true;
+      try {
+        await api.openPrivacySettings("screen");
+      } catch {
+        // still surface the original error below
+      }
       setError(`请求屏幕录制权限失败：${String(e)}`);
+      setStatusNote(
+        "已尝试打开系统设置。请确认已开启 Lumen Cua（必要时用 + 选择 /Applications/Lumen Cua.app），然后返回再点“请求屏幕录制”。",
+      );
     } finally {
       setBusy(false);
     }

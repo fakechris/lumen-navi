@@ -3,7 +3,9 @@ use lumen_platform_macos::{request_screen_recording, screen_recording_access_gra
 
 use crate::{CuaStatus, DirectCaptureError, DirectCaptureStatus};
 
-const DIRECT_CAPTURE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+// Permission-host UX must not look hung. 90s covers a slow SCK callback while
+// still failing closed if the probe never returns.
+const DIRECT_CAPTURE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 pub(crate) fn read_only_status() -> CuaStatus {
     status_from_observations(screen_recording_access_granted(), None)
@@ -103,7 +105,7 @@ fn receive_direct_capture_probe(
         if started.elapsed() >= DIRECT_CAPTURE_PROBE_TIMEOUT {
             return Err(DirectCaptureError {
                 code: "direct_capture_probe_timed_out".into(),
-                message: "ScreenCaptureKit capability probe did not complete within 5 minutes"
+                message: "ScreenCaptureKit capability probe did not complete within 90 seconds"
                     .into(),
             });
         }
@@ -127,7 +129,7 @@ fn receive_direct_capture_probe(
         Ok(result) => result,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(DirectCaptureError {
             code: "direct_capture_probe_timed_out".into(),
-            message: "ScreenCaptureKit capability probe did not complete within 5 minutes".into(),
+            message: "ScreenCaptureKit capability probe did not complete within 90 seconds".into(),
         }),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(DirectCaptureError {
             code: "direct_capture_probe_failed".into(),
