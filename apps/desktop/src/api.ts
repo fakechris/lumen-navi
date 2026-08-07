@@ -7,6 +7,7 @@ import type {
   AssistantConfig,
   AssistantUpdate,
   BrowserPairing,
+  CategoryRule,
   ConfigSummary,
   DayStats,
   EventSummary,
@@ -57,6 +58,10 @@ export const api = {
     invoke<ActivitySegment[]>("activity_segments", { day }),
   activityStats: (day: string) =>
     invoke<DayStats>("activity_stats", { day }),
+  activityListCategoryRules: () =>
+    invoke<CategoryRule[]>("activity_list_category_rules"),
+  activitySaveCategoryRules: (rules: CategoryRule[]) =>
+    invoke<void>("activity_save_category_rules", { rules }),
   setPrivacyPaused: (paused: boolean) =>
     invoke<void>("set_privacy_paused", { paused }),
   observeStatus: () => invoke<ObserveStatus>("observe_status"),

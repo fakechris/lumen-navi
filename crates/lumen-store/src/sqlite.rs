@@ -1362,6 +1362,81 @@ impl SqliteStore {
         })
     }
 
+    /// Get the current user-defined category rules (from the `kv` table).
+    pub fn list_category_rules(&self) -> Result<Vec<CategoryRule>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM kv WHERE key = 'activity.category_rules'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::db)?;
+        match raw {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| StoreError::Other(format!("parse category rules: {e}"))),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Save the full user-defined rule list (replaces existing) and re-apply
+    /// categorization to all segments so historical stats reflect the new rules.
+    pub fn save_category_rules_and_reapply(
+        &self,
+        rules: Vec<CategoryRule>,
+    ) -> Result<(), StoreError> {
+        let json = serde_json::to_string(&rules)
+            .map_err(|e| StoreError::Other(format!("serialize category rules: {e}")))?;
+
+        let mut conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let tx = conn.transaction().map_err(StoreError::db)?;
+
+        // Upsert the rule list.
+        tx.execute(
+            r#"INSERT INTO kv (key, value) VALUES ('activity.category_rules', ?1)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value"#,
+            params![json],
+        )
+        .map_err(StoreError::db)?;
+
+        // Re-classify every segment: load its fields, re-run classify, update.
+        let mut stmt = tx
+            .prepare(
+                r#"SELECT seg_id, app_name, bundle_id, window_title FROM activity_segments"#,
+            )
+            .map_err(StoreError::db)?;
+        let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(StoreError::db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::db)?;
+        drop(stmt);
+
+        for (seg_id, app_name, bundle_id, window_title) in rows {
+            let fields = ActivityFields {
+                app_name: app_name.as_deref(),
+                bundle_id: bundle_id.as_deref(),
+                window_title: window_title.as_deref(),
+                url: None,
+            };
+            let c = crate::categorization::classify(&fields, &rules);
+            let level = c.level.map(productivity_level_str);
+            tx.execute(
+                r#"UPDATE activity_segments
+                   SET category = ?1, productivity_level = ?2
+                   WHERE seg_id = ?3"#,
+                params![c.category.as_deref(), level.as_deref(), seg_id],
+            )
+            .map_err(StoreError::db)?;
+        }
+
+        tx.commit().map_err(StoreError::db)?;
+        Ok(())
+    }
+
     /// Load first artifact bytes for an event (relative path under data_dir).
     pub fn load_first_artifact_bytes(&self, event_id: Uuid) -> Result<Option<(String, Vec<u8>)>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;

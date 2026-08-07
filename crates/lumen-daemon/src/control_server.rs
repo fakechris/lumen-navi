@@ -109,6 +109,7 @@ pub fn router(state: ControlState) -> Router {
         .route("/v1/control", post(post_control))
         .route("/v1/activity/segments", get(get_activity_segments))
         .route("/v1/activity/stats", get(get_activity_stats))
+        .route("/v1/activity/rules", get(get_activity_rules).post(post_activity_rules))
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
 }
@@ -440,6 +441,37 @@ async fn get_activity_stats(
 ) -> impl IntoResponse {
     match st.store.activity_day_stats(&q.day) {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ControlResponse::Error {
+                message: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_activity_rules(
+    State(st): State<ControlState>,
+) -> impl IntoResponse {
+    match st.store.list_category_rules() {
+        Ok(rules) => (StatusCode::OK, Json(rules)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ControlResponse::Error {
+                message: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn post_activity_rules(
+    State(st): State<ControlState>,
+    Json(rules): Json<Vec<lumen_store::CategoryRule>>,
+) -> impl IntoResponse {
+    match st.store.save_category_rules_and_reapply(rules) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ControlResponse::Error {

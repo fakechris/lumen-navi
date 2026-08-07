@@ -44,8 +44,13 @@ fn cua_client_from_env() -> Option<CuaClient> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // INFO by default; RUST_LOG upgrades per-crate (e.g. RUST_LOG=lumen_daemon=debug).
+    let max_level = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|v| v.to_ascii_uppercase().parse::<tracing::Level>().ok())
+        .unwrap_or(Level::INFO);
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_max_level(max_level)
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
@@ -56,7 +61,12 @@ async fn main() -> Result<()> {
         "daemon starting"
     );
 
-    let config = Config::load_or_default("navi.toml").unwrap_or_default();
+    // The desktop app passes the config path via env; fall back to cwd-relative
+    // `navi.toml` for standalone runs (e.g. tests, dogfood from a shell).
+    // The desktop app passes the config path via env; fall back to cwd-relative
+    // `navi.toml` for standalone runs (tests, dogfood from a shell).
+    let config_path = std::env::var("LUMEN_NAVI_CONFIG").unwrap_or_else(|_| "navi.toml".into());
+    let config = Config::load_or_default(&config_path).unwrap_or_default();
     info!(
         data_dir = %config.data_dir.display(),
         screen = config.sources.screen,
@@ -299,6 +309,48 @@ async fn main() -> Result<()> {
     let mut ran_long_loop = false;
     let expect_long = (screen_ready && config.capture.screen_ticks == 0)
         || (config.sources.audio && config.audio.ticks == 0);
+
+    // Activity tracking runs independently of screen capture. When screen is
+    // ready, the capture loop's focus_tick already drives poll_activity(). But
+    // when screen capture is unavailable (no Cua / no permission), we still
+    // want time tracking — so spin up a standalone activity loop here.
+    if !screen_ready {
+        let store_act = Arc::clone(&store);
+        let mut orch = CaptureOrchestrator::new(
+            Arc::new(lumen_platform::NullDisplays),
+            Arc::new(lumen_platform::NullCapturer),
+            Arc::new(MacFrontmost),
+            Arc::new(MacScreenLock),
+            Arc::new(MacIdle),
+            config.capture.clone(),
+            config.privacy.clone(),
+        );
+        let mut tick = tokio::time::interval(Duration::from_millis(
+            config.capture.focus_poll_ms.max(500),
+        ));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let act_cancel = observe_cancel_rx.clone();
+        tokio::spawn(async move {
+            tick.tick().await; // initial
+            info!("activity tracker running (screen capture unavailable, tracking time only)");
+            // Activity tracking is always-on. It does NOT honor observe_cancel
+            // (that signal is for winding down screen/audio workers mid-run);
+            // this task runs until the process exits.
+            let _ = act_cancel;
+            loop {
+                tick.tick().await;
+                if let Some(ev) = orch.poll_activity().await {
+                    if let Err(e) = store_act.append_event(ev) {
+                        warn!(error = %e, "append activity event failed");
+                    }
+                }
+                if let Some(closed) = orch.close_idle_session() {
+                    let _ = store_act.upsert_session(&closed);
+                }
+            }
+        });
+        ran_long_loop = true;
+    }
 
     if screen_ready {
         let capture = CuaCaptureAdapter::new(

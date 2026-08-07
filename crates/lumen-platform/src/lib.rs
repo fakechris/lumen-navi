@@ -498,6 +498,40 @@ impl IdleProbe for NullIdle {
     }
 }
 
+/// No-op display enumerator — for standalone activity tracking without screen
+/// capture (returns an empty display list so the orchestrator never attempts a
+/// screenshot).
+pub struct NullDisplays;
+#[async_trait]
+impl DisplayEnumerator for NullDisplays {
+    async fn list_displays(&self) -> Result<Vec<DisplayInfo>, PlatformError> {
+        Ok(Vec::new())
+    }
+}
+
+/// No-op screen capturer — always errors. The standalone activity tracker
+/// never calls capture, but the orchestrator requires a capturer to construct.
+pub struct NullCapturer;
+#[async_trait]
+impl ScreenCapturer for NullCapturer {
+    async fn capture_display(
+        &self,
+        _id: DisplayId,
+        _max_edge: u32,
+        _jpeg: bool,
+        _jpeg_quality: u8,
+    ) -> Result<ScreenshotFrame, PlatformError> {
+        Err(PlatformError::Unsupported("null capturer".into()))
+    }
+    async fn capture_display_raw(
+        &self,
+        _id: DisplayId,
+        _scale_div: u32,
+    ) -> Result<RawFrame, PlatformError> {
+        Err(PlatformError::Unsupported("null capturer".into()))
+    }
+}
+
 /// Mean absolute difference of grayscale planes in [0, 1].
 pub fn gray_distance(a: &[u8], b: &[u8]) -> f64 {
     if a.is_empty() || b.is_empty() || a.len() != b.len() {

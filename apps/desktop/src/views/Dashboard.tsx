@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as d3 from "d3";
 import { api } from "../api";
-import { Card, EmptyState, StatCard } from "../design";
-import type { ActivitySegment, DayStats } from "../types";
+import { Button, Card, EmptyState, IconButton, Input, Select, StatCard } from "../design";
+import type { CategoryRule, MatchField, ProductivityLevel, ActivitySegment, DayStats } from "../types";
 
 // --- helpers --------------------------------------------------------------
 
@@ -125,6 +125,9 @@ export function DashboardView() {
               hint={stats!.by_category[0] ? fmtDuration(stats!.by_category[0].ms) : undefined}
             />
           </div>
+
+          {/* Category rules manager */}
+          <CategoryRulesManager onRulesChanged={load} />
 
           {/* Timeline */}
           <Card pad={16}>
@@ -453,5 +456,190 @@ function TopApps({ stats }: { stats: DayStats }) {
         </div>
       ))}
     </div>
+  );
+}
+
+// --- Category rules manager (collapsible) ---------------------------------
+
+function CategoryRulesManager({ onRulesChanged }: { onRulesChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [rules, setRules] = useState<CategoryRule[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // new-rule form
+  const [field, setField] = useState<MatchField>("app_name");
+  const [value, setValue] = useState("");
+  const [category, setCategory] = useState("");
+  const [level, setLevel] = useState<ProductivityLevel | "">("productive");
+
+  const loadRules = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await api.activityListCategoryRules();
+      setRules(r);
+    } catch { /* ignore */ }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (open && rules.length === 0 && !loading) {
+      void loadRules();
+    }
+  }, [open, rules.length, loading, loadRules]);
+
+  const addRule = useCallback(async () => {
+    if (!value.trim() || !category.trim()) return;
+    const newRule: CategoryRule = {
+      field,
+      value: value.trim(),
+      category: category.trim(),
+      level: level || null,
+    };
+    setSaving(true);
+    try {
+      await api.activitySaveCategoryRules([...rules, newRule]);
+      setValue("");
+      setCategory("");
+      await loadRules();
+      onRulesChanged();
+    } catch { /* ignore */ }
+    setSaving(false);
+  }, [field, value, category, level, rules, loadRules, onRulesChanged]);
+
+  const removeRule = useCallback(async (idx: number) => {
+    const next = rules.filter((_, i) => i !== idx);
+    setSaving(true);
+    try {
+      await api.activitySaveCategoryRules(next);
+      await loadRules();
+      onRulesChanged();
+    } catch { /* ignore */ }
+    setSaving(false);
+  }, [rules, loadRules, onRulesChanged]);
+
+  return (
+    <Card pad={16}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          background: "none",
+          border: "none",
+          cursor: "pointer",
+          padding: 0,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          width: "100%",
+        }}
+      >
+        <span style={{
+          fontSize: "var(--text-sm)",
+          fontWeight: "var(--weight-semibold)",
+          color: "var(--text)",
+        }}>分类规则</span>
+        <span style={{ fontSize: "var(--text-xs)", color: "var(--text-tertiary)" }}>
+          （{rules.length} 条自定义 · 覆盖内置默认表 · 保存后重算历史）
+        </span>
+        <span style={{ marginLeft: "auto", color: "var(--text-tertiary)", fontSize: 12 }}>
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+
+      {open && (
+        <div className="stack" style={{ marginTop: 12 }}>
+          {/* existing rules */}
+          {loading && <div style={{ color: "var(--text-tertiary)", fontSize: "var(--text-xs)" }}>加载…</div>}
+          {!loading && rules.length === 0 && (
+            <div style={{ color: "var(--text-tertiary)", fontSize: "var(--text-xs)" }}>
+              暂无自定义规则。常用 app 已内置分类（如 VSCode=Development）。
+            </div>
+          )}
+          {rules.map((r, i) => (
+            <div key={i} style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: "var(--text-xs)",
+              fontFamily: "var(--font-mono)",
+            }}>
+              <span style={{ color: "var(--text-tertiary)" }}>{r.field}:</span>
+              <span style={{ color: "var(--text-secondary)" }}>{r.value}</span>
+              <span style={{ color: "var(--text-tertiary)" }}>→</span>
+              <span style={{ color: "var(--text)" }}>{r.category}</span>
+              {r.level && (
+                <span style={{
+                  padding: "1px 6px",
+                  borderRadius: "var(--radius-pill)",
+                  background: r.level === "productive" ? "var(--c-3)" : r.level === "distracting" ? "var(--c-6)" : "var(--graph-grid)",
+                  color: "var(--text)",
+                  fontSize: 10,
+                }}>{r.level}</span>
+              )}
+              <IconButton
+                icon="close"
+                size="sm"
+                label="删除"
+                onClick={() => void removeRule(i)}
+                disabled={saving}
+                style={{ marginLeft: "auto" }}
+              />
+            </div>
+          ))}
+
+          {/* add-rule form */}
+          <div style={{
+            display: "flex",
+            gap: 6,
+            flexWrap: "wrap",
+            alignItems: "center",
+            paddingTop: 6,
+            borderTop: rules.length > 0 ? "1px solid var(--border)" : "none",
+            marginTop: rules.length > 0 ? 4 : 0,
+          }}>
+            <Select
+              value={field}
+              onChange={(e) => setField(e.target.value as MatchField)}
+              style={{ width: "auto", fontSize: "var(--text-xs)" }}
+            >
+              <option value="app_name">应用名</option>
+              <option value="bundle_id">Bundle ID</option>
+              <option value="domain">域名</option>
+              <option value="title">标题包含</option>
+              <option value="url">URL 包含</option>
+            </Select>
+            <Input
+              type="text"
+              placeholder="匹配值（如 Slack）"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              style={{ fontSize: "var(--text-xs)", width: 120 }}
+            />
+            <Input
+              type="text"
+              placeholder="类别（如 沟通）"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              style={{ fontSize: "var(--text-xs)", width: 120 }}
+            />
+            <Select
+              value={level}
+              onChange={(e) => setLevel(e.target.value as ProductivityLevel | "")}
+              style={{ width: "auto", fontSize: "var(--text-xs)" }}
+            >
+              <option value="productive">高效</option>
+              <option value="neutral">中性</option>
+              <option value="distracting">分心</option>
+            </Select>
+            <Button
+              variant="primary"
+              disabled={saving || !value.trim() || !category.trim()}
+              onClick={() => void addRule()}
+            >
+              添加
+            </Button>
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }

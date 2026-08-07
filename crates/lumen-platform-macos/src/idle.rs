@@ -14,8 +14,22 @@ use std::ffi::c_void;
 #[async_trait::async_trait]
 impl lumen_platform::IdleProbe for MacIdle {
     async fn idle_seconds(&self) -> Result<f64, lumen_platform::PlatformError> {
-        idle_seconds_native()
-            .ok_or_else(|| lumen_platform::PlatformError::Message("idle probe failed".into()))
+        // CGEventSource calls can block on internal CoreGraphics locks (notably
+        // when the frontmost app is loginwindow / no HID session is attached).
+        // Run them off the async executor and bound the whole call so a stuck
+        // CG call can never freeze the activity tracker.
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            tokio::task::spawn_blocking(idle_seconds_native),
+        )
+        .await
+        {
+            Ok(Ok(Some(secs))) => Ok(secs),
+            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => {
+                // Timeout, panic, or CG returned None — treat as "unknown", 0.0.
+                Ok(0.0)
+            }
+        }
     }
 }
 

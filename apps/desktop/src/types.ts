@@ -42,6 +42,16 @@ export interface DayStats {
   by_hour: number[];
 }
 
+export type MatchField = "bundle_id" | "app_name" | "domain" | "url" | "title";
+export type ProductivityLevel = "productive" | "neutral" | "distracting";
+
+export interface CategoryRule {
+  field: MatchField;
+  value: string;
+  category: string;
+  level?: ProductivityLevel | null;
+}
+
 export interface SourceStatus {
   id: string;
   enabled: boolean;

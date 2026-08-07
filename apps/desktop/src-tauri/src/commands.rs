@@ -400,6 +400,19 @@ pub fn activity_stats(state: State<'_, AppState>, day: String) -> Result<lumen_a
 }
 
 #[tauri::command]
+pub fn activity_list_category_rules(state: State<'_, AppState>) -> Result<Vec<lumen_store::CategoryRule>, String> {
+    state.store.list_category_rules().map_err(err)
+}
+
+#[tauri::command]
+pub fn activity_save_category_rules(
+    state: State<'_, AppState>,
+    rules: Vec<lumen_store::CategoryRule>,
+) -> Result<(), String> {
+    state.store.save_category_rules_and_reapply(rules).map_err(err)
+}
+
+#[tauri::command]
 pub fn get_event_image_data_url(
     state: State<'_, AppState>,
     event_id: String,
