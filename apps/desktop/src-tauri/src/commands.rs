@@ -419,7 +419,7 @@ pub fn activity_add_manual_segment(
         .with_timezone(&chrono::Utc);
     let end = chrono::DateTime::parse_from_rfc3339(&ended_at)
         .map_err(|e| format!("ended_at: {e}"))?
-        .with_timezone(&chrono::Utc());
+        .with_timezone(&chrono::Utc);
     state.store.add_manual_segment(
         start,
         end,
