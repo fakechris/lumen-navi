@@ -133,8 +133,15 @@ export function DashboardView() {
             />
             <StatCard
               label="Top 类别"
-              value={stats!.by_category[0]?.category ?? "—"}
-              hint={stats!.by_category[0] ? fmtDuration(stats!.by_category[0].ms) : undefined}
+              value={
+                stats!.by_category.find((c) => c.category && c.category !== "Uncategorized")?.category
+                ?? "—"
+              }
+              hint={
+                (stats!.by_category.find((c) => c.category && c.category !== "Uncategorized"))
+                  ? fmtDuration(stats!.by_category.find((c) => c.category && c.category !== "Uncategorized")!.ms)
+                  : undefined
+              }
             />
           </div>
 
