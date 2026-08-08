@@ -182,7 +182,7 @@ fn frontmost_native() -> Option<FrontmostApp> {
 #[cfg(target_os = "macos")]
 fn bundle_id_for_pid(pid: i32) -> Option<String> {
     use objc2_app_kit::NSRunningApplication;
-    let app = unsafe { NSRunningApplication::runningApplicationWithProcessIdentifier(pid) };
+    let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid);
     app.and_then(|a| {
         a.bundleIdentifier()
             .map(|s: objc2::rc::Retained<objc2_foundation::NSString>| s.to_string())
