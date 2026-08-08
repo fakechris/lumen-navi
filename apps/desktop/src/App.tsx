@@ -375,6 +375,9 @@ export default function App() {
   useEffect(() => {
     if (tab === "activity") {
       void loadTimeline();
+      // Auto-refresh every 30s while on the activity tab.
+      const t = setInterval(() => void loadTimeline(), 30_000);
+      return () => clearInterval(t);
     }
   }, [tab, loadTimeline]);
 
