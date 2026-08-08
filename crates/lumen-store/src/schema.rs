@@ -1,6 +1,6 @@
 //! SQLite schema for meta/navi.db
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 pub const MIGRATE_V1: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -179,4 +179,10 @@ CREATE INDEX IF NOT EXISTS idx_activity_segments_day ON activity_segments(day);
 CREATE INDEX IF NOT EXISTS idx_activity_segments_started ON activity_segments(started_at);
 CREATE INDEX IF NOT EXISTS idx_activity_segments_app ON activity_segments(app_name);
 CREATE INDEX IF NOT EXISTS idx_activity_segments_category ON activity_segments(category);
+"#;
+
+/// Add a `source` column to distinguish auto-tracked segments ('auto') from
+/// manually entered ones ('manual' — the v1.2 retro-entry feature).
+pub const MIGRATE_V8: &str = r#"
+ALTER TABLE activity_segments ADD COLUMN source TEXT NOT NULL DEFAULT 'auto';
 "#;

@@ -405,6 +405,37 @@ pub fn activity_range(state: State<'_, AppState>, from: String, to: String) -> R
 }
 
 #[tauri::command]
+pub fn activity_add_manual_segment(
+    state: State<'_, AppState>,
+    started_at: String,
+    ended_at: String,
+    app_name: String,
+    window_title: Option<String>,
+    category: Option<String>,
+    productivity_level: Option<String>,
+) -> Result<String, String> {
+    let start = chrono::DateTime::parse_from_rfc3339(&started_at)
+        .map_err(|e| format!("started_at: {e}"))?
+        .with_timezone(&chrono::Utc);
+    let end = chrono::DateTime::parse_from_rfc3339(&ended_at)
+        .map_err(|e| format!("ended_at: {e}"))?
+        .with_timezone(&chrono::Utc());
+    state.store.add_manual_segment(
+        start,
+        end,
+        &app_name,
+        window_title.as_deref(),
+        category.as_deref(),
+        productivity_level.as_deref(),
+    ).map_err(err)
+}
+
+#[tauri::command]
+pub fn activity_delete_segment(state: State<'_, AppState>, seg_id: String) -> Result<(), String> {
+    state.store.delete_manual_segment(&seg_id).map_err(err)
+}
+
+#[tauri::command]
 pub fn activity_list_category_rules(state: State<'_, AppState>) -> Result<Vec<lumen_store::CategoryRule>, String> {
     state.store.list_category_rules().map_err(err)
 }

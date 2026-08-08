@@ -169,6 +169,9 @@ pub struct ActivitySegmentDto {
     pub category: Option<String>,
     pub productivity_level: Option<String>,
     pub event_count: i64,
+    /// 'auto' (tracked) or 'manual' (user-entered retro-entry).
+    #[serde(default)]
+    pub source: String,
 }
 
 /// Aggregated stats for one day (the dashboard's `stats` view payload).

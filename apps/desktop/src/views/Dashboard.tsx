@@ -141,10 +141,13 @@ export function DashboardView() {
           {/* Category rules manager */}
           <CategoryRulesManager onRulesChanged={load} />
 
+          {/* Retro-entry (manual segment) form */}
+          <ManualSegmentForm day={day} onAdded={load} />
+
           {/* Timeline */}
           <Card pad={16}>
-            <SectionHeader title="今日时间线" subtitle="按类别着色 · hover 查看详情" />
-            <TimelineChart segments={segments!} />
+            <SectionHeader title="今日时间线" subtitle="按类别着色 · hover 查看详情 · 手动条目可删除" />
+            <TimelineChart segments={segments!} onDeleted={load} />
           </Card>
 
           {/* Hour distribution */}
@@ -216,11 +219,12 @@ function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }
 
 // --- Timeline chart (24h horizontal band, colored by category) ------------
 
-function TimelineChart({ segments }: { segments: ActivitySegment[] }) {
+function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; onDeleted?: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const [tooltip, setTooltip] = useState<{
     x: number; y: number; seg: ActivitySegment;
   } | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   // Active segments only (idle renders as faint gray).
   const active = useMemo(
@@ -343,13 +347,19 @@ function TimelineChart({ segments }: { segments: ActivitySegment[] }) {
           borderRadius: "var(--radius-md)",
           padding: "8px 10px",
           fontSize: "var(--text-xs)",
-          pointerEvents: "none",
+          pointerEvents: tooltip.seg.source === "manual" ? "auto" : "none",
           whiteSpace: "nowrap",
           boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
           zIndex: 10,
         }}>
-          <div style={{ fontWeight: 600, marginBottom: 2 }}>
+          <div style={{ fontWeight: 600, marginBottom: 2, display: "flex", alignItems: "center", gap: 6 }}>
             {tooltip.seg.app_name ?? "未知"}
+            {tooltip.seg.source === "manual" && (
+              <span style={{
+                fontSize: 9, padding: "1px 5px", borderRadius: "var(--radius-pill)",
+                background: "var(--graph-grid)", color: "var(--text-tertiary)",
+              }}>手动</span>
+            )}
           </div>
           {tooltip.seg.window_title && (
             <div style={{ color: "var(--text-secondary)", marginBottom: 2, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -359,6 +369,24 @@ function TimelineChart({ segments }: { segments: ActivitySegment[] }) {
           <div style={{ color: "var(--text-tertiary)", fontFamily: "var(--font-mono)" }}>
             {fmtClock(tooltip.seg.started_at)}–{tooltip.seg.ended_at ? fmtClock(tooltip.seg.ended_at) : "现在"} · {fmtDuration(tooltip.seg.duration_ms)}
           </div>
+          {tooltip.seg.source === "manual" && onDeleted && (
+            <button
+              onClick={async () => {
+                setDeleting(true);
+                try {
+                  await api.activityDeleteSegment(tooltip.seg.seg_id);
+                  onDeleted();
+                  setTooltip(null);
+                } catch { /* ignore */ }
+                setDeleting(false);
+              }}
+              disabled={deleting}
+              style={{
+                marginTop: 6, fontSize: "var(--text-xs)", color: "var(--danger, #e5484d)",
+                background: "none", border: "none", cursor: "pointer", padding: 0,
+              }}
+            >{deleting ? "删除中…" : "删除此条目"}</button>
+          )}
         </div>
       )}
     </div>
@@ -672,6 +700,125 @@ function CategoryRulesManager({ onRulesChanged }: { onRulesChanged: () => void }
               添加
             </Button>
           </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// --- Manual segment (retro-entry) form ------------------------------------
+
+function ManualSegmentForm({ day, onAdded }: { day: string; onAdded: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [appName, setAppName] = useState("");
+  const [start, setStart] = useState("10:00");
+  const [end, setEnd] = useState("10:30");
+  const [category, setCategory] = useState("");
+  const [level, setLevel] = useState<ProductivityLevel | "">("neutral");
+  const [saving, setSaving] = useState(false);
+
+  const submit = useCallback(async () => {
+    if (!appName.trim() || !start || !end) return;
+    // Build RFC3339 timestamps in local time for the given day.
+    const toIso = (t: string) => {
+      // local → ISO: construct as local, let Date serialize.
+      const d = new Date(`${day}T${t}:00`);
+      return d.toISOString();
+    };
+    const startedAt = toIso(start);
+    const endedAt = toIso(end);
+    if (new Date(endedAt) <= new Date(startedAt)) return;
+    setSaving(true);
+    try {
+      await api.activityAddManualSegment({
+        startedAt,
+        endedAt,
+        appName: appName.trim(),
+        category: category.trim() || null,
+        productivityLevel: level || null,
+      });
+      setAppName("");
+      setCategory("");
+      setOpen(false);
+      onAdded();
+    } catch { /* ignore */ }
+    setSaving(false);
+  }, [day, appName, start, end, category, level, onAdded]);
+
+  return (
+    <Card pad={16}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          background: "none", border: "none", cursor: "pointer", padding: 0,
+          display: "flex", alignItems: "center", gap: 6, width: "100%",
+        }}
+      >
+        <span style={{
+          fontSize: "var(--text-sm)", fontWeight: "var(--weight-semibold)", color: "var(--text)",
+        }}>＋ 补录活动</span>
+        <span style={{ fontSize: "var(--text-xs)", color: "var(--text-tertiary)" }}>
+          （手动添加一段时间，如"开会""阅读"）
+        </span>
+        <span style={{ marginLeft: "auto", color: "var(--text-tertiary)", fontSize: 12 }}>
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+
+      {open && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 12 }}>
+          <Input
+            type="text"
+            placeholder="活动 / 应用（如 团队会议）"
+            value={appName}
+            onChange={(e) => setAppName(e.target.value)}
+            style={{ fontSize: "var(--text-xs)", width: 160 }}
+          />
+          <label style={{ fontSize: "var(--text-xs)", color: "var(--text-tertiary)" }}>从
+            <input
+              type="time"
+              value={start}
+              onChange={(e) => setStart(e.target.value)}
+              style={{
+                marginLeft: 4, fontSize: "var(--text-xs)",
+                background: "var(--surface)", border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)", padding: "4px 6px", color: "var(--text)",
+              }}
+            />
+          </label>
+          <label style={{ fontSize: "var(--text-xs)", color: "var(--text-tertiary)" }}>到
+            <input
+              type="time"
+              value={end}
+              onChange={(e) => setEnd(e.target.value)}
+              style={{
+                marginLeft: 4, fontSize: "var(--text-xs)",
+                background: "var(--surface)", border: "1px solid var(--border)",
+                borderRadius: "var(--radius-input)", padding: "4px 6px", color: "var(--text)",
+              }}
+            />
+          </label>
+          <Input
+            type="text"
+            placeholder="类别（可选，如 沟通）"
+            value={category}
+            onChange={(e) => setCategory(e.target.value)}
+            style={{ fontSize: "var(--text-xs)", width: 110 }}
+          />
+          <Select
+            value={level}
+            onChange={(e) => setLevel(e.target.value as ProductivityLevel | "")}
+            style={{ width: "auto", fontSize: "var(--text-xs)" }}
+          >
+            <option value="productive">高效</option>
+            <option value="neutral">中性</option>
+            <option value="distracting">分心</option>
+          </Select>
+          <Button
+            variant="primary"
+            disabled={saving || !appName.trim()}
+            onClick={() => void submit()}
+          >添加</Button>
         </div>
       )}
     </Card>

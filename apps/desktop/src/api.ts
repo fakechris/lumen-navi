@@ -61,6 +61,24 @@ export const api = {
     invoke<DayStats>("activity_stats", { day }),
   activityRange: (from: string, to: string) =>
     invoke<RangeStats>("activity_range", { from, to }),
+  activityAddManualSegment: (opts: {
+    startedAt: string;
+    endedAt: string;
+    appName: string;
+    windowTitle?: string | null;
+    category?: string | null;
+    productivityLevel?: string | null;
+  }) =>
+    invoke<string>("activity_add_manual_segment", {
+      startedAt: opts.startedAt,
+      endedAt: opts.endedAt,
+      appName: opts.appName,
+      windowTitle: opts.windowTitle ?? null,
+      category: opts.category ?? null,
+      productivityLevel: opts.productivityLevel ?? null,
+    }),
+  activityDeleteSegment: (segId: string) =>
+    invoke<void>("activity_delete_segment", { segId: segId }),
   activityListCategoryRules: () =>
     invoke<CategoryRule[]>("activity_list_category_rules"),
   activitySaveCategoryRules: (rules: CategoryRule[]) =>

@@ -14,6 +14,7 @@ export interface ActivitySegment {
   category: string | null;
   productivity_level: string | null;
   event_count: number;
+  source?: string;
 }
 
 export interface CategoryTotal {

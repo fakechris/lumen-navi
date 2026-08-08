@@ -111,6 +111,7 @@ pub fn router(state: ControlState) -> Router {
         .route("/v1/activity/stats", get(get_activity_stats))
         .route("/v1/activity/range", get(get_activity_range))
         .route("/v1/activity/rules", get(get_activity_rules).post(post_activity_rules))
+        .route("/v1/activity/segment", post(post_activity_segment).delete(delete_activity_segment))
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
 }
@@ -426,6 +427,24 @@ struct ActivityRangeQuery {
     to: String,
 }
 
+#[derive(Deserialize)]
+struct ManualSegmentRequest {
+    started_at: chrono::DateTime<chrono::Utc>,
+    ended_at: chrono::DateTime<chrono::Utc>,
+    app_name: String,
+    #[serde(default)]
+    window_title: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    productivity_level: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeleteSegmentQuery {
+    seg_id: String,
+}
+
 async fn get_activity_segments(
     State(st): State<ControlState>,
     Query(q): Query<ActivityDayQuery>,
@@ -471,6 +490,39 @@ async fn get_activity_range(
             }),
         )
             .into_response(),
+    }
+}
+
+async fn post_activity_segment(
+    State(st): State<ControlState>,
+    Json(req): Json<ManualSegmentRequest>,
+) -> impl IntoResponse {
+    match st.store.add_manual_segment(
+        req.started_at,
+        req.ended_at,
+        &req.app_name,
+        req.window_title.as_deref(),
+        req.category.as_deref(),
+        req.productivity_level.as_deref(),
+    ) {
+        Ok(seg_id) => (StatusCode::OK, Json(serde_json::json!({ "seg_id": seg_id }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ControlResponse::Error { message: e.to_string() }),
+        ).into_response(),
+    }
+}
+
+async fn delete_activity_segment(
+    State(st): State<ControlState>,
+    Query(q): Query<DeleteSegmentQuery>,
+) -> impl IntoResponse {
+    match st.store.delete_manual_segment(&q.seg_id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ControlResponse::Error { message: e.to_string() }),
+        ).into_response(),
     }
 }
 

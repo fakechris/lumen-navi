@@ -15,7 +15,7 @@ use crate::blob::BlobStore;
 use crate::categorization::{ActivityFields, CategoryRule};
 use crate::schema::{
     MIGRATE_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, MIGRATE_V5, MIGRATE_V6, MIGRATE_V7,
-    SCHEMA_VERSION,
+    MIGRATE_V8, SCHEMA_VERSION,
 };
 use crate::{EventStore, JobRecord, JobStatus, StoreError};
 
@@ -1181,7 +1181,7 @@ impl SqliteStore {
             .prepare(
                 r#"SELECT seg_id, day, app_name, bundle_id, window_title,
                           started_at, ended_at, duration_ms, is_idle, is_locked,
-                          category, productivity_level, event_count
+                          category, productivity_level, event_count, source
                    FROM activity_segments
                    WHERE day = ?1
                    ORDER BY started_at ASC"#,
@@ -1215,6 +1215,7 @@ impl SqliteStore {
                     category: row.get(10)?,
                     productivity_level: row.get(11)?,
                     event_count: row.get(12)?,
+                    source: row.get::<_, Option<String>>(13)?.unwrap_or_else(|| "auto".into()),
                 })
             })
             .map_err(StoreError::db)?;
@@ -1559,6 +1560,113 @@ impl SqliteStore {
             top_apps,
             by_category,
         })
+    }
+
+    /// Add a manually-entered activity segment (the retro-entry feature —
+    /// "I was actually in a meeting 10:00–10:30"). Inserts directly into
+    /// `activity_segments` with `source='manual'`, is_idle=false, and applies
+    /// the current classification rules. Returns the new seg_id.
+    pub fn add_manual_segment(
+        &self,
+        started_at: DateTime<Utc>,
+        ended_at: DateTime<Utc>,
+        app_name: &str,
+        window_title: Option<&str>,
+        category: Option<&str>,
+        productivity_level: Option<&str>,
+    ) -> Result<String, StoreError> {
+        let ts_str = started_at.to_rfc3339();
+        let day = started_at
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        let duration_ms = (ended_at - started_at).num_milliseconds().max(0) as i64;
+        let seg_id = blake3::hash(
+            format!("manual|{day}|{ts_str}|{app_name}").as_bytes(),
+        )
+        .to_hex()
+        .to_string();
+        let now = Utc::now().to_rfc3339();
+
+        // Classify unless the caller pinned a category explicitly.
+        let (eff_cat, eff_level): (Option<String>, Option<String>) = match (category, productivity_level) {
+            (Some(c), l) => (Some(c.to_string()), l.map(str::to_string)),
+            (None, _) => {
+                let user_rules = {
+                    let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+                    let raw: Option<String> = conn
+                        .query_row(
+                            "SELECT value FROM kv WHERE key = 'activity.category_rules'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(StoreError::db)?;
+                    drop(conn);
+                    match raw {
+                        Some(json) => serde_json::from_str::<Vec<CategoryRule>>(&json)
+                            .unwrap_or_default(),
+                        None => Vec::new(),
+                    }
+                };
+                let c = crate::categorization::classify(
+                    &ActivityFields {
+                        bundle_id: None,
+                        app_name: Some(app_name),
+                        window_title,
+                        url: None,
+                    },
+                    &user_rules,
+                );
+                (
+                    c.category,
+                    c.level.map(productivity_level_str).map(str::to_string),
+                )
+            }
+        };
+
+        let mut conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        tx.execute(
+            r#"INSERT OR IGNORE INTO activity_segments
+               (seg_id, day, app_name, bundle_id, window_title, url,
+                started_at, ended_at, duration_ms, is_idle, is_locked,
+                category, project, productivity_level, event_count, updated_at, source)
+               VALUES (?1, ?2, ?3, NULL, ?4, NULL, ?5, ?6, ?7, 0, 0, ?8, NULL, ?9, 1, ?10, 'manual')"#,
+            params![
+                seg_id,
+                day,
+                app_name,
+                window_title,
+                ts_str,
+                ended_at.to_rfc3339(),
+                duration_ms,
+                eff_cat.as_deref(),
+                eff_level.as_deref(),
+                now,
+            ],
+        )
+        .map_err(StoreError::db)?;
+        tx.commit().map_err(StoreError::db)?;
+        Ok(seg_id)
+    }
+
+    /// Delete a manual segment by seg_id (only manual entries are deletable;
+    /// auto-tracked segments are regenerated from events and not user-removable).
+    pub fn delete_manual_segment(&self, seg_id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let n = conn
+            .execute(
+                "DELETE FROM activity_segments WHERE seg_id = ?1 AND source = 'manual'",
+                params![seg_id],
+            )
+            .map_err(StoreError::db)?;
+        if n == 0 {
+            return Err(StoreError::Other(
+                "segment not found or not manually entered".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Get the current user-defined category rules (from the `kv` table).
@@ -2044,6 +2152,16 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
         )
         .map_err(StoreError::db)?;
         v = 7;
+    }
+
+    if v < 8 {
+        conn.execute_batch(MIGRATE_V8).map_err(StoreError::db)?;
+        conn.execute(
+            "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
+            params!["8"],
+        )
+        .map_err(StoreError::db)?;
+        v = 8;
     }
 
     let _ = v;

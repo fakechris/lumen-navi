@@ -65,6 +65,8 @@ pub fn run() {
             commands::activity_segments,
             commands::activity_stats,
             commands::activity_range,
+            commands::activity_add_manual_segment,
+            commands::activity_delete_segment,
             commands::activity_list_category_rules,
             commands::activity_save_category_rules,
             commands::get_event_image_data_url,
