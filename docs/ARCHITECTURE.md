@@ -70,6 +70,13 @@ Act plane ──► open-source cua-driver (MIT)
 8. **Edge adapters use a stable local API** — Chrome/agents later plug in without core rewrites.  
 9. **Core has zero UI dependency**.  
 10. **Cheap signals first** — frontmost app, hashes, VAD before heavy media when possible.
+11. **Experiment before contract** — ship a runnable end-to-end spike first
+    (data in → something observable out), then distill the stable CLI / API
+    contract from what the experiment proved. Never design the contract
+    upfront from speculation; the spike is the spec. A feature is not "done"
+    until both halves exist: the working experiment *and* the documented
+    contract that lets future code rely on it without reading the experiment's
+    source.
 
 ---
 
