@@ -169,7 +169,7 @@ export default function App() {
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [activeImage, setActiveImage] = useState<{ src: string; label: string } | null>(null);
-  const [kindFilter, setKindFilter] = useState("");
+  const [kindFilter, setKindFilter] = useState("screenshot");
   const [appFilter, setAppFilter] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [query, setQuery] = useState("");
@@ -816,7 +816,7 @@ export default function App() {
                     开启屏幕、麦克风或浏览器通道后，数据会持续写入这里。
                   </EmptyState>
                 )}
-                {timeline.map((e) => (
+                {timeline.filter((e) => e.kind !== "activity.focus.v1").map((e) => (
                   <div className="list-item timeline-row" key={e.id}>
                     {e.has_image && thumbs[e.id] ? (
                       <button
