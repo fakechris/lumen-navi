@@ -35,6 +35,11 @@ fn frontmost_via_windowlist() -> Option<(String, i32)> {
         }
         let array = raw as core_foundation_sys::array::CFArrayRef;
         let count = core_foundation_sys::array::CFArrayGetCount(array);
+        // System owners that appear at layer 0 but aren't real user-facing apps.
+        const SYSTEM_OWNERS: &[&str] = &[
+            "Window Server", "Dock", "SystemUIServer", "ControlCenter",
+            "Notification Center", "Spotlight", "loginwindow",
+        ];
         for i in 0..count {
             let dict = core_foundation_sys::array::CFArrayGetValueAtIndex(array, i)
                 as core_foundation_sys::dictionary::CFDictionaryRef;
@@ -48,12 +53,22 @@ fn frontmost_via_windowlist() -> Option<(String, i32)> {
             }
             let owner = cf_dict_string(dict, "kCGWindowOwnerName");
             let pid = cf_dict_number(dict, "kCGWindowOwnerPID").unwrap_or(0);
-            if let Some(name) = owner {
-                if !name.is_empty() && pid > 0 {
-                    CFRelease(raw as *const _);
-                    return Some((name, pid));
-                }
+            let Some(name) = owner else { continue };
+            if name.is_empty() || pid <= 0 {
+                continue;
             }
+            // Skip system processes that pollute layer 0.
+            if SYSTEM_OWNERS.contains(&name.as_str()) {
+                continue;
+            }
+            // Require a non-zero window bounds — real app windows have them;
+            // invisible/system overlays often don't.
+            let has_bounds = cf_dict_bounds_present(dict);
+            if !has_bounds {
+                continue;
+            }
+            CFRelease(raw as *const _);
+            return Some((name, pid));
         }
         CFRelease(raw as *const _);
         None
@@ -95,6 +110,19 @@ unsafe fn cf_dict_number(
         return None;
     }
     CFNumber::wrap_under_get_rule(val as CFNumberRef).to_i32()
+}
+
+/// Whether the window has a real (non-zero) bounds dict — filters out
+/// invisible overlays and system pseudo-windows.
+#[cfg(target_os = "macos")]
+unsafe fn cf_dict_bounds_present(
+    dict: core_foundation_sys::dictionary::CFDictionaryRef,
+) -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation_sys::dictionary::CFDictionaryGetValue;
+    let k = core_foundation::string::CFString::new("kCGWindowBounds");
+    let val = CFDictionaryGetValue(dict, k.as_concrete_TypeRef() as *const _);
+    !val.is_null()
 }
 
 #[cfg(target_os = "macos")]
