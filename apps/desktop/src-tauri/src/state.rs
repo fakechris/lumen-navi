@@ -33,7 +33,23 @@ impl AppState {
             .with_context(|| format!("create data_dir {}", data_dir.display()))?;
         let _ = std::fs::create_dir_all(data_dir.join("logs"));
         let config_path = data_dir.join("navi.toml");
-        let cua = CuaController::open()?;
+        // Cua (screen-capture helper) is optional — time tracking and most
+        // features work without it. If init fails (dev mode bundle mismatch,
+        // stale socket, protocol version skew), log and continue with a
+        // best-effort controller so the app still starts.
+        let cua = match CuaController::open() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = ?e, "Lumen Cua init failed; screen capture disabled, time tracking still works");
+                match CuaController::open_lenient() {
+                    Ok(c) => c,
+                    Err(e2) => {
+                        tracing::error!(error = ?e2, "Lumen Cua lenient init also failed");
+                        return Err(e).context("open Lumen Cua");
+                    }
+                }
+            }
+        };
         let config = load_or_write_config(&config_path, &data_dir)?;
         let shell_cfg = shell::load_shell(&data_dir)?;
         let store = SqliteStore::open(&config.data_dir)
