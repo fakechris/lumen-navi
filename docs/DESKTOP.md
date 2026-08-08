@@ -24,31 +24,100 @@ Data default: `~/Library/Application Support/LumenNavi/`
 
 ## Dev
 
+> **Read this entire section before running `tauri dev`.**
+> Skipping these steps causes white screens, dead screen capture, and
+> permission loops that look like bugs but are dev-mode setup gaps.
+
+### Prerequisites (one-time)
+
 ```bash
-# workspace
-cargo build -p lumen-daemon --release
-cargo build -p lumen-navi-desktop
+# 1. Stable local signing identity (stable cdhash → TCC permissions survive rebuilds)
+scripts/macos/ensure-local-identity.sh
+# See docs/MACOS_LOCAL_SIGNING.md for details.
 
-# frontend
-cd apps/desktop
-npm install
-npm run build
-
-# Lumen Cua helper (screen capture owner + app icon for System Settings)
+# 2. Build the Cua helper app (screen capture owner + Settings icon)
 scripts/macos/prepare-cua-app.sh "$(rustc -vV | sed -n 's/^host: //p')"
 # → apps/desktop/src-tauri/helpers/Lumen Cua.app
 #    Contents/MacOS/lumen-cua
 #    Contents/Resources/AppIcon.icns   # CUA cursor mark from apps/cua/icon/
+# Navi installs the helper to /Applications/Lumen Cua.app on first use (own TCC identity).
 
-# run UI (debug)
+# 3. Install frontend deps
+cd apps/desktop && npm install
+```
+
+### Standard dev run (with screen capture + time tracking)
+
+```bash
+# One command: builds, signs dev binaries, starts Cua, launches the app.
+bash scripts/macos/tauri-dev-signed.sh
+```
+
+This wrapper handles three things that plain `tauri dev` does NOT:
+
+1. **Code-signs the freshly compiled binaries.** Cua's `peer_auth`
+   (`crates/lumen-cua/src/peer_auth.rs`) validates that connecting clients
+   (`lumen-daemon`, `lumen-navi-desktop`) are signed by the same
+   `Lumen Local Codesign` identity. `tauri dev` recompiles them **unsigned**
+   on every source change — an unsigned binary is silently rejected (the
+   connection is dropped before any protocol response, appearing as
+   `invalid response header`). The wrapper re-signs after compile and
+   restarts so the signature is validated at launch.
+
+2. **Pre-launches Cua before the daemon spawns.** The daemon checks Cua
+   readiness **once at boot** (`main.rs` `cua_client_from_env` →
+   `client.status()`). If Cua isn't ready at that moment, screen capture is
+   permanently off for that daemon lifetime (no retry). The wrapper starts
+   Cua first and waits for its socket.
+
+3. **Cleans stale state.** Multiple Cua instances compete for one socket;
+   stale socket files prevent new instances from binding. The wrapper kills
+   stale Cua processes and removes the socket before launch.
+
+### Frontend-only dev (no screen capture, no signing)
+
+If you're only changing React/CSS and don't need screen capture:
+
+```bash
 cd apps/desktop
-npx tauri dev
-# or
+npm run dev          # vite on :1421 (HMR)
+# In another terminal, run the already-compiled desktop binary:
 cargo run -p lumen-navi-desktop
 ```
 
-Navi installs the prepared helper to `/Applications/Lumen Cua.app` on first use
-(own TCC identity). Icon source of truth: `apps/cua/icon/` (see README there).
+The webview connects to `http://localhost:1421` (vite HMR). Screen capture
+won't work (unsigned binary → Cua rejects), but time tracking and all
+Dashboard features work fine — they don't depend on screen capture.
+
+> **Time tracking is independent of screen capture.** Activity tracking
+> (`activity.focus.v1` events, `activity_segments` projection, Dashboard)
+> uses `CGWindowListCopyWindowInfo` for frontmost detection and
+> `CGEventSourceSecondsSinceLastEventType` for idle — neither requires
+> Screen Recording permission. See `research/lumen-navi-time-tracking-gap-workplan.md`.
+
+### Plain `npx tauri dev` — when it breaks
+
+Plain `tauri dev` works for frontend changes but breaks screen capture
+because it recompiles binaries unsigned. Symptoms and causes:
+
+| Symptom | Cause |
+|---------|-------|
+| White screen | Desktop binary launched directly (no vite on :1421) |
+| `invalid response header` / `IPC endpoint did not become ready` | Unsigned binary rejected by Cua `peer_auth` |
+| `screen: running=false` persistently | Cua wasn't ready when daemon booted |
+| `Window Server` as frontmost app | CGWindowList returns system windows; now filtered |
+| Only `lumen-navi-desktop` in segments | `NSWorkspace.frontmostApplication()` from a daemon returns its own bundle; now uses `CGWindowListCopyWindowInfo` |
+
+### Build artifacts
+
+```bash
+# daemon binary (placed for Tauri externalBin)
+scripts/macos/prepare-daemon-binary.sh "$(rustc -vV | sed -n 's/^host: //p')"
+
+# or placeholder for cargo check only
+scripts/macos/ensure-daemon-binary-placeholder.sh
+```
+
 
 **Start Observe** resolves `lumen-daemon` in this order:
 
