@@ -106,6 +106,19 @@ pub trait ScreenLockProbe: Send + Sync {
     async fn is_locked(&self) -> Result<bool, PlatformError>;
 }
 
+/// Whether some app currently prevents the display from sleeping.
+///
+/// Apps playing video, on a video/voice call, presenting full-screen, or
+/// holding a Caffeine-style assertion register `PreventDisplaySleep` /
+/// `PreventUserIdleSystemSleep` power assertions with IOKit. When any such
+/// assertion is active, a pure HID-idle detector miscounts the user as away
+/// (they're watching a 20-min lecture without touching the mouse). This probe
+/// lets the idle logic suppress those false-idles — Timing's approach.
+#[async_trait]
+pub trait DisplaySleepProbe: Send + Sync {
+    async fn display_sleep_prevented(&self) -> Result<bool, PlatformError>;
+}
+
 #[async_trait]
 pub trait DisplayEnumerator: Send + Sync {
     async fn list_displays(&self) -> Result<Vec<DisplayInfo>, PlatformError>;
@@ -499,6 +512,16 @@ pub struct NullIdle;
 impl IdleProbe for NullIdle {
     async fn idle_seconds(&self) -> Result<f64, PlatformError> {
         Ok(0.0)
+    }
+}
+
+/// No-op display-sleep probe — always reports "nothing prevents sleep", so the
+/// standalone activity tracker (no IOKit binding) just falls back to HID idle.
+pub struct NullDisplaySleep;
+#[async_trait]
+impl DisplaySleepProbe for NullDisplaySleep {
+    async fn display_sleep_prevented(&self) -> Result<bool, PlatformError> {
+        Ok(false)
     }
 }
 

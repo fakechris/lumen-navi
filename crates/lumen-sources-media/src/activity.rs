@@ -35,6 +35,12 @@ pub struct ActivitySample {
     pub frontmost: Option<FrontmostApp>,
     pub idle_seconds: f64,
     pub is_locked: bool,
+    /// True when some app holds a power assertion that prevents the display
+    /// from sleeping (video playback, video/voice call, presentation, Caffeine).
+    /// When set, HID silence is NOT treated as idle — the user is likely
+    /// watching a lecture or on a call without touching the mouse. Timing's
+    /// "app keeps your Mac awake" heuristic.
+    pub display_sleep_prevented: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +54,8 @@ struct ActivityKey {
 
 impl ActivityKey {
     fn from(sample: &ActivitySample, idle_threshold: f64) -> Self {
-        let is_idle = sample.is_locked || sample.idle_seconds >= idle_threshold;
+        let is_idle = sample.is_locked
+            || (sample.idle_seconds >= idle_threshold && !sample.display_sleep_prevented);
         Self {
             app_name: sample.frontmost.as_ref().map(|f| f.app_name.clone()),
             bundle_id: sample.frontmost.as_ref().and_then(|f| f.bundle_id.clone()),
@@ -136,6 +143,7 @@ mod tests {
             }),
             idle_seconds: idle,
             is_locked: false,
+            display_sleep_prevented: false,
         }
     }
 
@@ -174,6 +182,30 @@ mod tests {
         let e = acc.ingest(sample("Safari", Some("Hello"), 200.0), now).unwrap();
         assert_eq!(e.payload["is_idle"], serde_json::json!(true));
     }
+
+    /// When an app holds a display-sleep power assertion (video playback, call),
+    /// HID silence must NOT count as idle — the user is watching, not away.
+    /// This is the Timing "app keeps your Mac awake" suppression.
+    #[test]
+    fn display_sleep_prevention_suppresses_idle() {
+        let mut acc = ActivityAccumulator::new(Duration::from_secs(180), Duration::from_secs(60));
+        let mut now = Utc::now();
+        acc.ingest(sample("Safari", Some("Netflix"), 1.0), now);
+
+        // Long idle, no assertion → goes idle (boundary emit).
+        now += chrono::Duration::seconds(1);
+        let e = acc.ingest(sample("Safari", Some("Netflix"), 200.0), now).unwrap();
+        assert_eq!(e.payload["is_idle"], serde_json::json!(true));
+
+        // Now a power assertion is active (video playing). Same long idle, but
+        // display_sleep_prevented → flips back to non-idle (boundary emit again).
+        now += chrono::Duration::seconds(1);
+        let mut s = sample("Safari", Some("Netflix"), 200.0);
+        s.display_sleep_prevented = true;
+        let e = acc.ingest(s, now).unwrap();
+        assert_eq!(e.payload["is_idle"], serde_json::json!(false));
+    }
+
 
     #[test]
     fn heartbeat_emits_on_steady_run() {

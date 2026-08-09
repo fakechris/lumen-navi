@@ -11,6 +11,7 @@ mod idle;
 mod lock;
 mod mic;
 mod ocr;
+mod power;
 mod permissions;
 mod selection;
 
@@ -22,6 +23,7 @@ pub use idle::MacIdle;
 pub use lock::{is_screen_locked, MacScreenLock};
 pub use mic::{default_input_available, MacMicCapturer};
 pub use ocr::{default_ocr_languages, MacVisionOcr};
+pub use power::MacPower;
 pub use permissions::{
     accessibility_permission_state, microphone_permission_state, request_microphone_access,
     request_screen_recording, screen_recording_access_granted, MacPermissions,

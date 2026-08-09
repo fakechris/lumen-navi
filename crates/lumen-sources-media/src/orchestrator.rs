@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use lumen_config::{CaptureConfig, PrivacyConfig};
 use lumen_platform::{
-    bgra_to_gray, dhash, gray_distance, hamming64, DisplayEnumerator, DisplayInfo, FrontmostApp,
-    FrontmostAppProbe, IdleProbe, ScreenCapturer, ScreenLockProbe, ScreenshotFrame,
+    bgra_to_gray, dhash, gray_distance, hamming64, DisplayEnumerator, DisplayInfo, DisplaySleepProbe,
+    FrontmostApp, FrontmostAppProbe, IdleProbe, ScreenCapturer, ScreenLockProbe, ScreenshotFrame,
 };
 use lumen_types::{event_kind, ActivitySession, SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
@@ -46,6 +46,7 @@ pub struct CaptureOrchestrator {
     frontmost: Arc<dyn FrontmostAppProbe>,
     lock: Arc<dyn ScreenLockProbe>,
     idle: Arc<dyn IdleProbe>,
+    power: Arc<dyn DisplaySleepProbe>,
     capture: CaptureConfig,
     privacy: PrivacyConfig,
     /// Runtime overrides (daemon can flip without reload).
@@ -84,6 +85,7 @@ impl CaptureOrchestrator {
         frontmost: Arc<dyn FrontmostAppProbe>,
         lock: Arc<dyn ScreenLockProbe>,
         idle: Arc<dyn IdleProbe>,
+        power: Arc<dyn DisplaySleepProbe>,
         capture: CaptureConfig,
         privacy: PrivacyConfig,
     ) -> Self {
@@ -102,6 +104,7 @@ impl CaptureOrchestrator {
             frontmost,
             lock,
             idle,
+            power,
             capture,
             privacy,
             paused,
@@ -201,12 +204,14 @@ impl CaptureOrchestrator {
         let frontmost = self.frontmost.frontmost().await.ok().flatten();
         let idle_seconds = self.idle.idle_seconds().await.unwrap_or(0.0).max(0.0);
         let is_locked = self.lock.is_locked().await.unwrap_or(false);
+        let display_sleep_prevented = self.power.display_sleep_prevented().await.unwrap_or(false);
 
         self.activity.ingest(
             ActivitySample {
                 frontmost,
                 idle_seconds,
                 is_locked,
+                display_sleep_prevented,
             },
             chrono::Utc::now(),
         )
@@ -519,6 +524,14 @@ mod tests {
         }
     }
 
+    struct FakePower;
+    #[async_trait]
+    impl DisplaySleepProbe for FakePower {
+        async fn display_sleep_prevented(&self) -> Result<bool, PlatformError> {
+            Ok(false)
+        }
+    }
+
     struct FakeCap {
         /// Increment gray by this each probe for display 1
         n: Mutex<u8>,
@@ -579,6 +592,7 @@ mod tests {
             }),
             Arc::new(FakeLock),
             Arc::new(FakeIdle),
+            Arc::new(FakePower),
             CaptureConfig {
                 visual_change_threshold: 0.05,
                 debounce_default_ms: 0,

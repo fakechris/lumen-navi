@@ -18,8 +18,8 @@ use lumen_config::{AsrConfig, AudioConfig, Config, PrivacyConfig};
 use lumen_cua::{CuaCaptureAdapter, CuaClient};
 use lumen_platform::{MicCapturer, MicOpenConfig, OcrEngine, PlatformError};
 use lumen_platform_macos::{
-    microphone_permission_state, MacFrontmost, MacIdle, MacMicCapturer, MacScreenLock, MacSpeechAsr,
-    MacVisionOcr,
+    microphone_permission_state, MacFrontmost, MacIdle, MacMicCapturer, MacPower, MacScreenLock,
+    MacSpeechAsr, MacVisionOcr,
 };
 use lumen_process::{
     OcrWorker, OcrWorkerConfig, TranscribeWorker, TranscribeWorkerConfig, JOB_KIND_TRANSCRIBE_AUDIO,
@@ -358,6 +358,7 @@ async fn main() -> Result<()> {
             Arc::new(MacFrontmost),
             Arc::new(MacScreenLock),
             Arc::new(MacIdle),
+            Arc::new(MacPower),
             config.capture.clone(),
             config.privacy.clone(),
         );
@@ -398,6 +399,7 @@ async fn main() -> Result<()> {
             Arc::new(MacFrontmost),
             Arc::new(MacScreenLock),
             Arc::new(MacIdle),
+            Arc::new(MacPower),
             config.capture.clone(),
             config.privacy.clone(),
         );
