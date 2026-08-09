@@ -77,6 +77,14 @@ cargo run -p lumen-navi-desktop
 
 See [`docs/DESKTOP.md`](docs/DESKTOP.md).
 
+### Time-tracking categories (rules, not code)
+
+App categories use a **fixed match engine** + **editable JSON rules** (no rebuild to tune keywords):
+
+- Spec & usage: [`crates/lumen-store/rules/README.md`](crates/lumen-store/rules/README.md)
+- Defaults: `category_mapping.v1.json` (text / iTunes / LS), `app_catalog.v1.json` (known apps)
+- Live overrides: `~/Library/Application Support/LumenNavi/rules/`
+
 ## Browser Observe
 
 The Chrome MV3 extension records a privacy-gated lifecycle stream into its own local IndexedDB archive and can optionally sync a transport copy into the local daemon. Standalone capture needs no token or daemon. Page content remains metadata-only unless its host appears in an explicit extension or daemon allow-list. The extension includes a local full-page archive for activity, domain, attention, and source-detail review. No HTML, input values, selections, clipboard data, or DOM link lists are collected.

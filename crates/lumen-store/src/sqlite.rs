@@ -162,12 +162,28 @@ impl SqliteStore {
         migrate(&conn)?;
 
         let blobs = BlobStore::open(&data_dir)?;
+        // Seed + load editable rule files ($data_dir/rules/*.json).
+        // Engine is compiled-in; rules update without rebuild.
+        if let Err(e) = crate::rule_engine::install_and_load_rules(&data_dir) {
+            tracing::warn!(error = %e, "category rules load failed; using embedded defaults");
+            crate::rule_engine::set_active_mapping(std::sync::Arc::new(
+                crate::rule_engine::MappingRuleSet::embedded(),
+            ));
+            crate::rule_engine::set_active_catalog(std::sync::Arc::new(
+                crate::rule_engine::CatalogRuleSet::embedded(),
+            ));
+        }
         Ok(Self {
             data_dir,
             conn: Mutex::new(conn),
             blobs,
             blob_intake: Mutex::new(()),
         })
+    }
+
+    /// Reload `$data_dir/rules/*.json` after an external edit (no recompile).
+    pub fn reload_category_rules(&self) -> Result<(), StoreError> {
+        crate::rule_engine::reload_rules_from_dir(&self.data_dir)
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -1850,6 +1866,11 @@ impl SqliteStore {
         // Enqueue any uncategorized segments that aren't in the cache yet.
         self.enqueue_uncategorized_bundles()?;
 
+        // Pick up external rule-file edits without restarting the process.
+        if let Err(e) = self.reload_category_rules() {
+            tracing::debug!(error = %e, "rule reload skipped");
+        }
+
         if allow_network {
             match self.ensure_brew_index(7 * 24 * 3600) {
                 Ok((refreshed, n)) => {
@@ -1877,10 +1898,12 @@ impl SqliteStore {
                 .map_err(|_| StoreError::Other("lock poisoned".into()))?;
             let mut stmt = conn
                 .prepare(
+                    // Retry failed after ~1h so mapper/index fixes re-process
+                    // without waiting a full day (failed ≠ permanently unknown).
                     r#"SELECT bundle_id, app_name FROM app_category_cache
                        WHERE source = 'pending'
                           OR (source = 'failed' AND (last_attempt_at IS NULL
-                              OR (julianday('now') - julianday(last_attempt_at)) > 1.0))
+                              OR (julianday('now') - julianday(last_attempt_at)) > 0.04))
                        ORDER BY updated_at ASC
                        LIMIT ?1"#,
                 )

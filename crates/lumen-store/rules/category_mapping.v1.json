@@ -1,0 +1,294 @@
+{
+  "version": 1,
+  "description": "Genre mapping for free-text metadata (Homebrew desc/name) and structured store genres (iTunes, LS UTI). First matching text rule wins. Edit $data_dir/rules/category_mapping.v1.json to update without recompiling.",
+  "text_rules": [
+    {
+      "id": "browser-phrases",
+      "any": [
+        "web browser",
+        "internet browser",
+        "browser with",
+        "chromium-based browser"
+      ],
+      "category": "Browsing",
+      "level": "neutral"
+    },
+    {
+      "id": "browser-generic",
+      "any": ["browser"],
+      "none": ["file browser", "browse files"],
+      "category": "Browsing",
+      "level": "neutral"
+    },
+    {
+      "id": "development",
+      "any": [
+        "code editor",
+        "ide ",
+        " ide",
+        "terminal emulator",
+        "coding agent",
+        "coding assistant",
+        "software development",
+        "version control",
+        "docker",
+        "kubernetes",
+        "api development",
+        "git client"
+      ],
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "id": "ai-coding",
+      "all": ["ai", "code"],
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "id": "communication-collaboration",
+      "any": [
+        "teamwork",
+        "collaboration",
+        "collaborative",
+        "team chat",
+        "team messenger",
+        "team communication",
+        "instant messaging",
+        "enterprise messaging",
+        "workplace messaging",
+        "office messenger",
+        "group chat",
+        "video conferencing",
+        "video conference",
+        "conference call",
+        "meeting client",
+        "email client",
+        "mail client"
+      ],
+      "category": "Communication",
+      "level": "productive"
+    },
+    {
+      "id": "messaging-generic",
+      "any": ["messaging"],
+      "none": ["message queue"],
+      "category": "Communication",
+      "level": "productive"
+    },
+    {
+      "id": "chat-generic",
+      "any": ["chat"],
+      "none": ["chatbot", "chatgpt"],
+      "category": "Communication",
+      "level": "productive"
+    },
+    {
+      "id": "remote-access-tools",
+      "any": [
+        "remote desktop",
+        "remote-access",
+        "remote access",
+        "remote control",
+        "remote-control",
+        "remote admin",
+        "screen sharing",
+        "screen share",
+        "vnc client",
+        "vnc server",
+        "rdp client",
+        "rdp server",
+        "desktop sharing",
+        "unattended access",
+        "unattended remote"
+      ],
+      "none": [
+        "remote work",
+        "remote team",
+        "remote collaboration",
+        "work remotely",
+        "customer support",
+        "tech support",
+        "support ticket",
+        "support chat"
+      ],
+      "category": "Utilities",
+      "level": "neutral"
+    },
+    {
+      "id": "security-auth",
+      "any": [
+        "password manager",
+        "2fa",
+        "authenticator",
+        "password vault"
+      ],
+      "category": "Utilities",
+      "level": "neutral"
+    },
+    {
+      "id": "writing-notes",
+      "any": [
+        "note-taking",
+        "notes app",
+        "markdown editor",
+        "knowledge base",
+        "wiki"
+      ],
+      "category": "Writing",
+      "level": "productive"
+    },
+    {
+      "id": "entertainment-media",
+      "any": [
+        "video player",
+        "music player",
+        "media player",
+        "streaming media",
+        "streaming video"
+      ],
+      "category": "Entertainment",
+      "level": "distracting"
+    },
+    {
+      "id": "social",
+      "any": [
+        "social network",
+        "social media",
+        "social networking"
+      ],
+      "category": "Social",
+      "level": "distracting"
+    },
+    {
+      "id": "utilities-network",
+      "any": [
+        "vpn",
+        "proxy client",
+        "firewall",
+        "system monitor",
+        "network accelerator",
+        "game booster",
+        "download manager",
+        "file transfer",
+        "disk utility",
+        "backup utility"
+      ],
+      "category": "Utilities",
+      "level": "neutral"
+    },
+    {
+      "id": "productivity-office",
+      "any": [
+        "spreadsheet",
+        "word processor",
+        "office suite",
+        "presentation",
+        "project management",
+        "task manager",
+        "todo app",
+        "to-do",
+        "calendar app",
+        "crm "
+      ],
+      "category": "Productivity",
+      "level": "productive"
+    },
+    {
+      "id": "creative",
+      "any": [
+        "vector graphics",
+        "photo editor",
+        "image editor",
+        "3d modeling",
+        "video editor"
+      ],
+      "category": "Creative",
+      "level": "productive"
+    },
+    {
+      "id": "ai-assistant",
+      "any": [
+        "ai assistant",
+        "chatbot",
+        "large language",
+        "llm"
+      ],
+      "category": "Productivity",
+      "level": "productive"
+    }
+  ],
+  "itunes_genre_rules": [
+    { "genre": "developer tools", "category": "Development", "level": "productive" },
+    { "genre": "productivity", "category": "Productivity", "level": "productive" },
+    { "genre": "business", "category": "Productivity", "level": "productive" },
+    { "genre": "utilities", "category": "Utilities", "level": "neutral" },
+    { "genre": "social networking", "category": "Social", "level": "distracting" },
+    { "genre": "entertainment", "category": "Entertainment", "level": "distracting" },
+    { "genre": "music", "category": "Entertainment", "level": "distracting" },
+    { "genre": "games", "category": "Games", "level": "distracting" },
+    { "genre": "education", "category": "Reference", "level": "neutral" },
+    { "genre": "reference", "category": "Reference", "level": "neutral" },
+    { "genre": "books", "category": "Reference", "level": "neutral" },
+    { "genre": "graphics & design", "category": "Creative", "level": "productive" },
+    { "genre": "photo & video", "category": "Creative", "level": "productive" },
+    { "genre": "finance", "category": "Finance", "level": "neutral" },
+    { "genre": "health & fitness", "category": "Health", "level": "neutral" },
+    { "genre": "medical", "category": "Health", "level": "neutral" },
+    { "genre": "lifestyle", "category": "Lifestyle", "level": "neutral" },
+    { "genre": "travel", "category": "Lifestyle", "level": "neutral" },
+    { "genre": "food & drink", "category": "Lifestyle", "level": "neutral" },
+    { "genre": "shopping", "category": "Lifestyle", "level": "neutral" },
+    { "genre": "news", "category": "News", "level": "neutral" },
+    { "genre": "magazines & newspapers", "category": "News", "level": "neutral" },
+    { "genre": "weather", "category": "Utilities", "level": "neutral" },
+    { "genre": "sports", "category": "Entertainment", "level": "neutral" },
+    { "genre": "navigation", "category": "Utilities", "level": "neutral" }
+  ],
+  "ls_uti_rules": [
+    { "uti": "developer-tools", "category": "Development", "level": "productive" },
+    { "uti": "productivity", "category": "Productivity", "level": "productive" },
+    { "uti": "business", "category": "Productivity", "level": "productive" },
+    { "uti": "utilities", "category": "Utilities", "level": "neutral" },
+    { "uti": "social-networking", "category": "Social", "level": "distracting" },
+    { "uti": "entertainment", "category": "Entertainment", "level": "distracting" },
+    { "uti": "music", "category": "Entertainment", "level": "distracting" },
+    { "uti": "games", "category": "Games", "level": "distracting" },
+    { "uti": "action-games", "category": "Games", "level": "distracting" },
+    { "uti": "adventure-games", "category": "Games", "level": "distracting" },
+    { "uti": "arcade-games", "category": "Games", "level": "distracting" },
+    { "uti": "board-games", "category": "Games", "level": "distracting" },
+    { "uti": "card-games", "category": "Games", "level": "distracting" },
+    { "uti": "casino-games", "category": "Games", "level": "distracting" },
+    { "uti": "dice-games", "category": "Games", "level": "distracting" },
+    { "uti": "educational-games", "category": "Games", "level": "distracting" },
+    { "uti": "family-games", "category": "Games", "level": "distracting" },
+    { "uti": "kids-games", "category": "Games", "level": "distracting" },
+    { "uti": "music-games", "category": "Games", "level": "distracting" },
+    { "uti": "puzzle-games", "category": "Games", "level": "distracting" },
+    { "uti": "racing-games", "category": "Games", "level": "distracting" },
+    { "uti": "role-playing-games", "category": "Games", "level": "distracting" },
+    { "uti": "simulation-games", "category": "Games", "level": "distracting" },
+    { "uti": "sports-games", "category": "Games", "level": "distracting" },
+    { "uti": "strategy-games", "category": "Games", "level": "distracting" },
+    { "uti": "trivia-games", "category": "Games", "level": "distracting" },
+    { "uti": "word-games", "category": "Games", "level": "distracting" },
+    { "uti": "education", "category": "Reference", "level": "neutral" },
+    { "uti": "reference", "category": "Reference", "level": "neutral" },
+    { "uti": "books", "category": "Reference", "level": "neutral" },
+    { "uti": "graphics-design", "category": "Creative", "level": "productive" },
+    { "uti": "photography", "category": "Creative", "level": "productive" },
+    { "uti": "video", "category": "Creative", "level": "productive" },
+    { "uti": "finance", "category": "Finance", "level": "neutral" },
+    { "uti": "healthcare-fitness", "category": "Health", "level": "neutral" },
+    { "uti": "medical", "category": "Health", "level": "neutral" },
+    { "uti": "lifestyle", "category": "Lifestyle", "level": "neutral" },
+    { "uti": "travel", "category": "Lifestyle", "level": "neutral" },
+    { "uti": "food-and-drink", "category": "Lifestyle", "level": "neutral" },
+    { "uti": "shopping", "category": "Lifestyle", "level": "neutral" },
+    { "uti": "news", "category": "News", "level": "neutral" },
+    { "uti": "magazines-and-newspapers", "category": "News", "level": "neutral" },
+    { "uti": "weather", "category": "Utilities", "level": "neutral" },
+    { "uti": "sports", "category": "Entertainment", "level": "neutral" }
+  ]
+}

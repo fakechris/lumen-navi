@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::categorization::{
-    classify_from_itunes_genre, classify_from_text_hint, Classification, ProductivityLevel,
+    classify_from_itunes_genre, classify_from_metadata_texts, Classification, ProductivityLevel,
 };
 use crate::StoreError;
 
@@ -45,7 +45,7 @@ pub struct EnrichmentHit {
 }
 
 /// Guess a Homebrew cask token from a display name (`Visual Studio Code` →
-/// `visual-studio-code`). Best-effort; many casks won't match.
+/// `visual-studio-code`). Best-effort; CJK-only names collapse to empty.
 pub fn guess_cask_token(app_name: &str) -> String {
     let mut s = app_name.trim().to_ascii_lowercase();
     // Common suffixes that don't appear in cask tokens.
@@ -66,6 +66,183 @@ pub fn guess_cask_token(app_name: &str) -> String {
         }
     }
     out.trim_matches('-').to_string()
+}
+
+/// Candidate Homebrew cask tokens from **bundle id + display name**.
+///
+/// Prefer reverse-DNS labels (works when the UI name is CJK, e.g. `UU远程`
+/// with bundle `com.netease.uuremote` → token `uuremote`). Also expands
+/// CamelCase product labels (`DingTalkMac` → `dingtalk`, `dingtalkmac`).
+pub fn cask_token_candidates(bundle_id: &str, app_name: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |raw: &str| {
+        let t = raw.trim().trim_matches('-').to_ascii_lowercase();
+        if t.len() < 2 {
+            return;
+        }
+        // Skip pure noise labels.
+        if matches!(
+            t.as_str(),
+            "com" | "org" | "net" | "io" | "app" | "mac" | "osx" | "desktop" | "helper" | "server"
+                | "client" | "agent" | "launcher"
+        ) {
+            return;
+        }
+        if !out.iter().any(|e| e == &t) {
+            out.push(t);
+        }
+    };
+
+    let labels: Vec<&str> = bundle_id.split('.').filter(|s| !s.is_empty()).collect();
+    // Walk labels from the right (most product-specific first).
+    for label in labels.iter().rev().take(3) {
+        for variant in label_token_variants(label) {
+            push(&variant);
+        }
+    }
+
+    if let Some(name) = app_name {
+        let g = guess_cask_token(name);
+        if !g.is_empty() {
+            push(&g);
+        }
+        // If the display name had almost no ASCII, still try stripping spaces
+        // from any latin islands (e.g. "UU远程" → "uu").
+        let ascii: String = name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if ascii.len() >= 2 {
+            push(&ascii);
+        }
+    }
+
+    out
+}
+
+/// Expand one reverse-DNS label into likely cask tokens.
+fn label_token_variants(label: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    let raw = label.trim();
+    if raw.is_empty() {
+        return v;
+    }
+    v.push(raw.to_ascii_lowercase());
+
+    // Strip common packaging suffixes, repeatedly.
+    let mut core = raw.to_string();
+    for _ in 0..3 {
+        let lower = core.to_ascii_lowercase();
+        let stripped = [
+            "formac",
+            "formacos",
+            "desktop",
+            "macos",
+            "osx",
+            "mac",
+            "app",
+            "client",
+            "helper",
+            "launcher",
+            "installer",
+            "server",
+        ]
+        .iter()
+        .find_map(|suf| lower.strip_suffix(suf).map(|s| s.to_string()));
+        if let Some(s) = stripped {
+            let s = s.trim_end_matches(['-', '_']).to_string();
+            if s.len() >= 2 {
+                core = preserve_case_prefix(&core, &s);
+                v.push(core.to_ascii_lowercase());
+                continue;
+            }
+        }
+        break;
+    }
+
+    // CamelCase → kebab and concatenated lowercase.
+    let parts = split_camel_case(raw);
+    if parts.len() > 1 {
+        v.push(parts.join("-").to_ascii_lowercase());
+        v.push(parts.join("").to_ascii_lowercase());
+        // Drop trailing packaging words.
+        let meaningful: Vec<&str> = parts
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|p| {
+                !matches!(
+                    p.to_ascii_lowercase().as_str(),
+                    "mac" | "osx" | "desktop" | "app" | "client" | "helper" | "server"
+                )
+            })
+            .collect();
+        if !meaningful.is_empty() && meaningful.len() < parts.len() {
+            v.push(meaningful.join("-").to_ascii_lowercase());
+            v.push(meaningful.join("").to_ascii_lowercase());
+        }
+    }
+
+    v
+}
+
+fn preserve_case_prefix(original: &str, lower_stripped: &str) -> String {
+    // Keep original casing length when possible for further camel splits.
+    if original.len() >= lower_stripped.len() {
+        original[..lower_stripped.len()].to_string()
+    } else {
+        lower_stripped.to_string()
+    }
+}
+
+fn split_camel_case(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let chars: Vec<char> = s.chars().collect();
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch == '-' || ch == '_' {
+            if !cur.is_empty() {
+                parts.push(std::mem::take(&mut cur));
+            }
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|j| chars[j]);
+        let next = chars.get(i + 1).copied();
+        let boundary = ch.is_ascii_uppercase()
+            && cur
+                .chars()
+                .last()
+                .map(|p| p.is_ascii_lowercase() || p.is_ascii_digit())
+                .unwrap_or(false)
+            || (ch.is_ascii_uppercase()
+                && prev.map(|p| p.is_ascii_uppercase()).unwrap_or(false)
+                && next.map(|n| n.is_ascii_lowercase()).unwrap_or(false));
+        if boundary && !cur.is_empty() {
+            parts.push(std::mem::take(&mut cur));
+        }
+        cur.push(ch);
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+    parts
+}
+
+fn classify_brew_fields(
+    desc: Option<&str>,
+    name: Option<&str>,
+    homepage: Option<&str>,
+) -> Option<Classification> {
+    let fields: Vec<&str> = [desc, name, homepage]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    if fields.is_empty() {
+        None
+    } else {
+        classify_from_metadata_texts(&fields)
+    }
 }
 
 /// Extract reverse-DNS-looking bundle ids from Homebrew zap trash paths.
@@ -140,19 +317,20 @@ fn looks_like_bundle_id(s: &str) -> bool {
 }
 
 fn http_get_json(url: &str) -> Result<Value, StoreError> {
+    // cask.json is multi-MB. Do **not** use `into_string()` — ureq caps it and
+    // returns "response too big", which silently prevented the full brew index
+    // from ever loading (only single-cask fetches worked).
     let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(15))
-        .timeout_read(Duration::from_secs(120))
+        .timeout_connect(Duration::from_secs(20))
+        .timeout_read(Duration::from_secs(180))
         .user_agent("lumen-navi-category-enrichment/0.1")
         .build();
     let resp = agent
         .get(url)
         .call()
         .map_err(|e| StoreError::Other(format!("http get {url}: {e}")))?;
-    let body = resp
-        .into_string()
-        .map_err(|e| StoreError::Other(format!("http body {url}: {e}")))?;
-    serde_json::from_str(&body).map_err(|e| StoreError::json(format!("parse {url}: {e}")))
+    let reader = resp.into_reader();
+    serde_json::from_reader(reader).map_err(|e| StoreError::json(format!("parse {url}: {e}")))
 }
 
 /// Download Homebrew cask catalog + 30d install analytics and build a
@@ -416,98 +594,103 @@ pub fn fetch_itunes_genre(bundle_id: &str) -> Result<Option<String>, StoreError>
         .filter(|s| !s.is_empty()))
 }
 
-/// Resolve category for one bundle using local brew row, optional single-cask
-/// fetch, then iTunes. Pure-ish: HTTP only; no DB.
+/// Resolve category for one bundle using local brew row, multi-token cask
+/// fetch, then iTunes.
+///
+/// Failure modes are distinguished in spirit (even when the DB only stores
+/// `failed`):
+/// - **Parse/index miss**: no brew row, token guesses 404, iTunes empty
+/// - **Metadata present, rules miss**: brew/iTunes returned text/genre but
+///   mappers returned `None` — fix mappers, don't hard-code the bundle
 pub fn resolve_bundle_category(
     bundle_id: &str,
     app_name: Option<&str>,
     brew_row: Option<&BrewCaskRow>,
     allow_network: bool,
 ) -> Result<Option<EnrichmentHit>, StoreError> {
-    // 1) Local brew index row.
+    // 1) Local brew index row (identity already resolved via zap→bundle).
     if let Some(row) = brew_row {
-        if let Some(desc) = row.desc.as_deref() {
-            if let Some(c) = classify_from_text_hint(desc) {
-                return Ok(Some(EnrichmentHit {
-                    classification: c,
-                    source: "brew",
-                    confidence: 0.75,
-                    brew_token: Some(row.cask_token.clone()),
-                    brew_desc: row.desc.clone(),
-                    itunes_genre: None,
-                }));
-            }
+        if let Some(c) = classify_brew_fields(
+            row.desc.as_deref(),
+            row.name.as_deref(),
+            row.homepage.as_deref(),
+        ) {
+            return Ok(Some(EnrichmentHit {
+                classification: c,
+                source: "brew",
+                confidence: 0.8,
+                brew_token: Some(row.cask_token.clone()),
+                brew_desc: row.desc.clone(),
+                itunes_genre: None,
+            }));
         }
-        // Desc didn't map — still try name.
-        if let Some(name) = row.name.as_deref() {
-            if let Some(c) = classify_from_text_hint(name) {
-                return Ok(Some(EnrichmentHit {
-                    classification: c,
-                    source: "brew",
-                    confidence: 0.55,
-                    brew_token: Some(row.cask_token.clone()),
-                    brew_desc: row.desc.clone(),
-                    itunes_genre: None,
-                }));
-            }
-        }
+        // Index hit but genre rules couldn't map — fall through to iTunes
+        // before giving up (MAS dual-listed apps).
     }
 
     if !allow_network {
         return Ok(None);
     }
 
-    // 2) On-demand single cask by guessed token.
-    if let Some(name) = app_name {
-        let token = guess_cask_token(name);
-        if !token.is_empty() {
-            if let Some(one) = fetch_brew_cask(&token)? {
-                let matches_bundle = one.bundle_ids.iter().any(|b| b == bundle_id)
-                    || one.bundle_ids.is_empty(); // no zap — weak accept by token only
-                if matches_bundle {
-                    if let Some(desc) = one.desc.as_deref() {
-                        if let Some(c) = classify_from_text_hint(desc) {
-                            return Ok(Some(EnrichmentHit {
-                                classification: c,
-                                source: "brew",
-                                confidence: if one.bundle_ids.iter().any(|b| b == bundle_id) {
-                                    0.8
-                                } else {
-                                    0.5
-                                },
-                                brew_token: Some(one.token),
-                                brew_desc: one.desc,
-                                itunes_genre: None,
-                            }));
-                        }
-                    }
-                }
-            }
+    // 2) On-demand cask fetch using token candidates (bundle labels + name).
+    //    Cap network attempts so one bad bundle cannot fan out unbounded.
+    let mut best_unmapped: Option<BrewCaskOne> = None;
+    let tokens = cask_token_candidates(bundle_id, app_name);
+    for token in tokens.into_iter().take(6) {
+        let Some(one) = fetch_brew_cask(&token)? else {
+            continue;
+        };
+        let matches_bundle = one.bundle_ids.iter().any(|b| b.eq_ignore_ascii_case(bundle_id));
+        // Accept weak token-only match only when zap listed nothing.
+        let accept = matches_bundle || one.bundle_ids.is_empty();
+        if !accept {
+            continue;
+        }
+        if let Some(c) = classify_brew_fields(
+            one.desc.as_deref(),
+            one.name.as_deref(),
+            one.homepage.as_deref(),
+        ) {
+            let conf = if matches_bundle { 0.85 } else { 0.5 };
+            return Ok(Some(EnrichmentHit {
+                classification: c,
+                source: "brew",
+                confidence: conf,
+                brew_token: Some(one.token),
+                brew_desc: one.desc,
+                itunes_genre: None,
+            }));
+        }
+        // Keep first bundle-matched cask for diagnostics / later iTunes combo.
+        if matches_bundle && best_unmapped.is_none() {
+            best_unmapped = Some(one);
         }
     }
 
-    // 3) iTunes Lookup.
+    // 3) iTunes Lookup (genre is structured metadata — map via genre rules).
     if let Some(genre) = fetch_itunes_genre(bundle_id)? {
         if let Some(c) = classify_from_itunes_genre(&genre) {
             return Ok(Some(EnrichmentHit {
                 classification: c,
                 source: "itunes",
                 confidence: 0.7,
-                brew_token: None,
-                brew_desc: None,
+                brew_token: best_unmapped.as_ref().map(|b| b.token.clone()),
+                brew_desc: best_unmapped.and_then(|b| b.desc),
                 itunes_genre: Some(genre),
             }));
         }
-        // Genre present but unmapped — still record as neutral Utilities-ish skip.
+        // Genre string present but unmapped in our table — extend
+        // `classify_from_itunes_genre`, don't special-case the bundle.
+        // Soft fallback so structured store metadata still yields a category.
         return Ok(Some(EnrichmentHit {
             classification: Classification {
                 category: Some("Utilities".into()),
                 level: Some(ProductivityLevel::Neutral),
             },
             source: "itunes",
-            confidence: 0.4,
-            brew_token: None,
-            brew_desc: None,
+            confidence: 0.35,
+            brew_token: best_unmapped.as_ref().map(|b| b.token.clone()),
+            brew_desc: best_unmapped.and_then(|b| b.desc),
             itunes_genre: Some(genre),
         }));
     }
@@ -524,6 +707,38 @@ mod tests {
         assert_eq!(guess_cask_token("Visual Studio Code"), "visual-studio-code");
         assert_eq!(guess_cask_token("Comet"), "comet");
         assert_eq!(guess_cask_token("Google Chrome"), "google-chrome");
+    }
+
+    #[test]
+    fn token_candidates_from_bundle_work_when_ui_name_is_cjk() {
+        let c = cask_token_candidates("com.netease.uuremote", Some("UU远程"));
+        assert!(
+            c.iter().any(|t| t == "uuremote"),
+            "expected uuremote in {c:?}"
+        );
+        let c2 = cask_token_candidates("com.alibaba.DingTalkMac", Some("DingTalk"));
+        assert!(
+            c2.iter().any(|t| t == "dingtalk" || t == "dingtalkmac"),
+            "expected dingtalk* in {c2:?}"
+        );
+    }
+
+    #[test]
+    fn brew_desc_teamwork_and_remote_map() {
+        let c = classify_brew_fields(
+            Some("Teamwork app by Alibaba Group"),
+            Some("DingTalk"),
+            Some("https://www.dingtalk.com/"),
+        )
+        .unwrap();
+        assert_eq!(c.category.as_deref(), Some("Communication"));
+        let c2 = classify_brew_fields(
+            Some("NetEase UU remote desktop access and control tool"),
+            Some("UU Remote"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(c2.category.as_deref(), Some("Utilities"));
     }
 
     #[test]

@@ -1,0 +1,414 @@
+{
+  "version": 1,
+  "description": "Built-in app/domain catalog. Edit $data_dir/rules/app_catalog.v1.json to override without recompiling.",
+  "rules": [
+    {
+      "field": "bundle_id",
+      "value": "com.apple.dt.Xcode",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.microsoft.VSCode",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.todesktop.230313mzl4w4u92",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.github.atom",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.googlecode.iterm2",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.apple.Terminal",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "dev.warp.Warp-Stable",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.mitchellh.ghostty",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "ai.perplexity.comet",
+      "category": "Browsing",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "dev.zcode.app",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.docker.docker",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.jetbrains.intellij",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.jetbrains.CLion",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.jetbrains.WebStorm",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.sublimetext.4",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "app_name",
+      "value": "Postman",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "app_name",
+      "value": "Tower",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "app_name",
+      "value": "Fork",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "app_name",
+      "value": "Zed",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "app_name",
+      "value": "Sublime Text",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "app_name",
+      "value": "Ghostty",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "app_name",
+      "value": "ZCode",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "domain",
+      "value": "github.com",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "domain",
+      "value": "gitlab.com",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "domain",
+      "value": "stackoverflow.com",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "domain",
+      "value": "developer.mozilla.org",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "domain",
+      "value": "docs.rs",
+      "category": "Development",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.tinyspeck.slackmacgap",
+      "category": "Communication",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.apple.MobileSMS",
+      "category": "Communication",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.apple.mail",
+      "category": "Communication",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.tencent.xinWeChat",
+      "category": "Communication",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.microsoft.teams2",
+      "category": "Communication",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.microsoft.Outlook",
+      "category": "Communication",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.tdesktop.Telegram",
+      "category": "Communication",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.hnc.Discord",
+      "category": "Communication",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "ru.keepcoder.Telegram",
+      "category": "Communication",
+      "level": "neutral"
+    },
+    {
+      "field": "domain",
+      "value": "gmail.com",
+      "category": "Communication",
+      "level": "neutral"
+    },
+    {
+      "field": "domain",
+      "value": "mail.google.com",
+      "category": "Communication",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "notion.id",
+      "category": "Writing",
+      "level": "productive"
+    },
+    {
+      "field": "app_name",
+      "value": "Obsidian",
+      "category": "Writing",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "md.obsidian",
+      "category": "Writing",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.apple.Notes",
+      "category": "Writing",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.apple.iWork.Pages",
+      "category": "Writing",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.apple.TextEdit",
+      "category": "Writing",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.microsoft.Word",
+      "category": "Writing",
+      "level": "productive"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.apple.Safari",
+      "category": "Browsing",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.google.Chrome",
+      "category": "Browsing",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "company.thebrowser.Browser",
+      "category": "Browsing",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "org.mozilla.firefox",
+      "category": "Browsing",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "org.mozilla.firefox",
+      "category": "Browsing",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "io.github.clash-verge-rev.clash-verge-rev",
+      "category": "Utilities",
+      "level": "neutral"
+    },
+    {
+      "field": "app_name",
+      "value": "Clash Verge",
+      "category": "Utilities",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.west2online.ClashX",
+      "category": "Utilities",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "com.apple.finder",
+      "category": "System",
+      "level": "neutral"
+    },
+    {
+      "field": "app_name",
+      "value": "Finder",
+      "category": "System",
+      "level": "neutral"
+    },
+    {
+      "field": "bundle_id",
+      "value": "cx.c3.theunarchiver",
+      "category": "Utilities",
+      "level": "neutral"
+    },
+    {
+      "field": "domain",
+      "value": "wikipedia.org",
+      "category": "Reference",
+      "level": "neutral"
+    },
+    {
+      "field": "app_name",
+      "value": "Books",
+      "category": "Reference",
+      "level": "neutral"
+    },
+    {
+      "field": "domain",
+      "value": "youtube.com",
+      "category": "Entertainment",
+      "level": "distracting"
+    },
+    {
+      "field": "domain",
+      "value": "bilibili.com",
+      "category": "Entertainment",
+      "level": "distracting"
+    },
+    {
+      "field": "domain",
+      "value": "netflix.com",
+      "category": "Entertainment",
+      "level": "distracting"
+    },
+    {
+      "field": "app_name",
+      "value": "Spotify",
+      "category": "Entertainment",
+      "level": "distracting"
+    },
+    {
+      "field": "app_name",
+      "value": "Music",
+      "category": "Entertainment",
+      "level": "neutral"
+    },
+    {
+      "field": "domain",
+      "value": "twitter.com",
+      "category": "Social",
+      "level": "distracting"
+    },
+    {
+      "field": "domain",
+      "value": "x.com",
+      "category": "Social",
+      "level": "distracting"
+    },
+    {
+      "field": "domain",
+      "value": "reddit.com",
+      "category": "Social",
+      "level": "distracting"
+    },
+    {
+      "field": "domain",
+      "value": "instagram.com",
+      "category": "Social",
+      "level": "distracting"
+    },
+    {
+      "field": "domain",
+      "value": "weibo.com",
+      "category": "Social",
+      "level": "distracting"
+    }
+  ]
+}
