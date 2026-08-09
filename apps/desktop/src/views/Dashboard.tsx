@@ -233,15 +233,21 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  // Active segments only (idle renders as faint gray).
+  // Split active vs idle: active segments get category colors and full
+  // interactivity; idle segments render as muted gray blocks so the user can
+  // see when they were away (e.g. walked off without sleeping the Mac).
   const active = useMemo(
     () => segments.filter((s) => !s.is_idle && s.duration_ms > 0),
+    [segments],
+  );
+  const idleSegs = useMemo(
+    () => segments.filter((s) => s.is_idle && s.duration_ms > 0),
     [segments],
   );
 
   useEffect(() => {
     const el = ref.current;
-    if (!el || active.length === 0) return;
+    if (!el || (active.length === 0 && idleSegs.length === 0)) return;
 
     const width = el.clientWidth;
     const height = 56;
@@ -262,6 +268,48 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
       .attr("rx", 4)
       .attr("fill", gridColor);
 
+    // Idle segments: drawn first (under active) as muted gray so they read as
+    // "away" without competing with category colors. Visible on the band so the
+    // user can tell when they stepped away; hover shows a minimal "空闲" tooltip.
+    const barH = 20;
+    const barY = height / 2 - barH / 2;
+    const tooltipContainer = el;
+    const idleColor = readCssVar("--border-strong") || "rgba(127,127,127,0.35)";
+    svg.selectAll("rect.idle")
+      .data(idleSegs)
+      .enter()
+      .append("rect")
+      .attr("class", "idle")
+      .attr("x", (d) => x(new Date(d.started_at).getTime()))
+      .attr("y", barY)
+      .attr("width", (d) =>
+        Math.max(1, x(new Date(d.ended_at ?? d.started_at).getTime()) - x(new Date(d.started_at).getTime()))
+      )
+      .attr("height", barH)
+      .attr("rx", 3)
+      .attr("fill", idleColor)
+      .attr("opacity", 0.7)
+      .style("cursor", "help")
+      .on("mouseenter", function (event, d) {
+        const rect = tooltipContainer.getBoundingClientRect();
+        setTooltip({
+          x: event.clientX - rect.left,
+          y: event.clientY - rect.top,
+          seg: d as unknown as ActivitySegment,
+        });
+      })
+      .on("mousemove", function (event, d) {
+        const rect = tooltipContainer.getBoundingClientRect();
+        setTooltip({
+          x: event.clientX - rect.left,
+          y: event.clientY - rect.top,
+          seg: d as unknown as ActivitySegment,
+        });
+      })
+      .on("mouseleave", function () {
+        setTooltip(null);
+      });
+
     // Hour gridlines (every 6h)
     for (let h = 0; h <= 24; h += 6) {
       const px = x(dayStartMs + h * 3600 * 1000);
@@ -272,11 +320,7 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
         .attr("stroke-width", 1);
     }
 
-    // Segments
-    const barH = 20;
-    const barY = height / 2 - barH / 2;
-    const tooltipContainer = el;
-
+    // Segments (active)
     svg.selectAll("rect.seg")
       .data(active)
       .enter()
@@ -338,7 +382,7 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
     return () => {
       svg.remove();
     };
-  }, [active]);
+  }, [active, idleSegs]);
 
   return (
     <div style={{ position: "relative" }}>
@@ -360,7 +404,7 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
           zIndex: 10,
         }}>
           <div style={{ fontWeight: 600, marginBottom: 2, display: "flex", alignItems: "center", gap: 6 }}>
-            {tooltip.seg.app_name ?? "未知"}
+            {tooltip.seg.is_idle ? "空闲 / 离开" : (tooltip.seg.app_name ?? "未知")}
             {tooltip.seg.source === "manual" && (
               <span style={{
                 fontSize: 9, padding: "1px 5px", borderRadius: "var(--radius-pill)",
@@ -368,7 +412,7 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
               }}>手动</span>
             )}
           </div>
-          {tooltip.seg.window_title && (
+          {tooltip.seg.window_title && !tooltip.seg.is_idle && (
             <div style={{ color: "var(--text-secondary)", marginBottom: 2, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis" }}>
               {tooltip.seg.window_title}
             </div>
