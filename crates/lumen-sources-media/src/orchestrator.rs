@@ -268,8 +268,28 @@ impl CaptureOrchestrator {
                 max_distance = max_distance.max(dist);
                 self.probe_gray.insert(d.id.0, gray.clone());
 
-                if dist < self.capture.visual_change_threshold {
-                    continue; // MAD stable — no change
+                // Safety valve must be evaluated BEFORE the MAD stable-skip
+                // below: a visually static frame (a browser showing a fixed
+                // article, a paused video, a PDF) never exceeds the MAD
+                // threshold, so the old code `continue`d here and the safety
+                // valve — written after the continue — was unreachable. That
+                // meant a stable frame produced zero screenshots indefinitely.
+                // Evaluating safety_due first guarantees a heartbeat capture
+                // every DHASH_SAFETY_VALVE regardless of visual change.
+                let safety_due = self
+                    .last_full_capture
+                    .get(&d.id.0)
+                    .is_none_or(|t| now.duration_since(*t) >= DHASH_SAFETY_VALVE);
+
+                if dist < self.capture.visual_change_threshold && !safety_due {
+                    continue; // MAD stable and not overdue — no change
+                }
+
+                if safety_due {
+                    // Force a heartbeat capture; skip the near-dup check so a
+                    // long-static screen still captures on schedule.
+                    any_change = true;
+                    continue;
                 }
 
                 // MAD says changed. Second layer: dHash near-duplicate check.
@@ -284,13 +304,7 @@ impl CaptureOrchestrator {
                     .iter()
                     .any(|(h, _)| hamming64(hash, *h) <= DHASH_HAMMING_THRESHOLD);
 
-                // Safety valve: force capture if overdue.
-                let safety_due = self
-                    .last_full_capture
-                    .get(&d.id.0)
-                    .is_none_or(|t| now.duration_since(*t) >= DHASH_SAFETY_VALVE);
-
-                if near_dup && !safety_due {
+                if near_dup {
                     skipped_near_dup = true;
                 } else {
                     any_change = true;
@@ -602,5 +616,44 @@ mod tests {
         o.set_closed_eyes(true);
         let r = o.capture_tick(TriggerReason::FocusChange).await.unwrap();
         assert!(r.is_none());
+    }
+
+    /// Regression: a visually static screen (browser showing a fixed page,
+    /// paused video, PDF) used to never capture because the MAD `continue`
+    /// fired before the safety valve was consulted. The safety valve must
+    /// force a heartbeat every DHASH_SAFETY_VALVE even when MAD is stable.
+    #[tokio::test]
+    async fn safety_valve_captures_static_screen_when_overdue() {
+        // FakeCap returns the same gray value every probe -> MAD is always 0
+        // below threshold after the first capture, i.e. a perfectly static frame.
+        let mut o = orch(FakeCap { n: Mutex::new(10) });
+
+        // First tick captures (establishes baseline).
+        let first = o.capture_tick(TriggerReason::Interval).await.unwrap();
+        assert!(first.is_some(), "first tick should capture");
+
+        // Second tick, immediately after: stable + not overdue -> skip.
+        let second = o.capture_tick(TriggerReason::Interval).await.unwrap();
+        assert!(second.is_none(), "stable frame within safety window should skip");
+
+        // Pretend DHASH_SAFETY_VALVE has elapsed by backdating last_full_capture.
+        for d in o.select_displays().await.unwrap() {
+            o.last_full_capture.insert(
+                d.id.0,
+                Instant::now() - Duration::from_secs(11),
+            );
+        }
+
+        // Third tick, same static screen but safety valve overdue -> MUST capture.
+        let third = o.capture_tick(TriggerReason::Interval).await.unwrap();
+        assert!(
+            third.is_some(),
+            "safety valve must force a capture even on a static screen when overdue"
+        );
+        assert_eq!(
+            third.unwrap().frames.len(),
+            2,
+            "heartbeat should capture all displays"
+        );
     }
 }
