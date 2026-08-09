@@ -291,6 +291,10 @@ impl SqliteStore {
             }
             prepared.push(event);
         }
+        // Project in ts order so each event sees a monotonic history. A late
+        // out-of-order event otherwise lands outside the activity projection's
+        // 30s merge window and inserts a fresh 0ms segment.
+        prepared.sort_by(|a, b| a.ts.cmp(&b.ts));
         let mut accepted = 0;
         for event in &prepared {
             if insert_event_idempotent(&tx, event)? {
@@ -1342,6 +1346,7 @@ impl SqliteStore {
                             COUNT(1) AS segs
                      FROM grouped
                      GROUP BY gkey
+                     HAVING SUM(duration_ms) > 0
                    ) grouped
                    ORDER BY grouped.total_ms DESC
                    LIMIT 20"#,
@@ -1565,6 +1570,7 @@ impl SqliteStore {
                             COUNT(1) AS segs
                      FROM grouped
                      GROUP BY gkey
+                     HAVING SUM(duration_ms) > 0
                    ) grouped
                    ORDER BY grouped.total_ms DESC
                    LIMIT 15"#,
@@ -4117,6 +4123,133 @@ mod tests {
             .unwrap();
         assert_eq!(bid.as_deref(), Some("ai.perplexity.comet"));
         assert_eq!(ms, 10_000);
+        drop(conn);
+    }
+
+    /// A single-sample app that never gets a follow-up event stays at 0ms.
+    /// `activity_day_stats` must not list it in top_apps — the 0ms row is real
+    /// data but not a meaningful ranking entry, and the timeline already hides
+    /// 0ms segments elsewhere.
+    #[test]
+    fn activity_day_stats_hides_zero_duration_apps() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-08-07T11:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let mk = |off: i64, app: &str, bid: &str| {
+            let mut e = SourceEvent::new(
+                SourceKind::Activity,
+                event_kind::ACTIVITY_FOCUS_V1,
+                json!({
+                    "app_name": app,
+                    "bundle_id": bid,
+                    "window_title": "win",
+                    "is_idle": false,
+                    "is_locked": false,
+                }),
+            );
+            e.ts = base + chrono::Duration::seconds(off);
+            e.id = Uuid::new_v4();
+            e
+        };
+
+        // Safari gets two samples 10s apart -> 10000ms (closed on switch).
+        store.append_event(mk(0, "Safari", "com.apple.Safari")).unwrap();
+        store.append_event(mk(10, "Safari", "com.apple.Safari")).unwrap();
+        // Comet gets exactly one sample, then focus leaves to Activity Monitor.
+        // Comet's segment stays at 0ms because no second Comet heartbeat ever
+        // closes it.
+        store.append_event(mk(20, "Comet", "ai.perplexity.comet")).unwrap();
+        store.append_event(mk(30, "Activity Monitor", "com.apple.ActivityMonitor")).unwrap();
+
+        // The day is bucketed in local time from ts; derive it the same way.
+        let day = base
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        let stats = store.activity_day_stats(&day).unwrap();
+
+        let names: Vec<&str> = stats.top_apps.iter().map(|a| a.app_name.as_str()).collect();
+        assert!(
+            !names.contains(&"Comet"),
+            "0ms Comet must not appear in top_apps, got: {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"Activity Monitor"),
+            "0ms Activity Monitor must not appear in top_apps, got: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"Safari"),
+            "Safari (>0ms) must appear in top_apps, got: {:?}",
+            names
+        );
+    }
+
+    /// Out-of-order insertion (late-arriving event with an earlier ts) must not
+    /// produce a spurious 0ms segment. Events arrive [t0, t10, t5] but should
+    /// be projected as if inserted [t0, t5, t10].
+    #[test]
+    fn activity_projection_tolerates_out_of_order_insertion() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-08-07T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let mk = |off: i64| {
+            let mut e = SourceEvent::new(
+                SourceKind::Activity,
+                event_kind::ACTIVITY_FOCUS_V1,
+                json!({
+                    "app_name": "Ghostty",
+                    "bundle_id": "com.mitchellh.ghostty",
+                    "window_title": "shell",
+                    "is_idle": false,
+                    "is_locked": false,
+                }),
+            );
+            e.ts = base + chrono::Duration::seconds(off);
+            e.id = Uuid::new_v4();
+            e
+        };
+
+        // Batch-insert in non-monotonic order via the bulk append path so the
+        // sort-by-ts inside append_idempotent_with_artifacts_up_to is exercised.
+        let records = vec![
+            EventWithArtifacts { event: mk(0), artifacts: vec![] },
+            EventWithArtifacts { event: mk(10), artifacts: vec![] },
+            EventWithArtifacts { event: mk(5), artifacts: vec![] },
+        ];
+        let outcome = store
+            .append_idempotent_with_artifacts_up_to(records, u64::MAX)
+            .unwrap();
+        match outcome {
+            BlobLimitedAppendOutcome::Appended(o) => {
+                assert_eq!(o.accepted, 3, "all three events should be accepted");
+            }
+            other => panic!("expected Appended, got {:?}", other),
+        }
+
+        let conn = store.conn.lock().unwrap();
+        let (n, total_ms): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(1), COALESCE(SUM(duration_ms), 0) FROM activity_segments",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        // One merged segment covering [0, 10s] = 10000ms. Without the sort, the
+        // t5 event would land outside the merge window and create a 0ms row.
+        assert_eq!(n, 1, "out-of-order events must merge into one segment");
+        assert_eq!(
+            total_ms, 10_000,
+            "segment must cover the full 10s, got {}ms",
+            total_ms
+        );
         drop(conn);
     }
 

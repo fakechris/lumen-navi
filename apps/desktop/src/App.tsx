@@ -183,30 +183,42 @@ export default function App() {
   const [assistantKey, setAssistantKey] = useState("");
   const [browserPairing, setBrowserPairing] = useState<BrowserPairing | null>(null);
   const screenPermissionPending = useRef(false);
-  /** Eager: first viewport of image rows. Rest load via IntersectionObserver. */
-  const FIRST_SCREEN_THUMB_COUNT = 12;
+  // Thumbnail loading strategy: load every thumb in the current timeline page
+  // eagerly (they're ~200-400KB JPEG data URLs, 60 items ≈ 15-24MB — fine),
+  // and keep an IntersectionObserver around so that when the list later grows
+  // (pagination / infinite scroll), off-screen thumbs still lazy-load.
+  // Background: blobs are always on disk; the old slice(0,12) eager load made
+  // it look like images were missing because newest-first + 30s auto-refresh
+  // pushes items 13-60 below the fold before the user ever scrolls.
   const thumbsRef = useRef<Record<string, string>>({});
-  const thumbLoadingRef = useRef<Set<string>>(new Set());
+  // In-flight promise per id, so concurrent callers (eager load + click +
+  // observer) share one fetch instead of the later ones seeing null.
+  const thumbLoadingRef = useRef<Map<string, Promise<string | null>>>(new Map());
   const thumbObserverRef = useRef<IntersectionObserver | null>(null);
 
   const ensureThumb = useCallback(async (id: string): Promise<string | null> => {
-    if (thumbsRef.current[id]) return thumbsRef.current[id];
-    if (thumbLoadingRef.current.has(id)) return null;
-    thumbLoadingRef.current.add(id);
-    try {
-      const url = await api.getEventImageDataUrl(id);
-      if (url) {
-        thumbsRef.current = { ...thumbsRef.current, [id]: url };
-        setThumbs((prev) => ({ ...prev, [id]: url }));
-        return url;
+    const cached = thumbsRef.current[id];
+    if (cached) return cached;
+    const inflight = thumbLoadingRef.current.get(id);
+    if (inflight) return inflight;
+    const p = (async () => {
+      try {
+        const url = await api.getEventImageDataUrl(id);
+        if (url) {
+          thumbsRef.current = { ...thumbsRef.current, [id]: url };
+          setThumbs((prev) => ({ ...prev, [id]: url }));
+          return url;
+        }
+        return null;
+      } catch (e) {
+        console.warn("thumb load failed", id.slice(0, 8), e);
+        return null;
+      } finally {
+        thumbLoadingRef.current.delete(id);
       }
-      return null;
-    } catch (e) {
-      console.warn("thumb load failed", id.slice(0, 8), e);
-      return null;
-    } finally {
-      thumbLoadingRef.current.delete(id);
-    }
+    })();
+    thumbLoadingRef.current.set(id, p);
+    return p;
   }, []);
 
   /** Attach lazy-load observer to a row that still needs a thumb. */
@@ -404,13 +416,14 @@ export default function App() {
       });
       setTimeline(items);
       setError(null);
-      // First screen: load all image thumbs in the first viewport eagerly.
-      // Below the fold: IntersectionObserver (bindLazyThumb) loads on approach.
+      // First screen = the whole current page. Eager-load every thumb in this
+      // batch (concurrency-limited); each ensureThumb dedupes via thumbsRef so
+      // the 30s auto-refresh re-running this is cheap. Below-page items (when
+      // pagination lands) still lazy-load via bindLazyThumb's observer.
       const need = items.filter((i) => i.has_image);
-      const firstScreen = need.slice(0, FIRST_SCREEN_THUMB_COUNT);
       const concurrency = 6;
-      for (let i = 0; i < firstScreen.length; i += concurrency) {
-        const batch = firstScreen.slice(i, i + concurrency);
+      for (let i = 0; i < need.length; i += concurrency) {
+        const batch = need.slice(i, i + concurrency);
         await Promise.all(batch.map((item) => ensureThumb(item.id)));
       }
     } catch (e) {
