@@ -567,6 +567,43 @@ pub fn bgra_to_gray(frame: &RawFrame) -> Vec<u8> {
     out
 }
 
+/// Difference hash (dHash): 9×8 nearest-neighbour resample → horizontal pixel
+/// gradient → 64-bit fingerprint. Robust to scale/gamma, sensitive to small
+/// shifts (ideal for screenshots). Same algorithm as Retrace's
+/// `PerceptualHash.swift`. Returns 0 for degenerate inputs.
+pub fn dhash(gray: &[u8], width: usize, height: usize) -> u64 {
+    if width < 2 || height < 1 || gray.len() < width * height {
+        return 0;
+    }
+    const GW: usize = 9;
+    const GH: usize = 8;
+    let mut samples = [0u8; GW * GH];
+    for sy in 0..GH {
+        let src_y = (sy * height) / GH;
+        for sx in 0..GW {
+            let src_x = (sx * width) / GW.max(1);
+            samples[sy * GW + sx] = gray[src_y * width + src_x];
+        }
+    }
+    let mut hash: u64 = 0;
+    let mut bit = 0;
+    for row in 0..GH {
+        for col in 0..(GW - 1) {
+            if samples[row * GW + col] as i32 > samples[row * GW + col + 1] as i32 {
+                hash |= 1 << bit;
+            }
+            bit += 1;
+        }
+    }
+    hash
+}
+
+/// Hamming distance between two 64-bit values (number of differing bits).
+#[inline]
+pub fn hamming64(a: u64, b: u64) -> u32 {
+    (a ^ b).count_ones()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,6 +624,38 @@ mod tests {
             display_id: DisplayId(1),
         };
         assert_eq!(bgra_to_gray(&frame).len(), 2);
+    }
+
+    #[test]
+    fn dhash_identical_frames_match() {
+        let w = 90;
+        let h = 80;
+        let g: Vec<u8> = (0..w * h).map(|i| (i % 256) as u8).collect();
+        assert_eq!(hamming64(dhash(&g, w, h), dhash(&g, w, h)), 0);
+    }
+
+    #[test]
+    fn dhash_small_change_low_hamming() {
+        let w = 90;
+        let h = 80;
+        let a = vec![100u8; w * h];
+        let mut b = vec![100u8; w * h];
+        for i in 0..20 { b[i] = 50; }
+        assert!(hamming64(dhash(&a, w, h), dhash(&b, w, h)) <= 5);
+    }
+
+    #[test]
+    fn dhash_inverted_high_hamming() {
+        let w = 90;
+        let h = 80;
+        let a: Vec<u8> = (0..w * h).map(|i| if i % w < w / 2 { 200 } else { 50 }).collect();
+        let b: Vec<u8> = (0..w * h).map(|i| if i % w < w / 2 { 50 } else { 200 }).collect();
+        assert!(hamming64(dhash(&a, w, h), dhash(&b, w, h)) >= 6);
+    }
+
+    #[test]
+    fn dhash_degenerate_returns_zero() {
+        assert_eq!(dhash(&[1, 2, 3], 3, 1), 0);
     }
 
     #[test]
