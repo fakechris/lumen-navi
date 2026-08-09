@@ -146,8 +146,9 @@ pub fn classify(
             };
         }
     }
-    for rule in default_rules() {
-        if fields.matches(&rule) {
+    let catalog = crate::rule_engine::active_catalog();
+    for rule in &catalog.rules {
+        if fields.matches(rule) {
             return Classification {
                 category: Some(rule.category.clone()),
                 level: rule.level,
@@ -171,138 +172,47 @@ pub fn classify(
     Classification::default()
 }
 
-/// Map free-text (Homebrew `desc`, app subtitle) → product category.
-/// Conservative keyword heuristics; returns `None` when ambiguous.
+/// Map free-text metadata (Homebrew `desc` / name / subtitle, store blurbs)
+/// → product category via the **loadable** mapping rule set.
+///
+/// Engine is fixed ([`crate::rule_engine`]); keywords live in
+/// `rules/category_mapping.v1.json` (overridable under `$data_dir/rules/`).
 pub fn classify_from_text_hint(text: &str) -> Option<Classification> {
-    use ProductivityLevel::*;
-    let t = text.to_ascii_lowercase();
-    let (category, level) = if contains_any(
-        &t,
-        &[
-            "web browser",
-            "internet browser",
-            "browser with",
-            "chromium-based browser",
-        ],
-    ) || (t.contains("browser") && !t.contains("file browser") && !t.contains("browse files"))
-    {
-        ("Browsing", Neutral)
-    } else if contains_any(
-        &t,
-        &[
-            "code editor",
-            "ide ",
-            " ide",
-            "terminal emulator",
-            "terminal emulator",
-            "coding agent",
-            "coding assistant",
-            "software development",
-            "version control",
-            "docker",
-            "kubernetes",
-            "api development",
-            "git client",
-        ],
-    ) || (t.contains("ai") && t.contains("code"))
-    {
-        ("Development", Productive)
-    } else if contains_any(&t, &["password manager", "2fa", "authenticator"]) {
-        ("Utilities", Neutral)
-    } else if contains_any(
-        &t,
-        &["note-taking", "notes app", "markdown editor", "knowledge base", "wiki"],
-    ) {
-        ("Writing", Productive)
-    } else if contains_any(&t, &["chat", "messaging", "team communication", "email client"]) {
-        ("Communication", Productive)
-    } else if contains_any(&t, &["video player", "music player", "media player", "streaming"]) {
-        ("Entertainment", Distracting)
-    } else if contains_any(&t, &["social network", "social media"]) {
-        ("Social", Distracting)
-    } else if contains_any(&t, &["vpn", "proxy client", "firewall", "system monitor"]) {
-        ("Utilities", Neutral)
-    } else if contains_any(&t, &["spreadsheet", "word processor", "office suite", "presentation"]) {
-        ("Productivity", Productive)
-    } else if contains_any(&t, &["ai assistant", "chatbot", "large language", "llm"]) {
-        // Generic AI desktop apps — productive by default (Claude/ChatGPT class).
-        ("Productivity", Productive)
-    } else {
-        return None;
-    };
-    Some(Classification {
-        category: Some(category.into()),
-        level: Some(level),
-    })
+    crate::rule_engine::active_mapping().classify_text(text)
 }
 
-/// Map iTunes / App Store `primaryGenreName` → product category.
-pub fn classify_from_itunes_genre(genre: &str) -> Option<Classification> {
-    use ProductivityLevel::*;
-    let g = genre.trim().to_ascii_lowercase();
-    let (category, level) = match g.as_str() {
-        "developer tools" => ("Development", Productive),
-        "productivity" | "business" => ("Productivity", Productive),
-        "utilities" => ("Utilities", Neutral),
-        "social networking" => ("Social", Distracting),
-        "entertainment" | "music" => ("Entertainment", Distracting),
-        "games" => ("Games", Distracting),
-        "education" | "reference" | "books" => ("Reference", Neutral),
-        "graphics & design" | "photo & video" => ("Creative", Productive),
-        "finance" => ("Finance", Neutral),
-        "health & fitness" | "medical" => ("Health", Neutral),
-        "lifestyle" | "travel" | "food & drink" | "shopping" => ("Lifestyle", Neutral),
-        "news" | "magazines & newspapers" => ("News", Neutral),
-        "weather" => ("Utilities", Neutral),
-        "sports" => ("Entertainment", Neutral),
-        "navigation" => ("Utilities", Neutral),
-        _ => return None,
-    };
-    Some(Classification {
-        category: Some(category.into()),
-        level: Some(level),
-    })
-}
-
-fn contains_any(hay: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|n| hay.contains(n))
-}
-
-/// Map Apple `LSApplicationCategoryType` UTI → product category + productivity.
-pub fn classify_ls_application_category(uti: &str) -> Option<Classification> {
-    use ProductivityLevel::*;
-    let uti = uti.trim();
-    // Accept both full UTI and bare suffix.
-    let key = uti
-        .strip_prefix("public.app-category.")
-        .unwrap_or(uti)
-        .to_ascii_lowercase();
-    let (category, level) = match key.as_str() {
-        "developer-tools" => ("Development", Productive),
-        "productivity" | "business" => ("Productivity", Productive),
-        "utilities" => ("Utilities", Neutral),
-        "social-networking" => ("Social", Distracting),
-        "entertainment" | "music" => ("Entertainment", Distracting),
-        "games" | "action-games" | "adventure-games" | "arcade-games" | "board-games"
-        | "card-games" | "casino-games" | "dice-games" | "educational-games" | "family-games"
-        | "kids-games" | "music-games" | "puzzle-games" | "racing-games" | "role-playing-games"
-        | "simulation-games" | "sports-games" | "strategy-games" | "trivia-games" | "word-games" => {
-            ("Games", Distracting)
+/// Classify from one or more free-text metadata fields (desc, name, homepage).
+/// First non-empty field that maps wins; then a joined fallback.
+pub fn classify_from_metadata_texts(fields: &[&str]) -> Option<Classification> {
+    let mut joined = String::new();
+    for f in fields {
+        let t = f.trim();
+        if t.is_empty() {
+            continue;
         }
-        "education" | "reference" | "books" => ("Reference", Neutral),
-        "graphics-design" | "photography" | "video" => ("Creative", Productive),
-        "finance" => ("Finance", Neutral),
-        "healthcare-fitness" | "medical" => ("Health", Neutral),
-        "lifestyle" | "travel" | "food-and-drink" | "shopping" => ("Lifestyle", Neutral),
-        "news" | "magazines-and-newspapers" => ("News", Neutral),
-        "weather" => ("Utilities", Neutral),
-        "sports" => ("Entertainment", Neutral),
-        _ => return None,
-    };
-    Some(Classification {
-        category: Some(category.into()),
-        level: Some(level),
-    })
+        if let Some(c) = classify_from_text_hint(t) {
+            return Some(c);
+        }
+        if !joined.is_empty() {
+            joined.push(' ');
+        }
+        joined.push_str(t);
+    }
+    if joined.is_empty() {
+        None
+    } else {
+        classify_from_text_hint(&joined)
+    }
+}
+
+/// Map iTunes / App Store `primaryGenreName` → product category (rule file).
+pub fn classify_from_itunes_genre(genre: &str) -> Option<Classification> {
+    crate::rule_engine::active_mapping().classify_itunes_genre(genre)
+}
+
+/// Map Apple `LSApplicationCategoryType` UTI → product category (rule file).
+pub fn classify_ls_application_category(uti: &str) -> Option<Classification> {
+    crate::rule_engine::active_mapping().classify_ls_uti(uti)
 }
 
 fn classify_lumen_family(
@@ -359,429 +269,15 @@ pub fn preferred_display_name(candidates: &[&str]) -> String {
         .unwrap_or_else(|| candidates[0].to_string())
 }
 
-/// Built-in default classification table.
+/// Built-in / file-backed default classification table.
+///
+/// Rules live in `rules/app_catalog.v1.json` (copied to
+/// `$data_dir/rules/app_catalog.v1.json` on first store open). The match
+/// engine is fixed in this crate; updating the JSON does not require a rebuild.
 pub fn default_rules() -> Vec<CategoryRule> {
-    use MatchField::*;
-    use ProductivityLevel::*;
-    vec![
-        // --- Development (productive) ---
-        CategoryRule {
-            field: BundleId,
-            value: "com.apple.dt.Xcode".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.microsoft.VSCode".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.todesktop.230313mzl4w4u92".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        }, // Cursor
-        CategoryRule {
-            field: BundleId,
-            value: "com.github.atom".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.googlecode.iterm2".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.apple.Terminal".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "dev.warp.Warp-Stable".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.mitchellh.ghostty".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "ai.perplexity.comet".into(),
-            category: "Browsing".into(),
-            level: Some(Neutral),
-        }, // Perplexity Comet
-        CategoryRule {
-            field: BundleId,
-            value: "dev.zcode.app".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.docker.docker".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.jetbrains.intellij".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.jetbrains.CLion".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.jetbrains.WebStorm".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.sublimetext.4".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: AppName,
-            value: "Postman".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: AppName,
-            value: "Tower".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: AppName,
-            value: "Fork".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: AppName,
-            value: "Zed".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: AppName,
-            value: "Sublime Text".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: AppName,
-            value: "Ghostty".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: AppName,
-            value: "ZCode".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: Domain,
-            value: "github.com".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: Domain,
-            value: "gitlab.com".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: Domain,
-            value: "stackoverflow.com".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: Domain,
-            value: "developer.mozilla.org".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: Domain,
-            value: "docs.rs".into(),
-            category: "Development".into(),
-            level: Some(Productive),
-        },
-        // --- Communication (neutral) ---
-        CategoryRule {
-            field: BundleId,
-            value: "com.tinyspeck.slackmacgap".into(),
-            category: "Communication".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.apple.MobileSMS".into(),
-            category: "Communication".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.apple.mail".into(),
-            category: "Communication".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.tencent.xinWeChat".into(),
-            category: "Communication".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.microsoft.teams2".into(),
-            category: "Communication".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.microsoft.Outlook".into(),
-            category: "Communication".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.tdesktop.Telegram".into(),
-            category: "Communication".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.hnc.Discord".into(),
-            category: "Communication".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "ru.keepcoder.Telegram".into(),
-            category: "Communication".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: Domain,
-            value: "gmail.com".into(),
-            category: "Communication".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: Domain,
-            value: "mail.google.com".into(),
-            category: "Communication".into(),
-            level: Some(Neutral),
-        },
-        // --- Writing / docs (productive) ---
-        CategoryRule {
-            field: BundleId,
-            value: "notion.id".into(),
-            category: "Writing".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: AppName,
-            value: "Obsidian".into(),
-            category: "Writing".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "md.obsidian".into(),
-            category: "Writing".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.apple.Notes".into(),
-            category: "Writing".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.apple.iWork.Pages".into(),
-            category: "Writing".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.apple.TextEdit".into(),
-            category: "Writing".into(),
-            level: Some(Productive),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.microsoft.Word".into(),
-            category: "Writing".into(),
-            level: Some(Productive),
-        },
-        // --- Browsers (neutral — content decides via domain rules) ---
-        CategoryRule {
-            field: BundleId,
-            value: "com.apple.Safari".into(),
-            category: "Browsing".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.google.Chrome".into(),
-            category: "Browsing".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "company.thebrowser.Browser".into(),
-            category: "Browsing".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "org.mozilla.firefox".into(),
-            category: "Browsing".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "org.mozilla.firefox".into(),
-            category: "Browsing".into(),
-            level: Some(Neutral),
-        },
-        // --- Utilities / system ---
-        CategoryRule {
-            field: BundleId,
-            value: "io.github.clash-verge-rev.clash-verge-rev".into(),
-            category: "Utilities".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: AppName,
-            value: "Clash Verge".into(),
-            category: "Utilities".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.west2online.ClashX".into(),
-            category: "Utilities".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "com.apple.finder".into(),
-            category: "System".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: AppName,
-            value: "Finder".into(),
-            category: "System".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: BundleId,
-            value: "cx.c3.theunarchiver".into(),
-            category: "Utilities".into(),
-            level: Some(Neutral),
-        },
-        // --- Reference / learning ---
-        CategoryRule {
-            field: Domain,
-            value: "wikipedia.org".into(),
-            category: "Reference".into(),
-            level: Some(Neutral),
-        },
-        CategoryRule {
-            field: AppName,
-            value: "Books".into(),
-            category: "Reference".into(),
-            level: Some(Neutral),
-        },
-        // --- Entertainment (distracting) ---
-        CategoryRule {
-            field: Domain,
-            value: "youtube.com".into(),
-            category: "Entertainment".into(),
-            level: Some(Distracting),
-        },
-        CategoryRule {
-            field: Domain,
-            value: "bilibili.com".into(),
-            category: "Entertainment".into(),
-            level: Some(Distracting),
-        },
-        CategoryRule {
-            field: Domain,
-            value: "netflix.com".into(),
-            category: "Entertainment".into(),
-            level: Some(Distracting),
-        },
-        CategoryRule {
-            field: AppName,
-            value: "Spotify".into(),
-            category: "Entertainment".into(),
-            level: Some(Distracting),
-        },
-        CategoryRule {
-            field: AppName,
-            value: "Music".into(),
-            category: "Entertainment".into(),
-            level: Some(Neutral),
-        },
-        // --- Social (distracting) ---
-        CategoryRule {
-            field: Domain,
-            value: "twitter.com".into(),
-            category: "Social".into(),
-            level: Some(Distracting),
-        },
-        CategoryRule {
-            field: Domain,
-            value: "x.com".into(),
-            category: "Social".into(),
-            level: Some(Distracting),
-        },
-        CategoryRule {
-            field: Domain,
-            value: "reddit.com".into(),
-            category: "Social".into(),
-            level: Some(Distracting),
-        },
-        CategoryRule {
-            field: Domain,
-            value: "instagram.com".into(),
-            category: "Social".into(),
-            level: Some(Distracting),
-        },
-        CategoryRule {
-            field: Domain,
-            value: "weibo.com".into(),
-            category: "Social".into(),
-            level: Some(Distracting),
-        },
-    ]
+    crate::rule_engine::active_catalog().rules.clone()
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -944,6 +440,24 @@ mod tests {
         assert_eq!(c.category.as_deref(), Some("Browsing"));
         let c2 = classify_from_text_hint("Terminal-based AI coding assistant").unwrap();
         assert_eq!(c2.category.as_deref(), Some("Development"));
+    }
+
+    #[test]
+    fn text_hint_maps_teamwork_and_remote_desktop_genres() {
+        // Real Homebrew descs — genre language, not vendor special-cases.
+        let c = classify_from_text_hint("Teamwork app by Alibaba Group").unwrap();
+        assert_eq!(c.category.as_deref(), Some("Communication"));
+        let c2 = classify_from_text_hint(
+            "NetEase UU remote desktop access and control tool",
+        )
+        .unwrap();
+        assert_eq!(c2.category.as_deref(), Some("Utilities"));
+    }
+
+    #[test]
+    fn metadata_fields_fallback_across_desc_and_name() {
+        let c = classify_from_metadata_texts(&["", "Teamwork app by Alibaba Group"]).unwrap();
+        assert_eq!(c.category.as_deref(), Some("Communication"));
     }
 
     #[test]

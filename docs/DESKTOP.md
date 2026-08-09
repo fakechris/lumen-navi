@@ -20,7 +20,13 @@ apps/desktop/
 ```
 
 Data default: `~/Library/Application Support/LumenNavi/`  
-(`navi.toml`, `meta/navi.db`, `blobs/`, `logs/`)
+(`navi.toml`, `meta/navi.db`, `blobs/`, `logs/`, `rules/`)
+
+### Category rules (time tracking)
+
+Classification uses a fixed engine + JSON under `rules/` (no rebuild to tune keywords).  
+Full guide: [`crates/lumen-store/rules/README.md`](../crates/lumen-store/rules/README.md).  
+Runtime overrides: `~/Library/Application Support/LumenNavi/rules/`.
 
 ## Dev
 
