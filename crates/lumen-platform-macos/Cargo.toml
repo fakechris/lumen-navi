@@ -29,4 +29,4 @@ objc2-app-kit = { version = "0.3", features = [
     "NSPasteboard",
     "NSPasteboardItem",
 ] }
-objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSData"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSData", "NSURL"] }

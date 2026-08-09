@@ -102,11 +102,16 @@ impl ActivityAccumulator {
 }
 
 fn make_event(sample: &ActivitySample, key: &ActivityKey, ts: chrono::DateTime<Utc>) -> SourceEvent {
+    let ls_category_type = sample
+        .frontmost
+        .as_ref()
+        .and_then(|f| f.ls_category_type.clone());
     let payload = json!({
         "payload_version": 1,
         "app_name": key.app_name,
         "bundle_id": key.bundle_id,
         "window_title": key.window_title,
+        "ls_category_type": ls_category_type,
         "idle_seconds": sample.idle_seconds,
         "is_idle": key.is_idle,
         "is_locked": key.is_locked,
@@ -127,6 +132,7 @@ mod tests {
                 app_name: app.into(),
                 bundle_id: Some(format!("com.{app}")),
                 window_title: title.map(str::to_string),
+                ls_category_type: None,
             }),
             idle_seconds: idle,
             is_locked: false,

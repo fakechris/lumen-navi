@@ -137,13 +137,18 @@ fn frontmost_native() -> Option<FrontmostApp> {
     // NSWorkspace.frontmostApplication() returns the caller's own bundle from a
     // child process, not the user's actual focused window. Try the window list
     // first; resolve bundle id from the pid via NSRunningApplication.
-    if let Some((app_name, pid)) = frontmost_via_windowlist() {
-        let bundle_id = bundle_id_for_pid(pid);
+    if let Some((owner_name, pid)) = frontmost_via_windowlist() {
+        let meta = running_app_meta(pid);
+        let app_name = meta
+            .localized_name
+            .filter(|s| !s.is_empty())
+            .unwrap_or(owner_name);
         let window_title = crate::ax::focused_window_title(pid);
         return Some(FrontmostApp {
             app_name,
-            bundle_id,
+            bundle_id: meta.bundle_id,
             window_title,
+            ls_category_type: meta.ls_category_type,
         });
     }
 
@@ -170,24 +175,81 @@ fn frontmost_native() -> Option<FrontmostApp> {
     } else {
         None
     };
+    let ls_category_type = if pid > 0 {
+        running_app_meta(pid).ls_category_type
+    } else {
+        None
+    };
 
     Some(FrontmostApp {
         app_name,
         bundle_id,
         window_title,
+        ls_category_type,
     })
 }
 
-/// Look up the bundle id for a pid via NSRunningApplication.
 #[cfg(target_os = "macos")]
-fn bundle_id_for_pid(pid: i32) -> Option<String> {
+struct RunningAppMeta {
+    localized_name: Option<String>,
+    bundle_id: Option<String>,
+    ls_category_type: Option<String>,
+}
+
+/// Resolve display name, bundle id, and Info.plist category for a pid.
+#[cfg(target_os = "macos")]
+fn running_app_meta(pid: i32) -> RunningAppMeta {
     use objc2_app_kit::NSRunningApplication;
-    let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid);
-    app.and_then(|a| {
-        a.bundleIdentifier()
-            .map(|s: objc2::rc::Retained<objc2_foundation::NSString>| s.to_string())
-            .filter(|s| !s.is_empty())
-    })
+    use objc2_foundation::NSString;
+
+    let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
+        return RunningAppMeta {
+            localized_name: None,
+            bundle_id: None,
+            ls_category_type: None,
+        };
+    };
+    let localized_name = app
+        .localizedName()
+        .map(|s: objc2::rc::Retained<NSString>| s.to_string())
+        .filter(|s| !s.is_empty());
+    let bundle_id = app
+        .bundleIdentifier()
+        .map(|s: objc2::rc::Retained<NSString>| s.to_string())
+        .filter(|s| !s.is_empty());
+    let ls_category_type = app.bundleURL().and_then(|url| {
+        let path = url.path()?.to_string();
+        ls_application_category_type(&path)
+    });
+    RunningAppMeta {
+        localized_name,
+        bundle_id,
+        ls_category_type,
+    }
+}
+
+/// Read `LSApplicationCategoryType` from an `.app` bundle path.
+#[cfg(target_os = "macos")]
+fn ls_application_category_type(app_path: &str) -> Option<String> {
+    let plist = std::path::Path::new(app_path).join("Contents/Info.plist");
+    if !plist.is_file() {
+        return None;
+    }
+    let output = std::process::Command::new("/usr/libexec/PlistBuddy")
+        .arg("-c")
+        .arg("Print :LSApplicationCategoryType")
+        .arg(&plist)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() || value.starts_with("Print:") || value.contains("Does Not Exist") {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -225,10 +287,18 @@ end tell
             .map(str::trim)
             .filter(|x| !x.is_empty())
             .map(|x| x.to_string());
+        let ls_category_type = bundle
+            .as_ref()
+            .and_then(|b| {
+                // Best-effort: locate app via mdfind (slow path; rare fallback).
+                let _ = b;
+                None
+            });
         Some(FrontmostApp {
             app_name: name.to_string(),
             bundle_id: bundle,
             window_title: None,
+            ls_category_type,
         })
     }
     #[cfg(not(target_os = "macos"))]

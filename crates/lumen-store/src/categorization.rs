@@ -1,13 +1,12 @@
 //! Deterministic activity → (category, productivity_level) classifier.
 //!
-//! No ML — just an ordered rule list (Timing / RescueTime philosophy). A small
-//! built-in default table covers common dev/communication/browsing apps and
-//! domains; user overrides are stored in the `kv` table and take priority.
+//! Priority (first match wins):
+//! 1. User rules (`kv` table, Timing-style overrides)
+//! 2. Built-in default catalog (bundle / name / domain)
+//! 3. System `LSApplicationCategoryType` hint (from Info.plist, when present)
 //!
-//! Productivity levels use a simplified 3-tier scale (Qbserve-style) rather
-//! than RescueTime's 5 tiers: `productive` / `neutral` / `distracting`.
-//! Unclassified activities get `None` and are **excluded from the pulse-score
-//! denominator** (unlike RescueTime, which punishes unclassified as neutral).
+//! No ML. Unclassified activities get `None` and are **excluded from the
+//! pulse-score denominator**.
 
 use serde::{Deserialize, Serialize};
 
@@ -32,8 +31,8 @@ impl ProductivityLevel {
     }
 }
 
-/// A single classification rule. Match is case-insensitive substring on the
-/// chosen field; first matching rule wins (user rules before defaults).
+/// A single classification rule. Match is case-insensitive; first matching
+/// rule wins (user rules before defaults).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategoryRule {
     pub field: MatchField,
@@ -67,6 +66,10 @@ pub struct ActivityFields<'a> {
     pub app_name: Option<&'a str>,
     pub window_title: Option<&'a str>,
     pub url: Option<&'a str>,
+    /// Raw `LSApplicationCategoryType` from the app's Info.plist when known
+    /// (e.g. `public.app-category.developer-tools`). Used only as a fallback
+    /// after user + default rules miss.
+    pub ls_category_type: Option<&'a str>,
 }
 
 impl<'a> ActivityFields<'a> {
@@ -120,8 +123,7 @@ pub struct Classification {
     pub level: Option<ProductivityLevel>,
 }
 
-/// Classify an activity against user rules first, then the built-in defaults.
-/// First match wins within each list; user rules take priority overall.
+/// Classify an activity against user rules, then defaults, then system UTI.
 pub fn classify(fields: &ActivityFields<'_>, user_rules: &[CategoryRule]) -> Classification {
     for rule in user_rules {
         if fields.matches(rule) {
@@ -139,64 +141,518 @@ pub fn classify(fields: &ActivityFields<'_>, user_rules: &[CategoryRule]) -> Cla
             };
         }
     }
+    if let Some(uti) = fields.ls_category_type {
+        if let Some(c) = classify_ls_application_category(uti) {
+            return c;
+        }
+    }
+    // Known product family without Info.plist category (self-signed builds).
+    if let Some(c) = classify_lumen_family(fields.bundle_id, fields.app_name) {
+        return c;
+    }
     Classification::default()
 }
 
-/// Built-in default classification table. Covers common macOS dev tools,
-/// communication apps, and well-known web domains. Users override via the
-/// `kv`-stored rule list (which is tried first).
+/// Map Apple `LSApplicationCategoryType` UTI → product category + productivity.
+pub fn classify_ls_application_category(uti: &str) -> Option<Classification> {
+    use ProductivityLevel::*;
+    let uti = uti.trim();
+    // Accept both full UTI and bare suffix.
+    let key = uti
+        .strip_prefix("public.app-category.")
+        .unwrap_or(uti)
+        .to_ascii_lowercase();
+    let (category, level) = match key.as_str() {
+        "developer-tools" => ("Development", Productive),
+        "productivity" | "business" => ("Productivity", Productive),
+        "utilities" => ("Utilities", Neutral),
+        "social-networking" => ("Social", Distracting),
+        "entertainment" | "music" => ("Entertainment", Distracting),
+        "games" | "action-games" | "adventure-games" | "arcade-games" | "board-games"
+        | "card-games" | "casino-games" | "dice-games" | "educational-games" | "family-games"
+        | "kids-games" | "music-games" | "puzzle-games" | "racing-games" | "role-playing-games"
+        | "simulation-games" | "sports-games" | "strategy-games" | "trivia-games" | "word-games" => {
+            ("Games", Distracting)
+        }
+        "education" | "reference" | "books" => ("Reference", Neutral),
+        "graphics-design" | "photography" | "video" => ("Creative", Productive),
+        "finance" => ("Finance", Neutral),
+        "healthcare-fitness" | "medical" => ("Health", Neutral),
+        "lifestyle" | "travel" | "food-and-drink" | "shopping" => ("Lifestyle", Neutral),
+        "news" | "magazines-and-newspapers" => ("News", Neutral),
+        "weather" => ("Utilities", Neutral),
+        "sports" => ("Entertainment", Neutral),
+        _ => return None,
+    };
+    Some(Classification {
+        category: Some(category.into()),
+        level: Some(level),
+    })
+}
+
+fn classify_lumen_family(
+    bundle_id: Option<&str>,
+    app_name: Option<&str>,
+) -> Option<Classification> {
+    use ProductivityLevel::*;
+    let bundle = bundle_id.unwrap_or("").to_ascii_lowercase();
+    let name = app_name.unwrap_or("").to_ascii_lowercase();
+    if bundle.starts_with("com.lumenopen.")
+        || name.contains("lumen navi")
+        || name.contains("lumen-navi")
+        || name.contains("lumen asr")
+        || name.contains("lumen cua")
+        || name.contains("lumen-cua")
+    {
+        return Some(Classification {
+            category: Some("Development".into()),
+            level: Some(Productive),
+        });
+    }
+    None
+}
+
+/// Prefer a human display name when ranking: avoid executable-style names when
+/// a nicer label was seen for the same bundle (e.g. `Lumen Navi` over
+/// `lumen-navi-desktop`).
+pub fn preferred_display_name(candidates: &[&str]) -> String {
+    if candidates.is_empty() {
+        return "Unknown".into();
+    }
+    let scored = |s: &str| -> i32 {
+        let mut score = 0i32;
+        if s.chars().any(|c| c.is_whitespace()) {
+            score += 3; // "Lumen Navi"
+        }
+        if s.contains('-') || s.contains('_') {
+            score -= 2; // "lumen-navi-desktop"
+        }
+        if s.chars().any(|c| c.is_uppercase()) {
+            score += 1;
+        }
+        if s.to_ascii_lowercase().ends_with("desktop")
+            || s.to_ascii_lowercase().ends_with("helper")
+        {
+            score -= 3;
+        }
+        score + s.len() as i32 / 20
+    };
+    candidates
+        .iter()
+        .max_by_key(|s| scored(s))
+        .map(|s| (*s).to_string())
+        .unwrap_or_else(|| candidates[0].to_string())
+}
+
+/// Built-in default classification table.
 pub fn default_rules() -> Vec<CategoryRule> {
     use MatchField::*;
     use ProductivityLevel::*;
     vec![
         // --- Development (productive) ---
-        CategoryRule { field: BundleId, value: "com.apple.dt.Xcode".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: BundleId, value: "com.microsoft.VSCode".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: BundleId, value: "com.todesktop.230313mzl4w4u92".into(), category: "Development".into(), level: Some(Productive) }, // Cursor
-        CategoryRule { field: BundleId, value: "com.github.atom".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: BundleId, value: "com.googlecode.iterm2".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: BundleId, value: "com.apple.Terminal".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: BundleId, value: "dev.warp.Warp-Stable".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: BundleId, value: "com.docker.docker".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: AppName, value: "Postman".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: AppName, value: "Tower".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: AppName, value: "Fork".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: AppName, value: "Zed".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: AppName, value: "Sublime Text".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: Domain, value: "github.com".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: Domain, value: "gitlab.com".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: Domain, value: "stackoverflow.com".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: Domain, value: "developer.mozilla.org".into(), category: "Development".into(), level: Some(Productive) },
-        CategoryRule { field: Domain, value: "docs.rs".into(), category: "Development".into(), level: Some(Productive) },
+        CategoryRule {
+            field: BundleId,
+            value: "com.apple.dt.Xcode".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.microsoft.VSCode".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.todesktop.230313mzl4w4u92".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        }, // Cursor
+        CategoryRule {
+            field: BundleId,
+            value: "com.github.atom".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.googlecode.iterm2".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.apple.Terminal".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "dev.warp.Warp-Stable".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.mitchellh.ghostty".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "dev.zcode.app".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.docker.docker".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.jetbrains.intellij".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.jetbrains.CLion".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.jetbrains.WebStorm".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.sublimetext.4".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: AppName,
+            value: "Postman".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: AppName,
+            value: "Tower".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: AppName,
+            value: "Fork".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: AppName,
+            value: "Zed".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: AppName,
+            value: "Sublime Text".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: AppName,
+            value: "Ghostty".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: AppName,
+            value: "ZCode".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: Domain,
+            value: "github.com".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: Domain,
+            value: "gitlab.com".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: Domain,
+            value: "stackoverflow.com".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: Domain,
+            value: "developer.mozilla.org".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: Domain,
+            value: "docs.rs".into(),
+            category: "Development".into(),
+            level: Some(Productive),
+        },
         // --- Communication (neutral) ---
-        CategoryRule { field: BundleId, value: "com.tinyspeck.slackmacgap".into(), category: "Communication".into(), level: Some(Neutral) },
-        CategoryRule { field: BundleId, value: "com.apple.MobileSMS".into(), category: "Communication".into(), level: Some(Neutral) },
-        CategoryRule { field: BundleId, value: "com.apple.mail".into(), category: "Communication".into(), level: Some(Neutral) },
-        CategoryRule { field: BundleId, value: "com.tencent.xinWeChat".into(), category: "Communication".into(), level: Some(Neutral) },
-        CategoryRule { field: BundleId, value: "com.microsoft.teams2".into(), category: "Communication".into(), level: Some(Neutral) },
-        CategoryRule { field: Domain, value: "gmail.com".into(), category: "Communication".into(), level: Some(Neutral) },
-        CategoryRule { field: Domain, value: "mail.google.com".into(), category: "Communication".into(), level: Some(Neutral) },
+        CategoryRule {
+            field: BundleId,
+            value: "com.tinyspeck.slackmacgap".into(),
+            category: "Communication".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.apple.MobileSMS".into(),
+            category: "Communication".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.apple.mail".into(),
+            category: "Communication".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.tencent.xinWeChat".into(),
+            category: "Communication".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.microsoft.teams2".into(),
+            category: "Communication".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.microsoft.Outlook".into(),
+            category: "Communication".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.tdesktop.Telegram".into(),
+            category: "Communication".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.hnc.Discord".into(),
+            category: "Communication".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "ru.keepcoder.Telegram".into(),
+            category: "Communication".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: Domain,
+            value: "gmail.com".into(),
+            category: "Communication".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: Domain,
+            value: "mail.google.com".into(),
+            category: "Communication".into(),
+            level: Some(Neutral),
+        },
         // --- Writing / docs (productive) ---
-        CategoryRule { field: BundleId, value: "notion.id".into(), category: "Writing".into(), level: Some(Productive) },
-        CategoryRule { field: AppName, value: "Obsidian".into(), category: "Writing".into(), level: Some(Productive) },
-        CategoryRule { field: BundleId, value: "md.obsidian".into(), category: "Writing".into(), level: Some(Productive) },
-        CategoryRule { field: BundleId, value: "com.apple.Notes".into(), category: "Writing".into(), level: Some(Productive) },
-        CategoryRule { field: BundleId, value: "com.apple.iWork.Pages".into(), category: "Writing".into(), level: Some(Productive) },
-        // --- Reference / learning (neutral-productive) ---
-        CategoryRule { field: Domain, value: "wikipedia.org".into(), category: "Reference".into(), level: Some(Neutral) },
-        CategoryRule { field: AppName, value: "Books".into(), category: "Reference".into(), level: Some(Neutral) },
+        CategoryRule {
+            field: BundleId,
+            value: "notion.id".into(),
+            category: "Writing".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: AppName,
+            value: "Obsidian".into(),
+            category: "Writing".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "md.obsidian".into(),
+            category: "Writing".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.apple.Notes".into(),
+            category: "Writing".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.apple.iWork.Pages".into(),
+            category: "Writing".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.apple.TextEdit".into(),
+            category: "Writing".into(),
+            level: Some(Productive),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.microsoft.Word".into(),
+            category: "Writing".into(),
+            level: Some(Productive),
+        },
+        // --- Browsers (neutral — content decides via domain rules) ---
+        CategoryRule {
+            field: BundleId,
+            value: "com.apple.Safari".into(),
+            category: "Browsing".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.google.Chrome".into(),
+            category: "Browsing".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "company.thebrowser.Browser".into(),
+            category: "Browsing".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "org.mozilla.firefox".into(),
+            category: "Browsing".into(),
+            level: Some(Neutral),
+        },
+        // --- Utilities / system ---
+        CategoryRule {
+            field: BundleId,
+            value: "io.github.clash-verge-rev.clash-verge-rev".into(),
+            category: "Utilities".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: AppName,
+            value: "Clash Verge".into(),
+            category: "Utilities".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.west2online.ClashX".into(),
+            category: "Utilities".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "com.apple.finder".into(),
+            category: "System".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: AppName,
+            value: "Finder".into(),
+            category: "System".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: BundleId,
+            value: "cx.c3.theunarchiver".into(),
+            category: "Utilities".into(),
+            level: Some(Neutral),
+        },
+        // --- Reference / learning ---
+        CategoryRule {
+            field: Domain,
+            value: "wikipedia.org".into(),
+            category: "Reference".into(),
+            level: Some(Neutral),
+        },
+        CategoryRule {
+            field: AppName,
+            value: "Books".into(),
+            category: "Reference".into(),
+            level: Some(Neutral),
+        },
         // --- Entertainment (distracting) ---
-        CategoryRule { field: Domain, value: "youtube.com".into(), category: "Entertainment".into(), level: Some(Distracting) },
-        CategoryRule { field: Domain, value: "bilibili.com".into(), category: "Entertainment".into(), level: Some(Distracting) },
-        CategoryRule { field: Domain, value: "netflix.com".into(), category: "Entertainment".into(), level: Some(Distracting) },
-        CategoryRule { field: AppName, value: "Spotify".into(), category: "Entertainment".into(), level: Some(Distracting) },
-        CategoryRule { field: AppName, value: "Music".into(), category: "Entertainment".into(), level: Some(Neutral) },
+        CategoryRule {
+            field: Domain,
+            value: "youtube.com".into(),
+            category: "Entertainment".into(),
+            level: Some(Distracting),
+        },
+        CategoryRule {
+            field: Domain,
+            value: "bilibili.com".into(),
+            category: "Entertainment".into(),
+            level: Some(Distracting),
+        },
+        CategoryRule {
+            field: Domain,
+            value: "netflix.com".into(),
+            category: "Entertainment".into(),
+            level: Some(Distracting),
+        },
+        CategoryRule {
+            field: AppName,
+            value: "Spotify".into(),
+            category: "Entertainment".into(),
+            level: Some(Distracting),
+        },
+        CategoryRule {
+            field: AppName,
+            value: "Music".into(),
+            category: "Entertainment".into(),
+            level: Some(Neutral),
+        },
         // --- Social (distracting) ---
-        CategoryRule { field: Domain, value: "twitter.com".into(), category: "Social".into(), level: Some(Distracting) },
-        CategoryRule { field: Domain, value: "x.com".into(), category: "Social".into(), level: Some(Distracting) },
-        CategoryRule { field: Domain, value: "reddit.com".into(), category: "Social".into(), level: Some(Distracting) },
-        CategoryRule { field: Domain, value: "instagram.com".into(), category: "Social".into(), level: Some(Distracting) },
-        CategoryRule { field: Domain, value: "weibo.com".into(), category: "Social".into(), level: Some(Distracting) },
+        CategoryRule {
+            field: Domain,
+            value: "twitter.com".into(),
+            category: "Social".into(),
+            level: Some(Distracting),
+        },
+        CategoryRule {
+            field: Domain,
+            value: "x.com".into(),
+            category: "Social".into(),
+            level: Some(Distracting),
+        },
+        CategoryRule {
+            field: Domain,
+            value: "reddit.com".into(),
+            category: "Social".into(),
+            level: Some(Distracting),
+        },
+        CategoryRule {
+            field: Domain,
+            value: "instagram.com".into(),
+            category: "Social".into(),
+            level: Some(Distracting),
+        },
+        CategoryRule {
+            field: Domain,
+            value: "weibo.com".into(),
+            category: "Social".into(),
+            level: Some(Distracting),
+        },
     ]
 }
 
@@ -208,6 +664,30 @@ mod tests {
     fn classifies_vscode_as_development() {
         let f = ActivityFields {
             bundle_id: Some("com.microsoft.VSCode"),
+            ..Default::default()
+        };
+        let c = classify(&f, &[]);
+        assert_eq!(c.category.as_deref(), Some("Development"));
+        assert_eq!(c.level, Some(ProductivityLevel::Productive));
+    }
+
+    #[test]
+    fn classifies_ghostty_by_bundle() {
+        let f = ActivityFields {
+            bundle_id: Some("com.mitchellh.ghostty"),
+            app_name: Some("Ghostty"),
+            ..Default::default()
+        };
+        let c = classify(&f, &[]);
+        assert_eq!(c.category.as_deref(), Some("Development"));
+    }
+
+    #[test]
+    fn system_uti_fallback_for_unknown_bundle() {
+        let f = ActivityFields {
+            bundle_id: Some("com.example.UnknownIde"),
+            app_name: Some("UnknownIde"),
+            ls_category_type: Some("public.app-category.developer-tools"),
             ..Default::default()
         };
         let c = classify(&f, &[]);
@@ -229,6 +709,23 @@ mod tests {
         };
         let c = classify(&f, std::slice::from_ref(&user));
         assert_eq!(c.category.as_deref(), Some("Personal"));
+    }
+
+    #[test]
+    fn user_rule_overrides_system_uti() {
+        let f = ActivityFields {
+            bundle_id: Some("com.example.x"),
+            ls_category_type: Some("public.app-category.developer-tools"),
+            ..Default::default()
+        };
+        let user = CategoryRule {
+            field: MatchField::BundleId,
+            value: "com.example.x".into(),
+            category: "Writing".into(),
+            level: Some(ProductivityLevel::Productive),
+        };
+        let c = classify(&f, std::slice::from_ref(&user));
+        assert_eq!(c.category.as_deref(), Some("Writing"));
     }
 
     #[test]
@@ -266,5 +763,22 @@ mod tests {
         };
         let c = classify(&f, &[]);
         assert_eq!(c.level, Some(ProductivityLevel::Distracting));
+    }
+
+    #[test]
+    fn preferred_display_name_prefers_pretty_label() {
+        let name = preferred_display_name(&["lumen-navi-desktop", "Lumen Navi"]);
+        assert_eq!(name, "Lumen Navi");
+    }
+
+    #[test]
+    fn lumen_family_classified_without_plist() {
+        let f = ActivityFields {
+            bundle_id: Some("com.lumenopen.navi"),
+            app_name: Some("lumen-navi-desktop"),
+            ..Default::default()
+        };
+        let c = classify(&f, &[]);
+        assert_eq!(c.category.as_deref(), Some("Development"));
     }
 }

@@ -1291,14 +1291,16 @@ impl SqliteStore {
             by_category.push(r.map_err(StoreError::db)?);
         }
 
-        // Top apps.
+        // Top apps — group by bundle identity so "Lumen Navi" and
+        // "lumen-navi-desktop" collapse; prefer a human display name.
         let mut app_stmt = conn
             .prepare(
-                r#"SELECT app_name, bundle_id, SUM(duration_ms), category,
-                          productivity_level, COUNT(1)
+                r#"SELECT GROUP_CONCAT(DISTINCT app_name, char(31)),
+                          bundle_id, SUM(duration_ms),
+                          MAX(category), MAX(productivity_level), COUNT(1)
                    FROM activity_segments
                    WHERE day = ?1 AND is_idle = 0 AND app_name IS NOT NULL
-                   GROUP BY app_name
+                   GROUP BY COALESCE(bundle_id, app_name)
                    ORDER BY SUM(duration_ms) DESC
                    LIMIT 20"#,
             )
@@ -1306,7 +1308,9 @@ impl SqliteStore {
         let app_rows = app_stmt
             .query_map(params![day], |row| {
                 Ok(AppTotal {
-                    app_name: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    app_name: preferred_name_from_concat(
+                        &row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    ),
                     bundle_id: row.get(1)?,
                     ms: row.get(2)?,
                     category: row.get(3)?,
@@ -1498,14 +1502,15 @@ impl SqliteStore {
         }
         drop(day_stmt);
 
-        // Range-wide top apps.
+        // Range-wide top apps (bundle identity + preferred display name).
         let mut app_stmt = conn
             .prepare(
-                r#"SELECT app_name, bundle_id, SUM(duration_ms), category,
-                          productivity_level, COUNT(1)
+                r#"SELECT GROUP_CONCAT(DISTINCT app_name, char(31)),
+                          bundle_id, SUM(duration_ms),
+                          MAX(category), MAX(productivity_level), COUNT(1)
                    FROM activity_segments
                    WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0 AND app_name IS NOT NULL
-                   GROUP BY app_name
+                   GROUP BY COALESCE(bundle_id, app_name)
                    ORDER BY SUM(duration_ms) DESC
                    LIMIT 15"#,
             )
@@ -1513,7 +1518,9 @@ impl SqliteStore {
         let app_rows = app_stmt
             .query_map(params![from_day, to_day], |row| {
                 Ok(AppTotal {
-                    app_name: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    app_name: preferred_name_from_concat(
+                        &row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    ),
                     bundle_id: row.get(1)?,
                     ms: row.get(2)?,
                     category: row.get(3)?,
@@ -1615,6 +1622,7 @@ impl SqliteStore {
                         app_name: Some(app_name),
                         window_title,
                         url: None,
+                        ls_category_type: None,
                     },
                     &user_rules,
                 );
@@ -1728,6 +1736,9 @@ impl SqliteStore {
                 bundle_id: bundle_id.as_deref(),
                 window_title: window_title.as_deref(),
                 url: None,
+                // Historical segments don't store LSApplicationCategoryType;
+                // re-apply still benefits from expanded default rules + lumen family.
+                ls_category_type: None,
             };
             let c = crate::categorization::classify(&fields, &rules);
             let level = c.level.map(productivity_level_str);
@@ -2438,6 +2449,16 @@ fn fmt_ms_compact(ms: i64) -> String {
     }
 }
 
+/// Prefer a human display name from GROUP_CONCAT(DISTINCT app_name, unit-sep).
+fn preferred_name_from_concat(concat: &str) -> String {
+    let names: Vec<&str> = concat
+        .split('\u{001f}')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    crate::categorization::preferred_display_name(&names)
+}
+
 /// Fold `activity.focus.v1` events into continuous `activity_segments` rows.
 ///
 /// The accumulator emits an event on every state change plus a heartbeat every
@@ -2486,12 +2507,17 @@ fn project_activity_event(
 
     // Classification (deterministic — user rules tried first, then defaults).
     let user_rules = load_user_category_rules(tx).unwrap_or_default();
+    let ls_category_type = event
+        .payload
+        .get("ls_category_type")
+        .and_then(serde_json::Value::as_str);
     let classification = crate::categorization::classify(
         &ActivityFields {
             bundle_id,
             app_name,
             window_title,
             url: None,
+            ls_category_type,
         },
         &user_rules,
     );

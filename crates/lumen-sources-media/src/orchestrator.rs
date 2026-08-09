@@ -560,6 +560,7 @@ mod tests {
                     app_name: "A".into(),
                     bundle_id: Some("a.b".into()),
                     window_title: None,
+                    ls_category_type: None,
                 }),
             }),
             Arc::new(FakeLock),

@@ -45,6 +45,10 @@ pub struct FrontmostApp {
     pub app_name: String,
     pub bundle_id: Option<String>,
     pub window_title: Option<String>,
+    /// `LSApplicationCategoryType` from the app Info.plist when available
+    /// (e.g. `public.app-category.developer-tools`). Optional classification hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ls_category_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

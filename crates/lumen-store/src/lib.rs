@@ -9,7 +9,8 @@ mod schema;
 mod sqlite;
 
 pub use categorization::{
-    classify, ActivityFields, CategoryRule, Classification, MatchField, ProductivityLevel,
+    classify, classify_ls_application_category, preferred_display_name, ActivityFields,
+    CategoryRule, Classification, MatchField, ProductivityLevel,
 };
 
 use std::sync::Arc;
