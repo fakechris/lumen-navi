@@ -34,12 +34,21 @@ cd apps/desktop
 npm install
 npm run build
 
+# Lumen Cua helper (screen capture owner + app icon for System Settings)
+scripts/macos/prepare-cua-app.sh "$(rustc -vV | sed -n 's/^host: //p')"
+# → apps/desktop/src-tauri/helpers/Lumen Cua.app
+#    Contents/MacOS/lumen-cua
+#    Contents/Resources/AppIcon.icns   # CUA cursor mark from apps/cua/icon/
+
 # run UI (debug)
 cd apps/desktop
 npx tauri dev
 # or
 cargo run -p lumen-navi-desktop
 ```
+
+Navi installs the prepared helper to `/Applications/Lumen Cua.app` on first use
+(own TCC identity). Icon source of truth: `apps/cua/icon/` (see README there).
 
 **Start Observe** resolves `lumen-daemon` in this order:
 

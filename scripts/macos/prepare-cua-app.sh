@@ -44,12 +44,19 @@ cp "$src" "$macos_dir/lumen-cua"
 chmod +x "$macos_dir/lumen-cua"
 
 # App icon (System Settings / Finder). Source: Lumen Marks design system — CUA cursor.
+# Info.plist must declare CFBundleIconFile=AppIcon; Resources/AppIcon.icns is the payload.
 icon_icns="$root/apps/cua/icon/AppIcon.icns"
 if [[ ! -f "$icon_icns" ]]; then
   echo "Missing Lumen Cua icon: $icon_icns" >&2
+  echo "Canonical SVG: $root/apps/cua/icon/lumen-cua.svg (see apps/cua/icon/README.md)" >&2
   exit 1
 fi
 cp "$icon_icns" "$resources_dir/AppIcon.icns"
+icon_key="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$contents/Info.plist" 2>/dev/null || true)"
+if [[ "$icon_key" != "AppIcon" ]]; then
+  echo "apps/cua/Info.plist must set CFBundleIconFile=AppIcon (got: ${icon_key:-<missing>})" >&2
+  exit 1
+fi
 
 identity="${APPLE_SIGNING_IDENTITY:-$("$root/scripts/macos/resolve-identity.sh")}"
 if [[ "$identity" == "-" ]]; then
@@ -66,4 +73,5 @@ if [[ -z "$requirement" || "$requirement" == *cdhash* || "$requirement" != *cert
   exit 1
 fi
 echo "Prepared $app with identity: $identity"
+echo "  icon: $resources_dir/AppIcon.icns"
 echo "Designated requirement: $requirement"
