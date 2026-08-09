@@ -289,6 +289,42 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Background category enrichment (Homebrew index + iTunes). Off the
+    // sampling path; fills app_category_cache and re-applies segments.
+    {
+        let store_en = Arc::clone(&store);
+        tokio::spawn(async move {
+            // First pass after a short delay so capture can start first.
+            tokio::time::sleep(Duration::from_secs(45)).await;
+            let mut every = tokio::time::interval(Duration::from_secs(15 * 60));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                let store = Arc::clone(&store_en);
+                match tokio::task::spawn_blocking(move || {
+                    store.process_category_enrichment(40, true)
+                })
+                .await
+                {
+                    Ok(Ok(report)) => {
+                        if report.attempted > 0 || report.brew_index_refreshed {
+                            info!(
+                                attempted = report.attempted,
+                                resolved = report.resolved,
+                                failed = report.failed,
+                                brew_rows = report.brew_index_rows,
+                                brew_refreshed = report.brew_index_refreshed,
+                                "category enrichment pass"
+                            );
+                        }
+                    }
+                    Ok(Err(e)) => warn!(error = %e, "category enrichment failed"),
+                    Err(e) => warn!(error = %e, "category enrichment task join failed"),
+                }
+                every.tick().await;
+            }
+        });
+    }
+
     // Shared cancel for long-running observe tasks.
     let (observe_cancel_tx, observe_cancel_rx) = watch::channel(false);
 

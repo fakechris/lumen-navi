@@ -54,6 +54,44 @@ pub fn run() {
                     }
                 });
             }
+            // Category enrichment when the shell holds the store (covers
+            // cases where observe is off but the user is browsing history).
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    let mut every =
+                        tokio::time::interval(std::time::Duration::from_secs(30 * 60));
+                    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    loop {
+                        if let Some(state) = handle.try_state::<AppState>() {
+                            let data_dir = state.data_dir.clone();
+                            match tauri::async_runtime::spawn_blocking(move || {
+                                let store = lumen_store::SqliteStore::open(&data_dir)?;
+                                store.process_category_enrichment(25, true)
+                            })
+                            .await
+                            {
+                                Ok(Ok(r)) if r.attempted > 0 || r.brew_index_refreshed => {
+                                    tracing::info!(
+                                        attempted = r.attempted,
+                                        resolved = r.resolved,
+                                        "category enrichment pass"
+                                    );
+                                }
+                                Ok(Err(e)) => {
+                                    tracing::debug!(error = %e, "category enrichment skipped")
+                                }
+                                Err(e) => {
+                                    tracing::debug!(error = %e, "category enrichment join failed")
+                                }
+                                _ => {}
+                            }
+                        }
+                        every.tick().await;
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

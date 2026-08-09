@@ -1,6 +1,6 @@
 //! SQLite schema for meta/navi.db
 
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 pub const MIGRATE_V1: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -185,4 +185,41 @@ CREATE INDEX IF NOT EXISTS idx_activity_segments_category ON activity_segments(c
 /// manually entered ones ('manual' — the v1.2 retro-entry feature).
 pub const MIGRATE_V8: &str = r#"
 ALTER TABLE activity_segments ADD COLUMN source TEXT NOT NULL DEFAULT 'auto';
+"#;
+
+/// App category enrichment: identity cache, Homebrew cask reverse index, and
+/// persist `LSApplicationCategoryType` on segments for re-apply fidelity.
+pub const MIGRATE_V9: &str = r#"
+ALTER TABLE activity_segments ADD COLUMN ls_category_type TEXT;
+
+CREATE TABLE IF NOT EXISTS app_category_cache (
+  bundle_id TEXT PRIMARY KEY NOT NULL,
+  app_name TEXT,
+  category TEXT,
+  productivity_level TEXT,
+  -- pending | brew | itunes | failed | skipped
+  source TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0,
+  brew_token TEXT,
+  brew_desc TEXT,
+  itunes_genre TEXT,
+  last_attempt_at TEXT,
+  resolved_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_app_category_cache_source
+  ON app_category_cache(source);
+
+CREATE TABLE IF NOT EXISTS brew_cask_by_bundle (
+  bundle_id TEXT PRIMARY KEY NOT NULL,
+  cask_token TEXT NOT NULL,
+  name TEXT,
+  desc TEXT,
+  homepage TEXT,
+  installs_30d INTEGER,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_brew_cask_token ON brew_cask_by_bundle(cask_token);
 "#;

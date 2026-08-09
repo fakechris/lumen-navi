@@ -5,13 +5,16 @@
 
 mod blob;
 mod categorization;
+mod enrichment;
 mod schema;
 mod sqlite;
 
 pub use categorization::{
-    classify, classify_ls_application_category, preferred_display_name, ActivityFields,
-    CategoryRule, Classification, MatchField, ProductivityLevel,
+    classify, classify_from_itunes_genre, classify_from_text_hint, classify_ls_application_category,
+    preferred_display_name, ActivityFields, CategoryRule, Classification, MatchField,
+    ProductivityLevel,
 };
+pub use enrichment::{guess_cask_token, EnrichmentHit};
 
 use std::sync::Arc;
 
@@ -24,9 +27,9 @@ use uuid::Uuid;
 pub use blob::BlobStore;
 pub use schema::SCHEMA_VERSION;
 pub use sqlite::{
-    ArtifactInput, BlobLimitedAppendOutcome, BrowserVisitProjection, CursorEvent, EventWithArtifacts,
-    IdempotentAppendOutcome, OcrSearchHit, SessionDerivedRow, SqliteStore, TimelineItem,
-    TimelineQuery,
+    ArtifactInput, BlobLimitedAppendOutcome, BrowserVisitProjection, CursorEvent,
+    EnrichmentPassReport, EventWithArtifacts, IdempotentAppendOutcome, OcrSearchHit,
+    SessionDerivedRow, SqliteStore, TimelineItem, TimelineQuery,
 };
 
 #[derive(Debug, Error)]
