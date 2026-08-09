@@ -588,6 +588,7 @@ mod tests {
                     bundle_id: Some("a.b".into()),
                     window_title: None,
                     ls_category_type: None,
+                    tab_url: None,
                 }),
             }),
             Arc::new(FakeLock),

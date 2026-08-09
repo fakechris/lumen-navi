@@ -13,7 +13,98 @@ impl FrontmostAppProbe for MacFrontmost {
 }
 
 pub fn frontmost_app() -> Option<FrontmostApp> {
-    frontmost_native().or_else(frontmost_osascript)
+    frontmost_native()
+        .or_else(frontmost_osascript)
+        .map(|mut f| {
+            // For browsers, enrich with the active tab URL (per-website time
+            // tracking). Done here so every construction path benefits. Only
+            // spawned when the bundle looks like a scriptable browser; cheap
+            // for non-browsers (early return).
+            if let Some(ref bid) = f.bundle_id {
+                if is_scriptable_browser(bid) {
+                    f.tab_url = browser_tab_url(bid);
+                }
+            }
+            f
+        })
+}
+
+/// Bundle ids of browsers that expose the active tab URL via AppleScript.
+/// Safari uses the WebKit sdef (`current tab`); Chromium-family browsers
+/// (Chrome, Edge, Brave, Arc, Comet, Vivaldi, Opera) share one sdef
+/// (`active tab`). Firefox is NOT scriptable for URLs and intentionally
+/// absent — it would need the browser extension or fall back to title-only.
+fn is_scriptable_browser(bundle_id: &str) -> bool {
+    const KNOWN: &[&str] = &[
+        "com.apple.Safari",
+        "com.google.Chrome",
+        "com.microsoft.edgemac",
+        "com.brave.Browser",
+        "company.thebrowser.Browser", // Arc
+        "ai.perplexity.comet",
+        "com.vivaldi.Vivaldi",
+        "com.operasoftware.Opera",
+    ];
+    // Prefix match covers edition variants (e.g. Safari Technology Preview).
+    KNOWN.iter().any(|k| bundle_id.starts_with(k))
+}
+
+/// Read the active tab URL of a scriptable browser via AppleScript. Returns
+/// None on any error or empty result (browser not running, Automation
+/// permission not granted, private window where the browser refuses, etc.).
+///
+/// Safari speaks the WebKit sdef; Chromium-family browsers share the Chrome
+/// sdef. We target by bundle id (`tell application id <bid>`) so display-name
+/// differences (e.g. localized names) don't matter. First use per target app
+/// triggers a native TCC "Automation" prompt; subsequent calls are free.
+fn browser_tab_url(bundle_id: &str) -> Option<String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = bundle_id;
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let script = if bundle_id.starts_with("com.apple.Safari") {
+            // WebKit sdef: "current tab of front window".
+            format!(
+                r#"tell application id "{}" to get URL of current tab of front window"#,
+                bundle_id
+            )
+        } else {
+            // Chromium-family sdef (Chrome, Edge, Brave, Arc, Comet, Vivaldi, …):
+            // "active tab of front window".
+            format!(
+                r#"tell application id "{}" to get URL of active tab of front window"#,
+                bundle_id
+            )
+        };
+
+        // osascript can block if the target app is hung; bound it. The probe
+        // already runs off the async hot path inside the orchestrator's poll,
+        // but the subprocess timeout is a belt-and-suspenders guard.
+        let output = std::process::Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            // Most common: Automation permission denied, or browser not running.
+            return None;
+        }
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        // Browsers sometimes return "" or a missing-value placeholder.
+        if url.is_empty() || url.eq_ignore_ascii_case("missing value") {
+            return None;
+        }
+        // Only persist real http(s) URLs — drop about:, file://, chrome://, etc.
+        // (those are internal and not useful for per-site tracking).
+        if url.starts_with("http://") || url.starts_with("https://") {
+            Some(url)
+        } else {
+            None
+        }
+    }
 }
 
 /// Resolve the true frontmost app via `CGWindowListCopyWindowInfo` (layer-0
@@ -149,6 +240,7 @@ fn frontmost_native() -> Option<FrontmostApp> {
             bundle_id: meta.bundle_id,
             window_title,
             ls_category_type: meta.ls_category_type,
+            tab_url: None,
         });
     }
 
@@ -186,6 +278,7 @@ fn frontmost_native() -> Option<FrontmostApp> {
         bundle_id,
         window_title,
         ls_category_type,
+        tab_url: None,
     })
 }
 
@@ -299,6 +392,7 @@ end tell
             bundle_id: bundle,
             window_title: None,
             ls_category_type,
+            tab_url: None,
         })
     }
     #[cfg(not(target_os = "macos"))]

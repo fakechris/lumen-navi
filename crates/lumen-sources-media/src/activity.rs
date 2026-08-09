@@ -48,6 +48,10 @@ struct ActivityKey {
     app_name: Option<String>,
     bundle_id: Option<String>,
     window_title: Option<String>,
+    /// Active browser tab URL. Part of the segment identity so navigating
+    /// github.com → gmail.com within one Safari window opens a new segment,
+    /// each accruing its own duration → per-website time tracking.
+    tab_url: Option<String>,
     is_idle: bool,
     is_locked: bool,
 }
@@ -60,6 +64,7 @@ impl ActivityKey {
             app_name: sample.frontmost.as_ref().map(|f| f.app_name.clone()),
             bundle_id: sample.frontmost.as_ref().and_then(|f| f.bundle_id.clone()),
             window_title: sample.frontmost.as_ref().and_then(|f| f.window_title.clone()),
+            tab_url: sample.frontmost.as_ref().and_then(|f| f.tab_url.clone()),
             is_idle,
             is_locked: sample.is_locked,
         }
@@ -118,6 +123,7 @@ fn make_event(sample: &ActivitySample, key: &ActivityKey, ts: chrono::DateTime<U
         "app_name": key.app_name,
         "bundle_id": key.bundle_id,
         "window_title": key.window_title,
+        "url": key.tab_url,
         "ls_category_type": ls_category_type,
         "idle_seconds": sample.idle_seconds,
         "is_idle": key.is_idle,
@@ -140,6 +146,7 @@ mod tests {
                 bundle_id: Some(format!("com.{app}")),
                 window_title: title.map(str::to_string),
                 ls_category_type: None,
+                tab_url: None,
             }),
             idle_seconds: idle,
             is_locked: false,

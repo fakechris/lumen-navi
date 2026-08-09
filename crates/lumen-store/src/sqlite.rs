@@ -2959,6 +2959,11 @@ fn project_activity_event(
         .payload
         .get("window_title")
         .and_then(serde_json::Value::as_str);
+    let url = event
+        .payload
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty());
     let is_idle = event
         .payload
         .get("is_idle")
@@ -3016,7 +3021,7 @@ fn project_activity_event(
             bundle_id,
             app_name,
             window_title,
-            url: None,
+            url,
             ls_category_type,
         },
         &user_rules,
@@ -3040,11 +3045,12 @@ fn project_activity_event(
         app_name IS ?1
         AND bundle_id IS ?2
         AND window_title IS ?3
-        AND is_idle = ?4
-        AND is_locked = ?5
+        AND url IS ?4
+        AND is_idle = ?5
+        AND is_locked = ?6
         AND ended_at IS NOT NULL
-        AND (julianday(?6) - julianday(ended_at)) * 86400.0 < 30.0
-        AND (julianday(?6) - julianday(ended_at)) * 86400.0 >= 0.0
+        AND (julianday(?7) - julianday(ended_at)) * 86400.0 < 30.0
+        AND (julianday(?7) - julianday(ended_at)) * 86400.0 >= 0.0
         ORDER BY ended_at DESC LIMIT 1"#;
     let existing: Option<(String, String)> = tx
         .query_row(
@@ -3055,6 +3061,7 @@ fn project_activity_event(
                 app_name,
                 bundle_id,
                 window_title,
+                url,
                 is_idle as i64,
                 is_locked as i64,
                 ts_str,
@@ -3085,11 +3092,12 @@ fn project_activity_event(
         // Identity change (or first sample): finalize the previously open
         // segment so time from its last heartbeat → this event is attributed
         // to the *previous* app/title, not dropped as a 0ms stub.
-        close_open_activity_segment(tx, &ts_str, now.as_str(), app_name, bundle_id, window_title, is_idle, is_locked)?;
+        close_open_activity_segment(tx, &ts_str, now.as_str(), app_name, bundle_id, window_title, url, is_idle, is_locked)?;
 
-        // New segment. Deterministic id so replays are idempotent.
+        // New segment. Deterministic id so replays are idempotent. Includes
+        // `url` so a browser tab change produces a distinct segment.
         let identity = format!(
-            "{day}|{app_name:?}|{bundle_id:?}|{window_title:?}|{is_idle}|{is_locked}|{ts_str}"
+            "{day}|{app_name:?}|{bundle_id:?}|{window_title:?}|{url:?}|{is_idle}|{is_locked}|{ts_str}"
         );
         let seg_id = blake3::hash(identity.as_bytes())
             .to_hex()
@@ -3101,14 +3109,15 @@ fn project_activity_event(
                 started_at, ended_at, duration_ms, is_idle, is_locked,
                 category, project, productivity_level, event_count, updated_at,
                 ls_category_type)
-               VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, 0, ?8, ?9,
-                       ?10, NULL, ?11, 1, ?12, ?13)"#,
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10,
+                       ?11, NULL, ?12, 1, ?13, ?14)"#,
             params![
                 seg_id,
                 day,
                 app_name,
                 bundle_id,
                 window_title,
+                url,
                 ts_str,
                 ts_str,
                 is_idle as i64,
@@ -3134,6 +3143,7 @@ fn close_open_activity_segment(
     app_name: Option<&str>,
     bundle_id: Option<&str>,
     window_title: Option<&str>,
+    url: Option<&str>,
     is_idle: bool,
     is_locked: bool,
 ) -> Result<(), StoreError> {
@@ -3147,8 +3157,9 @@ fn close_open_activity_segment(
                    app_name IS ?2
                    AND bundle_id IS ?3
                    AND window_title IS ?4
-                   AND is_idle = ?5
-                   AND is_locked = ?6
+                   AND url IS ?5
+                   AND is_idle = ?6
+                   AND is_locked = ?7
                  )
                ORDER BY ended_at DESC LIMIT 1"#,
             params![
@@ -3156,6 +3167,7 @@ fn close_open_activity_segment(
                 app_name,
                 bundle_id,
                 window_title,
+                url,
                 is_idle as i64,
                 is_locked as i64,
             ],
@@ -4125,6 +4137,78 @@ mod tests {
         assert_eq!(ms, 10_000);
         drop(conn);
     }
+
+    /// Navigating from github.com to gmail.com within one Safari window must
+    /// open two separate activity segments, each accruing its own duration —
+    /// this is what enables per-website time tracking ("github.com: 45m")
+    /// from the existing `url` column + `MatchField::Domain` rules. The url is
+    /// part of the segment identity, so a tab change is a segment change.
+    #[test]
+    fn activity_projection_splits_on_url_change() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-08-09T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let mk = |off: i64, url: Option<&str>| {
+            let mut e = SourceEvent::new(
+                SourceKind::Activity,
+                event_kind::ACTIVITY_FOCUS_V1,
+                json!({
+                    "app_name": "Safari",
+                    "bundle_id": "com.apple.Safari",
+                    "window_title": "tab",
+                    "url": url,
+                    "is_idle": false,
+                    "is_locked": false,
+                }),
+            );
+            e.ts = base + chrono::Duration::seconds(off);
+            e.id = Uuid::new_v4();
+            e
+        };
+
+        // 10s on github, then 10s on gmail within the same window.
+        store
+            .append_event(mk(0, Some("https://github.com/foo/bar")))
+            .unwrap();
+        store
+            .append_event(mk(10, Some("https://github.com/foo/bar")))
+            .unwrap();
+        store
+            .append_event(mk(20, Some("https://mail.google.com/inbox")))
+            .unwrap();
+        store
+            .append_event(mk(30, Some("https://mail.google.com/inbox")))
+            .unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let rows: Vec<(Option<String>, i64)> = conn
+            .prepare("SELECT url, duration_ms FROM activity_segments ORDER BY started_at")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        drop(conn);
+
+        assert_eq!(
+            rows.len(),
+            2,
+            "two distinct URLs must produce two segments, got {rows:?}"
+        );
+        // github started at t=0 and closed at t=20 (when gmail began), so 20s;
+        // gmail ran t=20 → t=30, so 10s. Total time is preserved across the split.
+        assert_eq!(rows[0].0.as_deref(), Some("https://github.com/foo/bar"));
+        assert_eq!(rows[0].1, 20_000, "github segment should cover 0→20s");
+        assert_eq!(
+            rows[1].0.as_deref(),
+            Some("https://mail.google.com/inbox")
+        );
+        assert_eq!(rows[1].1, 10_000, "gmail segment should cover 20→30s");
+    }
+
 
     /// A single-sample app that never gets a follow-up event stays at 0ms.
     /// `activity_day_stats` must not list it in top_apps — the 0ms row is real
