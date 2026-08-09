@@ -49,6 +49,13 @@ pub struct FrontmostApp {
     /// (e.g. `public.app-category.developer-tools`). Optional classification hint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ls_category_type: Option<String>,
+    /// Active browser tab URL when the frontmost app is a scriptable browser
+    /// (Safari, Chrome, Edge, Brave, Comet, …). None for non-browsers, Firefox
+    /// (not AppleScript-scriptable for URLs), or when Automation permission is
+    /// not granted. Drives per-website time tracking via the existing `url`
+    /// column + `MatchField::Domain` rules — no browser extension needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
