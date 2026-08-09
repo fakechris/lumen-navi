@@ -89,9 +89,11 @@ permissions survive rebuilds: [`docs/MACOS_LOCAL_SIGNING.md`](MACOS_LOCAL_SIGNIN
 | Accessibility | Selection popup (划词助手) — read selected text + mouse-up monitor |
 
 Screen Recording is requested by the independently signed `/Applications/Lumen Cua.app`
-(installed from a payload nested in Navi Resources). Click **请求屏幕录制** in Navi —
-do not double-click Lumen Cua itself (it is an `LSUIElement` helper; Navi starts it
-with `serve`). The Overview tab shows base grant vs real capture readiness.
+(installed from a payload nested in Navi Resources; icon is the Lumen Marks **CUA
+cursor** from `apps/cua/icon/AppIcon.icns`, copied by `prepare-cua-app.sh`). Click
+**请求屏幕录制** in Navi — do not double-click Lumen Cua itself (it is an
+`LSUIElement` helper; Navi starts it with `serve`). The Overview tab shows base
+grant vs real capture readiness.
 
 The other permissions belong to Lumen Navi.
 

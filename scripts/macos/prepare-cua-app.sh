@@ -34,13 +34,22 @@ if [[ ! -x "$src" ]]; then
   exit 1
 fi
 
-mkdir -p "$macos_dir"
+resources_dir="$contents/Resources"
+mkdir -p "$macos_dir" "$resources_dir"
 cp "$root/apps/cua/Info.plist" "$contents/Info.plist"
 version="$(node -p "require('$root/apps/desktop/src-tauri/tauri.conf.json').version")"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$contents/Info.plist"
 cp "$src" "$macos_dir/lumen-cua"
 chmod +x "$macos_dir/lumen-cua"
+
+# App icon (System Settings / Finder). Source: Lumen Marks design system — CUA cursor.
+icon_icns="$root/apps/cua/icon/AppIcon.icns"
+if [[ ! -f "$icon_icns" ]]; then
+  echo "Missing Lumen Cua icon: $icon_icns" >&2
+  exit 1
+fi
+cp "$icon_icns" "$resources_dir/AppIcon.icns"
 
 identity="${APPLE_SIGNING_IDENTITY:-$("$root/scripts/macos/resolve-identity.sh")}"
 if [[ "$identity" == "-" ]]; then
