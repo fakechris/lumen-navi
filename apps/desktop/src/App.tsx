@@ -184,7 +184,7 @@ export default function App() {
   const [browserPairing, setBrowserPairing] = useState<BrowserPairing | null>(null);
   const screenPermissionPending = useRef(false);
   /** Eager: first viewport of image rows. Rest load via IntersectionObserver. */
-  const FIRST_SCREEN_THUMBS = 12;
+  const FIRST_SCREEN_THUMB_COUNT = 12;
   const thumbsRef = useRef<Record<string, string>>({});
   const thumbLoadingRef = useRef<Set<string>>(new Set());
   const thumbObserverRef = useRef<IntersectionObserver | null>(null);
