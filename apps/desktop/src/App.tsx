@@ -183,6 +183,57 @@ export default function App() {
   const [assistantKey, setAssistantKey] = useState("");
   const [browserPairing, setBrowserPairing] = useState<BrowserPairing | null>(null);
   const screenPermissionPending = useRef(false);
+  /** Eager: first viewport of image rows. Rest load via IntersectionObserver. */
+  const FIRST_SCREEN_THUMBS = 12;
+  const thumbsRef = useRef<Record<string, string>>({});
+  const thumbLoadingRef = useRef<Set<string>>(new Set());
+  const thumbObserverRef = useRef<IntersectionObserver | null>(null);
+
+  const ensureThumb = useCallback(async (id: string): Promise<string | null> => {
+    if (thumbsRef.current[id]) return thumbsRef.current[id];
+    if (thumbLoadingRef.current.has(id)) return null;
+    thumbLoadingRef.current.add(id);
+    try {
+      const url = await api.getEventImageDataUrl(id);
+      if (url) {
+        thumbsRef.current = { ...thumbsRef.current, [id]: url };
+        setThumbs((prev) => ({ ...prev, [id]: url }));
+        return url;
+      }
+      return null;
+    } catch (e) {
+      console.warn("thumb load failed", id.slice(0, 8), e);
+      return null;
+    } finally {
+      thumbLoadingRef.current.delete(id);
+    }
+  }, []);
+
+  /** Attach lazy-load observer to a row that still needs a thumb. */
+  const bindLazyThumb = useCallback(
+    (el: HTMLElement | null, id: string) => {
+      if (!el) return;
+      if (thumbsRef.current[id]) return;
+      if (!thumbObserverRef.current) {
+        thumbObserverRef.current = new IntersectionObserver(
+          (entries) => {
+            for (const entry of entries) {
+              if (!entry.isIntersecting) continue;
+              const eid = (entry.target as HTMLElement).dataset.eventId;
+              if (!eid) continue;
+              thumbObserverRef.current?.unobserve(entry.target);
+              void ensureThumb(eid);
+            }
+          },
+          // Prefetch slightly before the row enters the viewport.
+          { root: null, rootMargin: "240px 0px", threshold: 0.01 },
+        );
+      }
+      el.dataset.eventId = id;
+      thumbObserverRef.current.observe(el);
+    },
+    [ensureThumb],
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -353,24 +404,19 @@ export default function App() {
       });
       setTimeline(items);
       setError(null);
-      // Lazy-load a few image thumbs
-      const need = items.filter((i) => i.has_image).slice(0, 12);
-      const next: Record<string, string> = {};
-      await Promise.all(
-        need.map(async (i) => {
-          try {
-            const url = await api.getEventImageDataUrl(i.id);
-            if (url) next[i.id] = url;
-          } catch {
-            /* ignore */
-          }
-        }),
-      );
-      setThumbs((prev) => ({ ...prev, ...next }));
+      // First screen: load all image thumbs in the first viewport eagerly.
+      // Below the fold: IntersectionObserver (bindLazyThumb) loads on approach.
+      const need = items.filter((i) => i.has_image);
+      const firstScreen = need.slice(0, FIRST_SCREEN_THUMB_COUNT);
+      const concurrency = 6;
+      for (let i = 0; i < firstScreen.length; i += concurrency) {
+        const batch = firstScreen.slice(i, i + concurrency);
+        await Promise.all(batch.map((item) => ensureThumb(item.id)));
+      }
     } catch (e) {
       setError(String(e));
     }
-  }, [kindFilter, appFilter]);
+  }, [kindFilter, appFilter, ensureThumb]);
 
   useEffect(() => {
     if (tab === "activity") {
@@ -379,6 +425,10 @@ export default function App() {
       const t = setInterval(() => void loadTimeline(), 30_000);
       return () => clearInterval(t);
     }
+    return () => {
+      thumbObserverRef.current?.disconnect();
+      thumbObserverRef.current = null;
+    };
   }, [tab, loadTimeline]);
 
   useEffect(() => {
@@ -838,7 +888,28 @@ export default function App() {
                         <span className="thumb-zoom">放大</span>
                       </button>
                     ) : e.has_image ? (
-                      <div className="thumb placeholder">img</div>
+                      <button
+                        ref={(el) => bindLazyThumb(el, e.id)}
+                        className="thumb placeholder"
+                        type="button"
+                        aria-label="加载并查看截图"
+                        title="点击加载截图"
+                        onClick={() => {
+                          void (async () => {
+                            const url = await ensureThumb(e.id);
+                            if (!url) {
+                              setError(`截图文件无法读取（event ${e.id.slice(0, 8)}）`);
+                              return;
+                            }
+                            setActiveImage({
+                              src: url,
+                              label: `${e.app_name || "屏幕截图"} · ${fmtTime(e.ts)}`,
+                            });
+                          })();
+                        }}
+                      >
+                        img
+                      </button>
                     ) : e.kind.includes("audio") ? (
                       <div className="thumb placeholder">
                         <Icon name="microphone" size={18} />
