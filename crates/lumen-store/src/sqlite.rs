@@ -12,12 +12,23 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::blob::BlobStore;
-use crate::categorization::{ActivityFields, CategoryRule};
+use crate::categorization::{ActivityFields, CategoryRule, Classification, ProductivityLevel};
+use crate::enrichment::{self, BrewCaskRow};
 use crate::schema::{
     MIGRATE_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, MIGRATE_V5, MIGRATE_V6, MIGRATE_V7,
-    MIGRATE_V8, SCHEMA_VERSION,
+    MIGRATE_V8, MIGRATE_V9, SCHEMA_VERSION,
 };
 use crate::{EventStore, JobRecord, JobStatus, StoreError};
+
+/// Summary of one background enrichment pass.
+#[derive(Debug, Clone, Default)]
+pub struct EnrichmentPassReport {
+    pub brew_index_refreshed: bool,
+    pub brew_index_rows: usize,
+    pub attempted: usize,
+    pub resolved: usize,
+    pub failed: usize,
+}
 
 /// One OCR search hit (FTS).
 #[derive(Debug, Clone)]
@@ -1653,6 +1664,7 @@ impl SqliteStore {
                         ls_category_type: None,
                     },
                     &user_rules,
+                    None,
                 );
                 (
                     c.category,
@@ -1743,32 +1755,383 @@ impl SqliteStore {
         )
         .map_err(StoreError::db)?;
 
-        // Re-classify every segment: load its fields, re-run classify, update.
+        reapply_all_segments_tx(&tx, &rules)?;
+        tx.commit().map_err(StoreError::db)?;
+        Ok(())
+    }
+
+    /// Refresh the local Homebrew cask → bundle index when missing or older
+    /// than `max_age_secs`. Network call; run off the hot path.
+    pub fn ensure_brew_index(&self, max_age_secs: i64) -> Result<(bool, usize), StoreError> {
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+            let refreshed: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM kv WHERE key = 'brew_index_refreshed_at'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(StoreError::db)?;
+            let count: i64 = conn
+                .query_row("SELECT COUNT(1) FROM brew_cask_by_bundle", [], |r| r.get(0))
+                .unwrap_or(0);
+            if count > 0 {
+                if let Some(raw) = refreshed {
+                    if let Ok(ts) = DateTime::parse_from_rfc3339(&raw) {
+                        let age = now.signed_duration_since(ts.with_timezone(&Utc));
+                        if age.num_seconds() < max_age_secs {
+                            return Ok((false, count as usize));
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::info!("refreshing Homebrew cask index for category enrichment");
+        let rows = enrichment::fetch_brew_cask_index()?;
+        let n = rows.len();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        tx.execute("DELETE FROM brew_cask_by_bundle", [])
+            .map_err(StoreError::db)?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    r#"INSERT INTO brew_cask_by_bundle
+                       (bundle_id, cask_token, name, desc, homepage, installs_30d, updated_at)
+                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+                )
+                .map_err(StoreError::db)?;
+            for row in &rows {
+                stmt.execute(params![
+                    row.bundle_id,
+                    row.cask_token,
+                    row.name,
+                    row.desc,
+                    row.homepage,
+                    row.installs_30d,
+                    now_str,
+                ])
+                .map_err(StoreError::db)?;
+            }
+        }
+        tx.execute(
+            r#"INSERT INTO kv (key, value) VALUES ('brew_index_refreshed_at', ?1)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value"#,
+            params![now_str],
+        )
+        .map_err(StoreError::db)?;
+        tx.commit().map_err(StoreError::db)?;
+        tracing::info!(rows = n, "Homebrew cask index refreshed");
+        Ok((true, n))
+    }
+
+    /// Process pending unknown apps: brew index → single cask → iTunes.
+    /// Returns how many were resolved. Safe to call periodically.
+    pub fn process_category_enrichment(
+        &self,
+        limit: usize,
+        allow_network: bool,
+    ) -> Result<EnrichmentPassReport, StoreError> {
+        let mut report = EnrichmentPassReport::default();
+        if limit == 0 {
+            return Ok(report);
+        }
+
+        // Enqueue any uncategorized segments that aren't in the cache yet.
+        self.enqueue_uncategorized_bundles()?;
+
+        if allow_network {
+            match self.ensure_brew_index(7 * 24 * 3600) {
+                Ok((refreshed, n)) => {
+                    report.brew_index_refreshed = refreshed;
+                    report.brew_index_rows = n;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "brew index refresh failed; continuing with cache");
+                }
+            }
+        } else {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+            report.brew_index_rows = conn
+                .query_row("SELECT COUNT(1) FROM brew_cask_by_bundle", [], |r| r.get(0))
+                .unwrap_or(0) as usize;
+        }
+
+        let pending: Vec<(String, Option<String>)> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+            let mut stmt = conn
+                .prepare(
+                    r#"SELECT bundle_id, app_name FROM app_category_cache
+                       WHERE source = 'pending'
+                          OR (source = 'failed' AND (last_attempt_at IS NULL
+                              OR (julianday('now') - julianday(last_attempt_at)) > 1.0))
+                       ORDER BY updated_at ASC
+                       LIMIT ?1"#,
+                )
+                .map_err(StoreError::db)?;
+            let rows = stmt
+                .query_map(params![limit as i64], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .map_err(StoreError::db)?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(StoreError::db)?);
+            }
+            out
+        };
+
+        for (bundle_id, app_name) in pending {
+            report.attempted += 1;
+            let brew_row = self.load_brew_row(&bundle_id)?;
+            let hit = match enrichment::resolve_bundle_category(
+                &bundle_id,
+                app_name.as_deref(),
+                brew_row.as_ref(),
+                allow_network,
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::debug!(bundle = %bundle_id, error = %e, "enrichment error");
+                    self.mark_cache_failed(&bundle_id, app_name.as_deref())?;
+                    report.failed += 1;
+                    continue;
+                }
+            };
+
+            if let Some(hit) = hit {
+                self.write_cache_hit(&bundle_id, app_name.as_deref(), &hit)?;
+                // If we learned brew rows from a single-cask fetch, upsert them.
+                if let (Some(token), Some(desc)) = (&hit.brew_token, &hit.brew_desc) {
+                    let _ = self.upsert_brew_row(&BrewCaskRow {
+                        bundle_id: bundle_id.clone(),
+                        cask_token: token.clone(),
+                        name: app_name.clone(),
+                        desc: Some(desc.clone()),
+                        homepage: None,
+                        installs_30d: None,
+                    });
+                }
+                self.reapply_categories_for_bundle(&bundle_id)?;
+                report.resolved += 1;
+            } else {
+                self.mark_cache_failed(&bundle_id, app_name.as_deref())?;
+                report.failed += 1;
+            }
+        }
+
+        Ok(report)
+    }
+
+    fn enqueue_uncategorized_bundles(&self) -> Result<(), StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        tx.execute(
+            r#"INSERT OR IGNORE INTO app_category_cache
+               (bundle_id, app_name, category, productivity_level, source,
+                confidence, updated_at)
+               SELECT DISTINCT bundle_id, app_name, NULL, NULL, 'pending', 0, ?1
+               FROM activity_segments
+               WHERE bundle_id IS NOT NULL
+                 AND bundle_id != ''
+                 AND (category IS NULL OR category = '')
+                 AND is_idle = 0"#,
+            params![now],
+        )
+        .map_err(StoreError::db)?;
+        tx.commit().map_err(StoreError::db)?;
+        Ok(())
+    }
+
+    fn load_brew_row(&self, bundle_id: &str) -> Result<Option<BrewCaskRow>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.query_row(
+            r#"SELECT bundle_id, cask_token, name, desc, homepage, installs_30d
+               FROM brew_cask_by_bundle WHERE bundle_id = ?1"#,
+            params![bundle_id],
+            |row| {
+                Ok(BrewCaskRow {
+                    bundle_id: row.get(0)?,
+                    cask_token: row.get(1)?,
+                    name: row.get(2)?,
+                    desc: row.get(3)?,
+                    homepage: row.get(4)?,
+                    installs_30d: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::db)
+    }
+
+    fn upsert_brew_row(&self, row: &BrewCaskRow) -> Result<(), StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.execute(
+            r#"INSERT INTO brew_cask_by_bundle
+               (bundle_id, cask_token, name, desc, homepage, installs_30d, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+               ON CONFLICT(bundle_id) DO UPDATE SET
+                 cask_token = excluded.cask_token,
+                 name = COALESCE(excluded.name, brew_cask_by_bundle.name),
+                 desc = COALESCE(excluded.desc, brew_cask_by_bundle.desc),
+                 homepage = COALESCE(excluded.homepage, brew_cask_by_bundle.homepage),
+                 installs_30d = COALESCE(excluded.installs_30d, brew_cask_by_bundle.installs_30d),
+                 updated_at = excluded.updated_at"#,
+            params![
+                row.bundle_id,
+                row.cask_token,
+                row.name,
+                row.desc,
+                row.homepage,
+                row.installs_30d,
+                now,
+            ],
+        )
+        .map_err(StoreError::db)?;
+        Ok(())
+    }
+
+    fn write_cache_hit(
+        &self,
+        bundle_id: &str,
+        app_name: Option<&str>,
+        hit: &enrichment::EnrichmentHit,
+    ) -> Result<(), StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let level = hit.classification.level.map(productivity_level_str);
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.execute(
+            r#"INSERT INTO app_category_cache
+               (bundle_id, app_name, category, productivity_level, source, confidence,
+                brew_token, brew_desc, itunes_genre, last_attempt_at, resolved_at, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?10)
+               ON CONFLICT(bundle_id) DO UPDATE SET
+                 app_name = COALESCE(excluded.app_name, app_category_cache.app_name),
+                 category = excluded.category,
+                 productivity_level = excluded.productivity_level,
+                 source = excluded.source,
+                 confidence = excluded.confidence,
+                 brew_token = excluded.brew_token,
+                 brew_desc = excluded.brew_desc,
+                 itunes_genre = excluded.itunes_genre,
+                 last_attempt_at = excluded.last_attempt_at,
+                 resolved_at = excluded.resolved_at,
+                 updated_at = excluded.updated_at"#,
+            params![
+                bundle_id,
+                app_name,
+                hit.classification.category.as_deref(),
+                level,
+                hit.source,
+                hit.confidence,
+                hit.brew_token,
+                hit.brew_desc,
+                hit.itunes_genre,
+                now,
+            ],
+        )
+        .map_err(StoreError::db)?;
+        Ok(())
+    }
+
+    fn mark_cache_failed(&self, bundle_id: &str, app_name: Option<&str>) -> Result<(), StoreError> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.execute(
+            r#"INSERT INTO app_category_cache
+               (bundle_id, app_name, category, productivity_level, source, confidence,
+                last_attempt_at, updated_at)
+               VALUES (?1, ?2, NULL, NULL, 'failed', 0, ?3, ?3)
+               ON CONFLICT(bundle_id) DO UPDATE SET
+                 app_name = COALESCE(excluded.app_name, app_category_cache.app_name),
+                 source = 'failed',
+                 last_attempt_at = excluded.last_attempt_at,
+                 updated_at = excluded.updated_at"#,
+            params![bundle_id, app_name, now],
+        )
+        .map_err(StoreError::db)?;
+        Ok(())
+    }
+
+    /// Re-classify all segments for one bundle after enrichment.
+    pub fn reapply_categories_for_bundle(&self, bundle_id: &str) -> Result<usize, StoreError> {
+        let rules = self.list_category_rules()?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        let cached = load_cached_classification_tx(&tx, Some(bundle_id))?;
         let mut stmt = tx
             .prepare(
-                r#"SELECT seg_id, app_name, bundle_id, window_title FROM activity_segments"#,
+                r#"SELECT seg_id, app_name, bundle_id, window_title, ls_category_type
+                   FROM activity_segments WHERE bundle_id = ?1"#,
             )
             .map_err(StoreError::db)?;
-        let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = stmt
-            .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        let rows: Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = stmt
+            .query_map(params![bundle_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })
             .map_err(StoreError::db)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::db)?;
         drop(stmt);
 
-        for (seg_id, app_name, bundle_id, window_title) in rows {
+        let mut n = 0usize;
+        for (seg_id, app_name, bid, window_title, ls) in rows {
             let fields = ActivityFields {
                 app_name: app_name.as_deref(),
-                bundle_id: bundle_id.as_deref(),
+                bundle_id: bid.as_deref(),
                 window_title: window_title.as_deref(),
                 url: None,
-                // Historical segments don't store LSApplicationCategoryType;
-                // re-apply still benefits from expanded default rules + lumen family.
-                ls_category_type: None,
+                ls_category_type: ls.as_deref(),
             };
-            let c = crate::categorization::classify(&fields, &rules);
+            let c = crate::categorization::classify(&fields, &rules, cached.as_ref());
             let level = c.level.map(productivity_level_str);
             tx.execute(
                 r#"UPDATE activity_segments
@@ -1777,10 +2140,10 @@ impl SqliteStore {
                 params![c.category.as_deref(), level.as_deref(), seg_id],
             )
             .map_err(StoreError::db)?;
+            n += 1;
         }
-
         tx.commit().map_err(StoreError::db)?;
-        Ok(())
+        Ok(n)
     }
 
     /// Load first artifact bytes for an event (relative path under data_dir).
@@ -2203,6 +2566,52 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
         v = 8;
     }
 
+    if v < 9 {
+        // ADD COLUMN may already exist on partial upgrades — ignore errors.
+        let _ = conn.execute(
+            "ALTER TABLE activity_segments ADD COLUMN ls_category_type TEXT",
+            [],
+        );
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS app_category_cache (
+              bundle_id TEXT PRIMARY KEY NOT NULL,
+              app_name TEXT,
+              category TEXT,
+              productivity_level TEXT,
+              source TEXT NOT NULL,
+              confidence REAL NOT NULL DEFAULT 0,
+              brew_token TEXT,
+              brew_desc TEXT,
+              itunes_genre TEXT,
+              last_attempt_at TEXT,
+              resolved_at TEXT,
+              updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_app_category_cache_source
+              ON app_category_cache(source);
+            CREATE TABLE IF NOT EXISTS brew_cask_by_bundle (
+              bundle_id TEXT PRIMARY KEY NOT NULL,
+              cask_token TEXT NOT NULL,
+              name TEXT,
+              desc TEXT,
+              homepage TEXT,
+              installs_30d INTEGER,
+              updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_brew_cask_token ON brew_cask_by_bundle(cask_token);
+            "#,
+        )
+        .map_err(StoreError::db)?;
+        let _ = MIGRATE_V9;
+        conn.execute(
+            "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
+            params!["9"],
+        )
+        .map_err(StoreError::db)?;
+        v = 9;
+    }
+
     let _ = v;
     Ok(())
 }
@@ -2533,12 +2942,13 @@ fn project_activity_event(
     // gives us the system timezone; convert the UTC event ts to it.
     let day = ts.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string();
 
-    // Classification (deterministic — user rules tried first, then defaults).
+    // Classification (user rules → defaults → cache → LS UTI → family).
     let user_rules = load_user_category_rules(tx).unwrap_or_default();
     let ls_category_type = event
         .payload
         .get("ls_category_type")
         .and_then(serde_json::Value::as_str);
+    let cached = load_cached_classification_tx(tx, bundle_id)?;
     let classification = crate::categorization::classify(
         &ActivityFields {
             bundle_id,
@@ -2548,7 +2958,17 @@ fn project_activity_event(
             ls_category_type,
         },
         &user_rules,
+        cached.as_ref(),
     );
+
+    // Unknown apps enter the enrichment queue (async Homebrew / iTunes).
+    if classification.category.is_none() {
+        if let Some(bid) = bundle_id {
+            if !bid.is_empty() {
+                enqueue_pending_tx(tx, bid, app_name)?;
+            }
+        }
+    }
 
     // Look for a segment with the same identity that ended within the merge
     // window (heartbeat interval + slack). If found, extend it; else insert.
@@ -2611,9 +3031,10 @@ fn project_activity_event(
             r#"INSERT OR IGNORE INTO activity_segments
                (seg_id, day, app_name, bundle_id, window_title, url,
                 started_at, ended_at, duration_ms, is_idle, is_locked,
-                category, project, productivity_level, event_count, updated_at)
+                category, project, productivity_level, event_count, updated_at,
+                ls_category_type)
                VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, 0, ?8, ?9,
-                       ?10, NULL, ?11, 1, ?12)"#,
+                       ?10, NULL, ?11, 1, ?12, ?13)"#,
             params![
                 seg_id,
                 day,
@@ -2627,6 +3048,7 @@ fn project_activity_event(
                 classification.category.as_deref(),
                 level_str.as_deref(),
                 now,
+                ls_category_type,
             ],
         )
         .map_err(StoreError::db)?;
@@ -2651,6 +3073,115 @@ fn load_user_category_rules(
         Some(json) => serde_json::from_str(&json)
             .map_err(|e| StoreError::Other(format!("parse category rules: {e}"))),
         None => Ok(Vec::new()),
+    }
+}
+
+fn load_cached_classification_tx(
+    tx: &rusqlite::Transaction<'_>,
+    bundle_id: Option<&str>,
+) -> Result<Option<Classification>, StoreError> {
+    let Some(bid) = bundle_id.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let row: Option<(Option<String>, Option<String>)> = tx
+        .query_row(
+            r#"SELECT category, productivity_level FROM app_category_cache
+               WHERE bundle_id = ?1 AND category IS NOT NULL AND source NOT IN ('pending', 'failed')"#,
+            params![bid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(StoreError::db)?;
+    Ok(row.and_then(|(cat, level)| {
+        cat.map(|c| Classification {
+            category: Some(c),
+            level: level.as_deref().and_then(parse_productivity_level),
+        })
+    }))
+}
+
+fn enqueue_pending_tx(
+    tx: &rusqlite::Transaction<'_>,
+    bundle_id: &str,
+    app_name: Option<&str>,
+) -> Result<(), StoreError> {
+    let now = Utc::now().to_rfc3339();
+    tx.execute(
+        r#"INSERT INTO app_category_cache
+           (bundle_id, app_name, category, productivity_level, source, confidence, updated_at)
+           VALUES (?1, ?2, NULL, NULL, 'pending', 0, ?3)
+           ON CONFLICT(bundle_id) DO UPDATE SET
+             app_name = COALESCE(excluded.app_name, app_category_cache.app_name),
+             updated_at = CASE
+               WHEN app_category_cache.source IN ('pending', 'failed')
+               THEN excluded.updated_at
+               ELSE app_category_cache.updated_at
+             END"#,
+        params![bundle_id, app_name, now],
+    )
+    .map_err(StoreError::db)?;
+    Ok(())
+}
+
+fn reapply_all_segments_tx(
+    tx: &rusqlite::Transaction<'_>,
+    rules: &[CategoryRule],
+) -> Result<(), StoreError> {
+    let mut stmt = tx
+        .prepare(
+            r#"SELECT seg_id, app_name, bundle_id, window_title, ls_category_type
+               FROM activity_segments"#,
+        )
+        .map_err(StoreError::db)?;
+    let rows: Vec<(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .map_err(StoreError::db)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::db)?;
+    drop(stmt);
+
+    for (seg_id, app_name, bundle_id, window_title, ls) in rows {
+        let cached = load_cached_classification_tx(tx, bundle_id.as_deref())?;
+        let fields = ActivityFields {
+            app_name: app_name.as_deref(),
+            bundle_id: bundle_id.as_deref(),
+            window_title: window_title.as_deref(),
+            url: None,
+            ls_category_type: ls.as_deref(),
+        };
+        let c = crate::categorization::classify(&fields, rules, cached.as_ref());
+        let level = c.level.map(productivity_level_str);
+        tx.execute(
+            r#"UPDATE activity_segments
+               SET category = ?1, productivity_level = ?2
+               WHERE seg_id = ?3"#,
+            params![c.category.as_deref(), level.as_deref(), seg_id],
+        )
+        .map_err(StoreError::db)?;
+    }
+    Ok(())
+}
+
+fn parse_productivity_level(s: &str) -> Option<ProductivityLevel> {
+    match s {
+        "productive" => Some(ProductivityLevel::Productive),
+        "neutral" => Some(ProductivityLevel::Neutral),
+        "distracting" => Some(ProductivityLevel::Distracting),
+        _ => None,
     }
 }
 
@@ -3385,5 +3916,89 @@ mod tests {
         drop(conn);
         assert_eq!(cat.as_deref(), Some("Development"));
         assert_eq!(level.as_deref(), Some("productive"));
+    }
+
+    #[test]
+    fn unknown_app_enqueued_and_resolved_from_brew_cache() {
+        use crate::enrichment::BrewCaskRow;
+        use lumen_types::{event_kind, SourceEvent, SourceKind};
+        use serde_json::json;
+
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+
+        // Seed brew index as if ensure_brew_index had run.
+        store
+            .upsert_brew_row(&BrewCaskRow {
+                bundle_id: "ai.perplexity.comet".into(),
+                cask_token: "comet".into(),
+                name: Some("Comet".into()),
+                desc: Some("Web browser with integrated AI assistant".into()),
+                homepage: Some("https://www.perplexity.ai/comet".into()),
+                installs_30d: Some(307),
+            })
+            .unwrap();
+
+        // But remove default-rule advantage: use a synthetic unknown bundle
+        // that only brew index knows.
+        store
+            .upsert_brew_row(&BrewCaskRow {
+                bundle_id: "com.example.rarebrowser".into(),
+                cask_token: "rarebrowser".into(),
+                name: Some("RareBrowser".into()),
+                desc: Some("Web browser for research".into()),
+                homepage: None,
+                installs_30d: Some(10),
+            })
+            .unwrap();
+
+        let mut e = SourceEvent::new(
+            SourceKind::Activity,
+            event_kind::ACTIVITY_FOCUS_V1,
+            json!({
+                "app_name": "RareBrowser",
+                "bundle_id": "com.example.rarebrowser",
+                "window_title": "home",
+                "is_idle": false,
+                "is_locked": false,
+            }),
+        );
+        e.id = Uuid::new_v4();
+        store.append_event(e).unwrap();
+
+        // Initially uncategorized → pending cache.
+        {
+            let conn = store.conn.lock().unwrap();
+            let cat: Option<String> = conn
+                .query_row(
+                    "SELECT category FROM activity_segments WHERE bundle_id = 'com.example.rarebrowser'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(cat.is_none());
+            let src: String = conn
+                .query_row(
+                    "SELECT source FROM app_category_cache WHERE bundle_id = 'com.example.rarebrowser'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(src, "pending");
+        }
+
+        // Offline enrichment (local brew index only).
+        let report = store.process_category_enrichment(10, false).unwrap();
+        assert!(report.resolved >= 1);
+
+        let conn = store.conn.lock().unwrap();
+        let cat: Option<String> = conn
+            .query_row(
+                "SELECT category FROM activity_segments WHERE bundle_id = 'com.example.rarebrowser'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cat.as_deref(), Some("Browsing"));
     }
 }

@@ -54,6 +54,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 url = "2"
+ureq = { version = "2", default-features = true, features = ["json"] }
 
 lumen-types = { path = "crates/lumen-types" }
 lumen-config = { path = "crates/lumen-config" }

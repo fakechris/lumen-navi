@@ -4,9 +4,12 @@
 //! 1. User rules (`kv` table, Timing-style overrides)
 //! 2. Built-in default catalog (bundle / name / domain)
 //! 3. System `LSApplicationCategoryType` hint (from Info.plist, when present)
+//! 4. Resolved identity cache (Homebrew / iTunes enrichment)
+//! 5. Known product-family heuristics (e.g. `com.lumenopen.*`)
 //!
 //! No ML. Unclassified activities get `None` and are **excluded from the
-//! pulse-score denominator**.
+//! pulse-score denominator**. Async enrichment fills the cache later and
+//! re-applies to historical segments.
 
 use serde::{Deserialize, Serialize};
 
@@ -123,8 +126,18 @@ pub struct Classification {
     pub level: Option<ProductivityLevel>,
 }
 
-/// Classify an activity against user rules, then defaults, then system UTI.
-pub fn classify(fields: &ActivityFields<'_>, user_rules: &[CategoryRule]) -> Classification {
+/// Classify an activity against user rules, defaults, local LS UTI, then
+/// resolved enrichment cache / product-family heuristics.
+///
+/// `cached` is a previously resolved (bundle → category) entry from
+/// Homebrew / iTunes enrichment. It sits **below** built-in defaults and
+/// **below** on-device `LSApplicationCategoryType` so local truth wins;
+/// enrichment only fills the cold-start hole when those miss.
+pub fn classify(
+    fields: &ActivityFields<'_>,
+    user_rules: &[CategoryRule],
+    cached: Option<&Classification>,
+) -> Classification {
     for rule in user_rules {
         if fields.matches(rule) {
             return Classification {
@@ -146,11 +159,113 @@ pub fn classify(fields: &ActivityFields<'_>, user_rules: &[CategoryRule]) -> Cla
             return c;
         }
     }
+    if let Some(c) = cached {
+        if c.category.is_some() {
+            return c.clone();
+        }
+    }
     // Known product family without Info.plist category (self-signed builds).
     if let Some(c) = classify_lumen_family(fields.bundle_id, fields.app_name) {
         return c;
     }
     Classification::default()
+}
+
+/// Map free-text (Homebrew `desc`, app subtitle) → product category.
+/// Conservative keyword heuristics; returns `None` when ambiguous.
+pub fn classify_from_text_hint(text: &str) -> Option<Classification> {
+    use ProductivityLevel::*;
+    let t = text.to_ascii_lowercase();
+    let (category, level) = if contains_any(
+        &t,
+        &[
+            "web browser",
+            "internet browser",
+            "browser with",
+            "chromium-based browser",
+        ],
+    ) || (t.contains("browser") && !t.contains("file browser") && !t.contains("browse files"))
+    {
+        ("Browsing", Neutral)
+    } else if contains_any(
+        &t,
+        &[
+            "code editor",
+            "ide ",
+            " ide",
+            "terminal emulator",
+            "terminal emulator",
+            "coding agent",
+            "coding assistant",
+            "software development",
+            "version control",
+            "docker",
+            "kubernetes",
+            "api development",
+            "git client",
+        ],
+    ) || (t.contains("ai") && t.contains("code"))
+    {
+        ("Development", Productive)
+    } else if contains_any(&t, &["password manager", "2fa", "authenticator"]) {
+        ("Utilities", Neutral)
+    } else if contains_any(
+        &t,
+        &["note-taking", "notes app", "markdown editor", "knowledge base", "wiki"],
+    ) {
+        ("Writing", Productive)
+    } else if contains_any(&t, &["chat", "messaging", "team communication", "email client"]) {
+        ("Communication", Productive)
+    } else if contains_any(&t, &["video player", "music player", "media player", "streaming"]) {
+        ("Entertainment", Distracting)
+    } else if contains_any(&t, &["social network", "social media"]) {
+        ("Social", Distracting)
+    } else if contains_any(&t, &["vpn", "proxy client", "firewall", "system monitor"]) {
+        ("Utilities", Neutral)
+    } else if contains_any(&t, &["spreadsheet", "word processor", "office suite", "presentation"]) {
+        ("Productivity", Productive)
+    } else if contains_any(&t, &["ai assistant", "chatbot", "large language", "llm"]) {
+        // Generic AI desktop apps — productive by default (Claude/ChatGPT class).
+        ("Productivity", Productive)
+    } else {
+        return None;
+    };
+    Some(Classification {
+        category: Some(category.into()),
+        level: Some(level),
+    })
+}
+
+/// Map iTunes / App Store `primaryGenreName` → product category.
+pub fn classify_from_itunes_genre(genre: &str) -> Option<Classification> {
+    use ProductivityLevel::*;
+    let g = genre.trim().to_ascii_lowercase();
+    let (category, level) = match g.as_str() {
+        "developer tools" => ("Development", Productive),
+        "productivity" | "business" => ("Productivity", Productive),
+        "utilities" => ("Utilities", Neutral),
+        "social networking" => ("Social", Distracting),
+        "entertainment" | "music" => ("Entertainment", Distracting),
+        "games" => ("Games", Distracting),
+        "education" | "reference" | "books" => ("Reference", Neutral),
+        "graphics & design" | "photo & video" => ("Creative", Productive),
+        "finance" => ("Finance", Neutral),
+        "health & fitness" | "medical" => ("Health", Neutral),
+        "lifestyle" | "travel" | "food & drink" | "shopping" => ("Lifestyle", Neutral),
+        "news" | "magazines & newspapers" => ("News", Neutral),
+        "weather" => ("Utilities", Neutral),
+        "sports" => ("Entertainment", Neutral),
+        "navigation" => ("Utilities", Neutral),
+        _ => return None,
+    };
+    Some(Classification {
+        category: Some(category.into()),
+        level: Some(level),
+    })
+}
+
+fn contains_any(hay: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|n| hay.contains(n))
 }
 
 /// Map Apple `LSApplicationCategoryType` UTI → product category + productivity.
@@ -298,6 +413,12 @@ pub fn default_rules() -> Vec<CategoryRule> {
             category: "Development".into(),
             level: Some(Productive),
         },
+        CategoryRule {
+            field: BundleId,
+            value: "ai.perplexity.comet".into(),
+            category: "Browsing".into(),
+            level: Some(Neutral),
+        }, // Perplexity Comet
         CategoryRule {
             field: BundleId,
             value: "dev.zcode.app".into(),
@@ -541,6 +662,12 @@ pub fn default_rules() -> Vec<CategoryRule> {
             category: "Browsing".into(),
             level: Some(Neutral),
         },
+        CategoryRule {
+            field: BundleId,
+            value: "org.mozilla.firefox".into(),
+            category: "Browsing".into(),
+            level: Some(Neutral),
+        },
         // --- Utilities / system ---
         CategoryRule {
             field: BundleId,
@@ -666,7 +793,7 @@ mod tests {
             bundle_id: Some("com.microsoft.VSCode"),
             ..Default::default()
         };
-        let c = classify(&f, &[]);
+        let c = classify(&f, &[], None);
         assert_eq!(c.category.as_deref(), Some("Development"));
         assert_eq!(c.level, Some(ProductivityLevel::Productive));
     }
@@ -678,7 +805,7 @@ mod tests {
             app_name: Some("Ghostty"),
             ..Default::default()
         };
-        let c = classify(&f, &[]);
+        let c = classify(&f, &[], None);
         assert_eq!(c.category.as_deref(), Some("Development"));
     }
 
@@ -690,7 +817,7 @@ mod tests {
             ls_category_type: Some("public.app-category.developer-tools"),
             ..Default::default()
         };
-        let c = classify(&f, &[]);
+        let c = classify(&f, &[], None);
         assert_eq!(c.category.as_deref(), Some("Development"));
         assert_eq!(c.level, Some(ProductivityLevel::Productive));
     }
@@ -707,7 +834,7 @@ mod tests {
             category: "Personal".into(),
             level: Some(ProductivityLevel::Neutral),
         };
-        let c = classify(&f, std::slice::from_ref(&user));
+        let c = classify(&f, std::slice::from_ref(&user), None);
         assert_eq!(c.category.as_deref(), Some("Personal"));
     }
 
@@ -724,7 +851,7 @@ mod tests {
             category: "Writing".into(),
             level: Some(ProductivityLevel::Productive),
         };
-        let c = classify(&f, std::slice::from_ref(&user));
+        let c = classify(&f, std::slice::from_ref(&user), None);
         assert_eq!(c.category.as_deref(), Some("Writing"));
     }
 
@@ -750,7 +877,7 @@ mod tests {
             app_name: Some("SomeUnknownApp"),
             ..Default::default()
         };
-        let c = classify(&f, &[]);
+        let c = classify(&f, &[], None);
         assert!(c.category.is_none());
         assert!(c.level.is_none());
     }
@@ -761,7 +888,7 @@ mod tests {
             url: Some("https://www.youtube.com/watch?v=abc"),
             ..Default::default()
         };
-        let c = classify(&f, &[]);
+        let c = classify(&f, &[], None);
         assert_eq!(c.level, Some(ProductivityLevel::Distracting));
     }
 
@@ -778,7 +905,61 @@ mod tests {
             app_name: Some("lumen-navi-desktop"),
             ..Default::default()
         };
-        let c = classify(&f, &[]);
+        let c = classify(&f, &[], None);
         assert_eq!(c.category.as_deref(), Some("Development"));
+    }
+
+    #[test]
+    fn cache_used_when_defaults_and_ls_miss() {
+        let f = ActivityFields {
+            bundle_id: Some("ai.example.rareapp"),
+            app_name: Some("RareApp"),
+            ..Default::default()
+        };
+        let cached = Classification {
+            category: Some("Browsing".into()),
+            level: Some(ProductivityLevel::Neutral),
+        };
+        let c = classify(&f, &[], Some(&cached));
+        assert_eq!(c.category.as_deref(), Some("Browsing"));
+    }
+
+    #[test]
+    fn defaults_beat_cache() {
+        let f = ActivityFields {
+            bundle_id: Some("com.microsoft.VSCode"),
+            ..Default::default()
+        };
+        let cached = Classification {
+            category: Some("Entertainment".into()),
+            level: Some(ProductivityLevel::Distracting),
+        };
+        let c = classify(&f, &[], Some(&cached));
+        assert_eq!(c.category.as_deref(), Some("Development"));
+    }
+
+    #[test]
+    fn text_hint_browser_and_ai() {
+        let c = classify_from_text_hint("Web browser with integrated AI assistant").unwrap();
+        assert_eq!(c.category.as_deref(), Some("Browsing"));
+        let c2 = classify_from_text_hint("Terminal-based AI coding assistant").unwrap();
+        assert_eq!(c2.category.as_deref(), Some("Development"));
+    }
+
+    #[test]
+    fn itunes_genre_developer_tools() {
+        let c = classify_from_itunes_genre("Developer Tools").unwrap();
+        assert_eq!(c.category.as_deref(), Some("Development"));
+    }
+
+    #[test]
+    fn comet_in_default_catalog() {
+        let f = ActivityFields {
+            bundle_id: Some("ai.perplexity.comet"),
+            app_name: Some("Comet"),
+            ..Default::default()
+        };
+        let c = classify(&f, &[], None);
+        assert_eq!(c.category.as_deref(), Some("Browsing"));
     }
 }
