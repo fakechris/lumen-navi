@@ -16,8 +16,144 @@ pub fn frontmost_app() -> Option<FrontmostApp> {
     frontmost_native().or_else(frontmost_osascript)
 }
 
+/// Resolve the true frontmost app via `CGWindowListCopyWindowInfo` (layer-0
+/// windows sorted by z-order). This is the correct API for background
+/// processes — `NSWorkspace.frontmostApplication()` reports the caller's own
+/// bundle from a daemon, not the user's actual focused window. Returns the
+/// owner app name + pid so we can scope the AX title query.
+#[cfg(target_os = "macos")]
+fn frontmost_via_windowlist() -> Option<(String, i32)> {
+    use core_foundation_sys::base::CFRelease;
+
+    // CGWindowListOption: onScreenOnly (1<<0) | excludeDesktopElements (1<<4) = 0x11
+    const OPTION_ONSCREEN_EXCL_DESKTOP: u32 = 0x11;
+
+    unsafe {
+        let raw = CGWindowListCopyWindowInfo(OPTION_ONSCREEN_EXCL_DESKTOP, 0);
+        if raw.is_null() {
+            return None;
+        }
+        let array = raw as core_foundation_sys::array::CFArrayRef;
+        let count = core_foundation_sys::array::CFArrayGetCount(array);
+        // System owners that appear at layer 0 but aren't real user-facing apps.
+        const SYSTEM_OWNERS: &[&str] = &[
+            "Window Server", "Dock", "SystemUIServer", "ControlCenter",
+            "Notification Center", "Spotlight", "loginwindow",
+        ];
+        for i in 0..count {
+            let dict = core_foundation_sys::array::CFArrayGetValueAtIndex(array, i)
+                as core_foundation_sys::dictionary::CFDictionaryRef;
+            if dict.is_null() {
+                continue;
+            }
+            // Skip non-window-layer entries (menu bar, dock, etc. live at layer > 0).
+            let layer = cf_dict_number(dict, "kCGWindowLayer").unwrap_or(-1);
+            if layer != 0 {
+                continue;
+            }
+            let owner = cf_dict_string(dict, "kCGWindowOwnerName");
+            let pid = cf_dict_number(dict, "kCGWindowOwnerPID").unwrap_or(0);
+            let Some(name) = owner else { continue };
+            if name.is_empty() || pid <= 0 {
+                continue;
+            }
+            // Skip system processes that pollute layer 0.
+            if SYSTEM_OWNERS.contains(&name.as_str()) {
+                continue;
+            }
+            // Require a non-zero window bounds — real app windows have them;
+            // invisible/system overlays often don't.
+            let has_bounds = cf_dict_bounds_present(dict);
+            if !has_bounds {
+                continue;
+            }
+            CFRelease(raw as *const _);
+            return Some((name, pid));
+        }
+        CFRelease(raw as *const _);
+        None
+    }
+}
+
+/// Read a CFString value from a CGWindowList dictionary by key.
+#[cfg(target_os = "macos")]
+unsafe fn cf_dict_string(
+    dict: core_foundation_sys::dictionary::CFDictionaryRef,
+    key: &str,
+) -> Option<String> {
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+    use core_foundation_sys::dictionary::CFDictionaryGetValue;
+    use core_foundation_sys::string::CFStringRef;
+    let k = CFString::new(key);
+    let val = CFDictionaryGetValue(dict, k.as_concrete_TypeRef() as *const _);
+    if val.is_null() {
+        return None;
+    }
+    let s = CFString::wrap_under_get_rule(val as CFStringRef);
+    Some(s.to_string())
+}
+
+/// Read a numeric (CFNumber) value from a CGWindowList dictionary by key.
+#[cfg(target_os = "macos")]
+unsafe fn cf_dict_number(
+    dict: core_foundation_sys::dictionary::CFDictionaryRef,
+    key: &str,
+) -> Option<i32> {
+    use core_foundation::base::TCFType;
+    use core_foundation::number::CFNumber;
+    use core_foundation_sys::dictionary::CFDictionaryGetValue;
+    use core_foundation_sys::number::CFNumberRef;
+    let k = core_foundation::string::CFString::new(key);
+    let val = CFDictionaryGetValue(dict, k.as_concrete_TypeRef() as *const _);
+    if val.is_null() {
+        return None;
+    }
+    CFNumber::wrap_under_get_rule(val as CFNumberRef).to_i32()
+}
+
+/// Whether the window has a real (non-zero) bounds dict — filters out
+/// invisible overlays and system pseudo-windows.
+#[cfg(target_os = "macos")]
+unsafe fn cf_dict_bounds_present(
+    dict: core_foundation_sys::dictionary::CFDictionaryRef,
+) -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation_sys::dictionary::CFDictionaryGetValue;
+    let k = core_foundation::string::CFString::new("kCGWindowBounds");
+    let val = CFDictionaryGetValue(dict, k.as_concrete_TypeRef() as *const _);
+    !val.is_null()
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> *const std::ffi::c_void;
+}
+
 #[cfg(target_os = "macos")]
 fn frontmost_native() -> Option<FrontmostApp> {
+    // CGWindowList is the source of truth for background processes (daemons).
+    // NSWorkspace.frontmostApplication() returns the caller's own bundle from a
+    // child process, not the user's actual focused window. Try the window list
+    // first; resolve bundle id from the pid via NSRunningApplication.
+    if let Some((owner_name, pid)) = frontmost_via_windowlist() {
+        let meta = running_app_meta(pid);
+        let app_name = meta
+            .localized_name
+            .filter(|s| !s.is_empty())
+            .unwrap_or(owner_name);
+        let window_title = crate::ax::focused_window_title(pid);
+        return Some(FrontmostApp {
+            app_name,
+            bundle_id: meta.bundle_id,
+            window_title,
+            ls_category_type: meta.ls_category_type,
+        });
+    }
+
+    // Fallback: NSWorkspace (correct when the caller is itself the frontmost app,
+    // e.g. the selection popup path).
     use objc2_app_kit::NSWorkspace;
     use objc2_foundation::NSString;
 
@@ -32,11 +168,88 @@ fn frontmost_native() -> Option<FrontmostApp> {
         .bundleIdentifier()
         .map(|s: objc2::rc::Retained<NSString>| s.to_string())
         .filter(|s| !s.is_empty());
+
+    let pid = app.processIdentifier();
+    let window_title = if pid > 0 {
+        crate::ax::focused_window_title(pid)
+    } else {
+        None
+    };
+    let ls_category_type = if pid > 0 {
+        running_app_meta(pid).ls_category_type
+    } else {
+        None
+    };
+
     Some(FrontmostApp {
         app_name,
         bundle_id,
-        window_title: None,
+        window_title,
+        ls_category_type,
     })
+}
+
+#[cfg(target_os = "macos")]
+struct RunningAppMeta {
+    localized_name: Option<String>,
+    bundle_id: Option<String>,
+    ls_category_type: Option<String>,
+}
+
+/// Resolve display name, bundle id, and Info.plist category for a pid.
+#[cfg(target_os = "macos")]
+fn running_app_meta(pid: i32) -> RunningAppMeta {
+    use objc2_app_kit::NSRunningApplication;
+    use objc2_foundation::NSString;
+
+    let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
+        return RunningAppMeta {
+            localized_name: None,
+            bundle_id: None,
+            ls_category_type: None,
+        };
+    };
+    let localized_name = app
+        .localizedName()
+        .map(|s: objc2::rc::Retained<NSString>| s.to_string())
+        .filter(|s| !s.is_empty());
+    let bundle_id = app
+        .bundleIdentifier()
+        .map(|s: objc2::rc::Retained<NSString>| s.to_string())
+        .filter(|s| !s.is_empty());
+    let ls_category_type = app.bundleURL().and_then(|url| {
+        let path = url.path()?.to_string();
+        ls_application_category_type(&path)
+    });
+    RunningAppMeta {
+        localized_name,
+        bundle_id,
+        ls_category_type,
+    }
+}
+
+/// Read `LSApplicationCategoryType` from an `.app` bundle path.
+#[cfg(target_os = "macos")]
+fn ls_application_category_type(app_path: &str) -> Option<String> {
+    let plist = std::path::Path::new(app_path).join("Contents/Info.plist");
+    if !plist.is_file() {
+        return None;
+    }
+    let output = std::process::Command::new("/usr/libexec/PlistBuddy")
+        .arg("-c")
+        .arg("Print :LSApplicationCategoryType")
+        .arg(&plist)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() || value.starts_with("Print:") || value.contains("Does Not Exist") {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -74,10 +287,18 @@ end tell
             .map(str::trim)
             .filter(|x| !x.is_empty())
             .map(|x| x.to_string());
+        let ls_category_type = bundle
+            .as_ref()
+            .and_then(|b| {
+                // Best-effort: locate app via mdfind (slow path; rare fallback).
+                let _ = b;
+                None
+            });
         Some(FrontmostApp {
             app_name: name.to_string(),
             bundle_id: bundle,
             window_title: None,
+            ls_category_type,
         })
     }
     #[cfg(not(target_os = "macos"))]

@@ -390,6 +390,65 @@ pub fn list_timeline(
 }
 
 #[tauri::command]
+pub fn activity_segments(state: State<'_, AppState>, day: String) -> Result<Vec<lumen_api::ActivitySegmentDto>, String> {
+    state.store.list_activity_segments(&day).map_err(err)
+}
+
+#[tauri::command]
+pub fn activity_stats(state: State<'_, AppState>, day: String) -> Result<lumen_api::DayStatsDto, String> {
+    state.store.activity_day_stats(&day).map_err(err)
+}
+
+#[tauri::command]
+pub fn activity_range(state: State<'_, AppState>, from: String, to: String) -> Result<lumen_api::RangeStatsDto, String> {
+    state.store.activity_range_stats(&from, &to).map_err(err)
+}
+
+#[tauri::command]
+pub fn activity_add_manual_segment(
+    state: State<'_, AppState>,
+    started_at: String,
+    ended_at: String,
+    app_name: String,
+    window_title: Option<String>,
+    category: Option<String>,
+    productivity_level: Option<String>,
+) -> Result<String, String> {
+    let start = chrono::DateTime::parse_from_rfc3339(&started_at)
+        .map_err(|e| format!("started_at: {e}"))?
+        .with_timezone(&chrono::Utc);
+    let end = chrono::DateTime::parse_from_rfc3339(&ended_at)
+        .map_err(|e| format!("ended_at: {e}"))?
+        .with_timezone(&chrono::Utc);
+    state.store.add_manual_segment(
+        start,
+        end,
+        &app_name,
+        window_title.as_deref(),
+        category.as_deref(),
+        productivity_level.as_deref(),
+    ).map_err(err)
+}
+
+#[tauri::command]
+pub fn activity_delete_segment(state: State<'_, AppState>, seg_id: String) -> Result<(), String> {
+    state.store.delete_manual_segment(&seg_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn activity_list_category_rules(state: State<'_, AppState>) -> Result<Vec<lumen_store::CategoryRule>, String> {
+    state.store.list_category_rules().map_err(err)
+}
+
+#[tauri::command]
+pub fn activity_save_category_rules(
+    state: State<'_, AppState>,
+    rules: Vec<lumen_store::CategoryRule>,
+) -> Result<(), String> {
+    state.store.save_category_rules_and_reapply(rules).map_err(err)
+}
+
+#[tauri::command]
 pub fn get_event_image_data_url(
     state: State<'_, AppState>,
     event_id: String,

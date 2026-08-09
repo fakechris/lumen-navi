@@ -181,3 +181,27 @@ https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 3. Manual soak: `docs/SOAK.md`  
 4. System audio capture (ScreenCaptureKit)  
 5. Optional: notarization · OCR helper isolation
+
+---
+
+## Time tracking (v0.2 — experiment shipped, contract pending)
+
+> Follows Principle 11 (§3 ARCHITECTURE.md): the runnable experiment is live;
+> the CLI contract below is being distilled from it.
+
+**Experiment (live, PR #12):**
+- Activity tracker independent of screen capture (heartbeat/pulsetime model)
+- `activity_segments` projection (schema v8) with duration + categorization
+- Dashboard (today timeline, stats, hour distribution, top apps)
+- Weekly view (v1.1), retro-entry (v1.2), menu bar tracker (v1.3)
+- Frontmost detection via CGWindowList (correct for background daemons)
+
+**Contract to freeze (next):**
+- `activity.focus.v1` event payload schema (stabilize field names)
+- `activity_segments` table columns + the `source` ('auto'|'manual') convention
+- `/v1/activity/{segments,stats,range,rules,segment}` HTTP endpoint shapes
+- Categorization rule format (`CategoryRule` JSON in kv)
+- `IdleProbe` trait + `FrontmostAppProbe` trait as platform ports
+
+**Dev-mode gotcha:** Cua peer_auth rejects unsigned binaries. Run
+`scripts/macos/sign-dev-binaries.sh` after `tauri dev` builds, then restart.

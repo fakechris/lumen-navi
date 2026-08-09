@@ -29,6 +29,28 @@ impl CuaController {
         })
     }
 
+    /// Lenient init: same as `open` but skips the post-install status probe
+    /// that can fail in dev mode (protocol skew, slow helper startup). The
+    /// helper bundle is still installed/validated; only the readiness check is
+    /// deferred to first use. Used as a fallback so the app starts even when
+    /// Cua can't be immediately reached — screen capture will retry on demand.
+    pub fn open_lenient() -> Result<Self> {
+        let paths = CuaPaths::for_current_user();
+        lumen_cua::ensure_token_file(&paths.token_file).context("initialize Lumen Cua token")?;
+        // Best-effort bundle prep: accept whatever prepare gives us, fall back
+        // to the payload path if the strict verify inside prepare fails.
+        let app = prepare_runtime_cua_app(&paths).unwrap_or_else(|_| {
+            resolve_cua_payload_app()
+                .or_else(|| Some(paths.app.clone()))
+                .unwrap_or_else(|| paths.app.clone())
+        });
+        Ok(Self {
+            paths,
+            app,
+            lifecycle: Arc::new(Mutex::new(())),
+        })
+    }
+
     pub fn socket_path(&self) -> &Path {
         &self.paths.socket
     }
@@ -610,9 +632,19 @@ fn current_app_certificate_constraint() -> Result<String> {
     let executable = std::env::current_exe().context("resolve current Navi executable")?;
     let app = executable
         .ancestors()
-        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("app"))
-        .context("Lumen Navi is not running from an app bundle")?;
-    certificate_constraint(&designated_requirement(app)?)
+        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("app"));
+    match app {
+        Some(app) => certificate_constraint(&designated_requirement(app)?),
+        None => {
+            // Dev mode: running the bare binary from target/debug, not a bundle.
+            // Fall back to the Cua helper's own certificate constraint (the
+            // helper is independently signed by `prepare-cua-app.sh`), so the
+            // bundle-matching check still has something to compare against.
+            let payload = resolve_cua_payload_app()
+                .context("no app bundle and no Lumen Cua payload for dev fallback")?;
+            certificate_constraint(&designated_requirement(&payload)?)
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

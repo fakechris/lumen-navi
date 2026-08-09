@@ -3,10 +3,12 @@
 //! See `docs/OBSERVE_CAPTURE.md` (screen) and `docs/AUDIO_PRODUCT.md` (mic).
 //! OCR is intentionally out of scope here.
 
+mod activity;
 mod audio;
 mod orchestrator;
 mod session;
 
+pub use activity::{ActivityAccumulator, ActivitySample};
 pub use audio::{
     synthetic_silence_chunk, synthetic_tone_chunk, AudioOrchestrator, AudioStats, CapturedAudio,
 };

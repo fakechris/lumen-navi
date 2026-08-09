@@ -1,20 +1,21 @@
 //! Product CaptureOrchestrator — focus, probe, multi-display, gates, backpressure.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lumen_config::{CaptureConfig, PrivacyConfig};
 use lumen_platform::{
-    bgra_to_gray, gray_distance, DisplayEnumerator, DisplayInfo, FrontmostApp, FrontmostAppProbe,
-    ScreenCapturer, ScreenLockProbe, ScreenshotFrame,
+    bgra_to_gray, dhash, gray_distance, hamming64, DisplayEnumerator, DisplayInfo, FrontmostApp,
+    FrontmostAppProbe, IdleProbe, ScreenCapturer, ScreenLockProbe, ScreenshotFrame,
 };
 use lumen_types::{event_kind, ActivitySession, SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
 use tracing::{debug, info};
 use uuid::Uuid;
 
+use crate::activity::{ActivityAccumulator, ActivitySample};
 use crate::session::SessionManager;
 
 #[derive(Debug, Clone)]
@@ -33,6 +34,7 @@ pub struct CaptureStats {
     pub full_captures: u64,
     pub probes: u64,
     pub skipped_visual: u64,
+    pub skipped_near_duplicate: u64,
     pub skipped_debounce: u64,
     pub skipped_gate: u64,
     pub dropped_backpressure: u64,
@@ -43,6 +45,7 @@ pub struct CaptureOrchestrator {
     capturer: Arc<dyn ScreenCapturer>,
     frontmost: Arc<dyn FrontmostAppProbe>,
     lock: Arc<dyn ScreenLockProbe>,
+    idle: Arc<dyn IdleProbe>,
     capture: CaptureConfig,
     privacy: PrivacyConfig,
     /// Runtime overrides (daemon can flip without reload).
@@ -53,15 +56,26 @@ pub struct CaptureOrchestrator {
     last_capture_bundle: Option<String>,
     last_focus: Option<FrontmostApp>,
     probe_gray: HashMap<u32, Vec<u8>>,
+    /// dHash fingerprints of recent frames per display (near-duplicate detection).
+    dhash_history: HashMap<u32, VecDeque<(u64, Instant)>>,
+    /// Safety valve: last full capture per display (force one every 10s).
+    last_full_capture: HashMap<u32, Instant>,
     sessions: SessionManager,
+    activity: ActivityAccumulator,
 
     stats_full: AtomicU64,
     stats_probes: AtomicU64,
     stats_skip_visual: AtomicU64,
+    stats_skip_near_dup: AtomicU64,
     stats_skip_debounce: AtomicU64,
     stats_skip_gate: AtomicU64,
     stats_drop_bp: AtomicU64,
 }
+
+const DHASH_HISTORY_LEN: usize = 12;
+const DHASH_HAMMING_THRESHOLD: u32 = 5;
+const DHASH_SAFETY_VALVE: Duration = Duration::from_secs(10);
+const DHASH_HISTORY_TTL: Duration = Duration::from_secs(60);
 
 impl CaptureOrchestrator {
     pub fn new(
@@ -69,17 +83,25 @@ impl CaptureOrchestrator {
         capturer: Arc<dyn ScreenCapturer>,
         frontmost: Arc<dyn FrontmostAppProbe>,
         lock: Arc<dyn ScreenLockProbe>,
+        idle: Arc<dyn IdleProbe>,
         capture: CaptureConfig,
         privacy: PrivacyConfig,
     ) -> Self {
-        let idle = capture.idle_session_ms;
+        let idle_session_ms = capture.idle_session_ms;
         let paused = AtomicBool::new(privacy.paused);
         let closed_eyes = AtomicBool::new(privacy.closed_eyes);
+        // AFK threshold mirrors the existing session idle; heartbeats every 5s
+        // so a steady 30-minute reading session still closes its segment.
+        let activity = ActivityAccumulator::new(
+            Duration::from_millis(idle_session_ms.max(1)),
+            Duration::from_secs(5),
+        );
         Self {
             displays,
             capturer,
             frontmost,
             lock,
+            idle,
             capture,
             privacy,
             paused,
@@ -88,10 +110,14 @@ impl CaptureOrchestrator {
             last_capture_bundle: None,
             last_focus: None,
             probe_gray: HashMap::new(),
-            sessions: SessionManager::new(idle),
+            dhash_history: HashMap::new(),
+            last_full_capture: HashMap::new(),
+            sessions: SessionManager::new(idle_session_ms),
+            activity,
             stats_full: AtomicU64::new(0),
             stats_probes: AtomicU64::new(0),
             stats_skip_visual: AtomicU64::new(0),
+            stats_skip_near_dup: AtomicU64::new(0),
             stats_skip_debounce: AtomicU64::new(0),
             stats_skip_gate: AtomicU64::new(0),
             stats_drop_bp: AtomicU64::new(0),
@@ -103,6 +129,7 @@ impl CaptureOrchestrator {
             full_captures: self.stats_full.load(Ordering::Relaxed),
             probes: self.stats_probes.load(Ordering::Relaxed),
             skipped_visual: self.stats_skip_visual.load(Ordering::Relaxed),
+            skipped_near_duplicate: self.stats_skip_near_dup.load(Ordering::Relaxed),
             skipped_debounce: self.stats_skip_debounce.load(Ordering::Relaxed),
             skipped_gate: self.stats_skip_gate.load(Ordering::Relaxed),
             dropped_backpressure: self.stats_drop_bp.load(Ordering::Relaxed),
@@ -155,6 +182,36 @@ impl CaptureOrchestrator {
         reason
     }
 
+    /// Sample the current frontmost app + system idle and return a lightweight
+    /// `activity.focus.v1` event when the accumulator decides a row is worth
+    /// keeping (state change or heartbeat due). Independent of the screenshot
+    /// path's visual debounce, so reading a static page still accrues time.
+    ///
+    /// Respects pause/closed-eyes (no event emitted while user opted out) but
+    /// **not** screen-lock (a lock is itself meaningful activity context, so we
+    /// record it with `is_locked=true`).
+    pub async fn poll_activity(&mut self) -> Option<SourceEvent> {
+        if self.paused.load(Ordering::Relaxed) || self.privacy.paused {
+            return None;
+        }
+        if self.closed_eyes.load(Ordering::Relaxed) || self.privacy.closed_eyes {
+            return None;
+        }
+
+        let frontmost = self.frontmost.frontmost().await.ok().flatten();
+        let idle_seconds = self.idle.idle_seconds().await.unwrap_or(0.0).max(0.0);
+        let is_locked = self.lock.is_locked().await.unwrap_or(false);
+
+        self.activity.ingest(
+            ActivitySample {
+                frontmost,
+                idle_seconds,
+                is_locked,
+            },
+            chrono::Utc::now(),
+        )
+    }
+
     /// Run one capture decision for `reason`. Returns None if gated/skipped.
     pub async fn capture_tick(
         &mut self,
@@ -190,8 +247,12 @@ impl CaptureOrchestrator {
         }
 
         let mut max_distance = 0.0f64;
+        // dHash of each display's current probe (for recording into history on capture).
+        let mut probe_hashes: HashMap<u32, u64> = HashMap::new();
         if !reason.forces_full_capture() {
             let mut any_change = false;
+            let mut skipped_near_dup = false;
+            let now = Instant::now();
             for d in &displays {
                 self.stats_probes.fetch_add(1, Ordering::Relaxed);
                 let raw = self
@@ -205,14 +266,45 @@ impl CaptureOrchestrator {
                     None => 1.0, // first probe always "changed"
                 };
                 max_distance = max_distance.max(dist);
-                if dist >= self.capture.visual_change_threshold {
+                self.probe_gray.insert(d.id.0, gray.clone());
+
+                if dist < self.capture.visual_change_threshold {
+                    continue; // MAD stable — no change
+                }
+
+                // MAD says changed. Second layer: dHash near-duplicate check.
+                let hash = dhash(&gray, raw.width as usize, raw.height as usize);
+                probe_hashes.insert(d.id.0, hash);
+
+                let history = self.dhash_history.entry(d.id.0).or_default();
+                while history.front().is_some_and(|(_, t)| now.duration_since(*t) > DHASH_HISTORY_TTL) {
+                    history.pop_front();
+                }
+                let near_dup = history
+                    .iter()
+                    .any(|(h, _)| hamming64(hash, *h) <= DHASH_HAMMING_THRESHOLD);
+
+                // Safety valve: force capture if overdue.
+                let safety_due = self
+                    .last_full_capture
+                    .get(&d.id.0)
+                    .is_none_or(|t| now.duration_since(*t) >= DHASH_SAFETY_VALVE);
+
+                if near_dup && !safety_due {
+                    skipped_near_dup = true;
+                } else {
                     any_change = true;
                 }
-                self.probe_gray.insert(d.id.0, gray);
             }
+
             if !any_change {
-                self.stats_skip_visual.fetch_add(1, Ordering::Relaxed);
-                debug!(max_distance, "skip: visual stable");
+                if skipped_near_dup {
+                    self.stats_skip_near_dup.fetch_add(1, Ordering::Relaxed);
+                    debug!(max_distance, "skip: near-duplicate");
+                } else {
+                    self.stats_skip_visual.fetch_add(1, Ordering::Relaxed);
+                    debug!(max_distance, "skip: visual stable");
+                }
                 return Ok(None);
             }
         } else {
@@ -271,6 +363,21 @@ impl CaptureOrchestrator {
             let event = SourceEvent::new(SourceKind::Screen, event_kind::SCREENSHOT_V1, payload)
                 .with_session(session_id);
             frames.push((event, frame));
+        }
+
+        // Record captured frame dHashes into history + update safety valve.
+        // On force path (focus/manual), probe_hashes is empty — next interval
+        // tick will establish a new dHash baseline.
+        let now = Instant::now();
+        for d in &displays {
+            if let Some(&hash) = probe_hashes.get(&d.id.0) {
+                let history = self.dhash_history.entry(d.id.0).or_default();
+                history.push_back((hash, now));
+                while history.len() > DHASH_HISTORY_LEN {
+                    history.pop_front();
+                }
+            }
+            self.last_full_capture.insert(d.id.0, now);
         }
 
         self.last_capture_at = Some(Instant::now());
@@ -390,6 +497,14 @@ mod tests {
         }
     }
 
+    struct FakeIdle;
+    #[async_trait]
+    impl IdleProbe for FakeIdle {
+        async fn idle_seconds(&self) -> Result<f64, PlatformError> {
+            Ok(0.0)
+        }
+    }
+
     struct FakeCap {
         /// Increment gray by this each probe for display 1
         n: Mutex<u8>,
@@ -445,9 +560,11 @@ mod tests {
                     app_name: "A".into(),
                     bundle_id: Some("a.b".into()),
                     window_title: None,
+                    ls_category_type: None,
                 }),
             }),
             Arc::new(FakeLock),
+            Arc::new(FakeIdle),
             CaptureConfig {
                 visual_change_threshold: 0.05,
                 debounce_default_ms: 0,

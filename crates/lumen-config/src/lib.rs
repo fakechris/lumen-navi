@@ -13,6 +13,7 @@ pub enum ConfigError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub data_dir: PathBuf,
     pub sources: SourcesConfig,
@@ -333,11 +334,23 @@ impl BrowserConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SourcesConfig {
     pub screen: bool,
     pub audio: bool,
     pub video: bool,
     pub browser: bool,
+}
+
+impl Default for SourcesConfig {
+    fn default() -> Self {
+        Self {
+            screen: true,
+            audio: true,
+            video: false,
+            browser: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

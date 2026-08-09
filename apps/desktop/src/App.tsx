@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "./api";
 import { Onboarding } from "./Onboarding";
+import { DashboardView } from "./views/Dashboard";
 import {
   Button,
   EmptyState,
@@ -47,6 +48,14 @@ const NAV: {
     eyebrow: "Overview",
     title: "概览",
     blurb: "权限 · 数据通道 · 本地服务状态",
+  },
+  {
+    id: "dashboard",
+    label: "时间",
+    icon: "clock",
+    eyebrow: "Time",
+    title: "时间追踪",
+    blurb: "今天你在哪些 App、哪类事情上花了时间",
   },
   {
     id: "search",
@@ -160,7 +169,7 @@ export default function App() {
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [activeImage, setActiveImage] = useState<{ src: string; label: string } | null>(null);
-  const [kindFilter, setKindFilter] = useState("");
+  const [kindFilter, setKindFilter] = useState("screenshot");
   const [appFilter, setAppFilter] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [query, setQuery] = useState("");
@@ -366,6 +375,9 @@ export default function App() {
   useEffect(() => {
     if (tab === "activity") {
       void loadTimeline();
+      // Auto-refresh every 30s while on the activity tab.
+      const t = setInterval(() => void loadTimeline(), 30_000);
+      return () => clearInterval(t);
     }
   }, [tab, loadTimeline]);
 
@@ -695,6 +707,10 @@ export default function App() {
             </div>
           )}
 
+          {tab === "dashboard" && (
+            <DashboardView />
+          )}
+
           {tab === "search" && (
             <div className="stack">
               <div className="row">
@@ -800,7 +816,7 @@ export default function App() {
                     开启屏幕、麦克风或浏览器通道后，数据会持续写入这里。
                   </EmptyState>
                 )}
-                {timeline.map((e) => (
+                {timeline.filter((e) => e.kind !== "activity.focus.v1").map((e) => (
                   <div className="list-item timeline-row" key={e.id}>
                     {e.has_image && thumbs[e.id] ? (
                       <button

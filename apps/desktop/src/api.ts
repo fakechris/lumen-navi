@@ -1,12 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ActivitySegment,
   AsrModelCandidate,
   AsrModelStatus,
   AssistantAction,
   AssistantConfig,
   AssistantUpdate,
   BrowserPairing,
+  CategoryRule,
   ConfigSummary,
+  DayStats,
+  RangeStats,
   EventSummary,
   Health,
   ObserveStatus,
@@ -51,6 +55,34 @@ export const api = {
     invoke<ConfigSummary>("update_sources_config", { update }),
   generateDaySummary: (day?: string) =>
     invoke<string>("generate_day_summary", { day: day ?? null }),
+  activitySegments: (day: string) =>
+    invoke<ActivitySegment[]>("activity_segments", { day }),
+  activityStats: (day: string) =>
+    invoke<DayStats>("activity_stats", { day }),
+  activityRange: (from: string, to: string) =>
+    invoke<RangeStats>("activity_range", { from, to }),
+  activityAddManualSegment: (opts: {
+    startedAt: string;
+    endedAt: string;
+    appName: string;
+    windowTitle?: string | null;
+    category?: string | null;
+    productivityLevel?: string | null;
+  }) =>
+    invoke<string>("activity_add_manual_segment", {
+      startedAt: opts.startedAt,
+      endedAt: opts.endedAt,
+      appName: opts.appName,
+      windowTitle: opts.windowTitle ?? null,
+      category: opts.category ?? null,
+      productivityLevel: opts.productivityLevel ?? null,
+    }),
+  activityDeleteSegment: (segId: string) =>
+    invoke<void>("activity_delete_segment", { segId: segId }),
+  activityListCategoryRules: () =>
+    invoke<CategoryRule[]>("activity_list_category_rules"),
+  activitySaveCategoryRules: (rules: CategoryRule[]) =>
+    invoke<void>("activity_save_category_rules", { rules }),
   setPrivacyPaused: (paused: boolean) =>
     invoke<void>("set_privacy_paused", { paused }),
   observeStatus: () => invoke<ObserveStatus>("observe_status"),

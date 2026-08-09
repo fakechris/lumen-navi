@@ -151,6 +151,91 @@ impl HealthResponse {
     }
 }
 
+// --- Activity / time-tracking ---
+
+/// One continuous activity segment (folded from heartbeats by the projection).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivitySegmentDto {
+    pub seg_id: String,
+    pub day: String,
+    pub app_name: Option<String>,
+    pub bundle_id: Option<String>,
+    pub window_title: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub duration_ms: i64,
+    pub is_idle: bool,
+    pub is_locked: bool,
+    pub category: Option<String>,
+    pub productivity_level: Option<String>,
+    pub event_count: i64,
+    /// 'auto' (tracked) or 'manual' (user-entered retro-entry).
+    #[serde(default)]
+    pub source: String,
+}
+
+/// Aggregated stats for one day (the dashboard's `stats` view payload).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DayStatsDto {
+    pub day: String,
+    /// Active time (excludes idle segments).
+    pub total_active_ms: i64,
+    pub total_idle_ms: i64,
+    /// 0–100 weighted average over classified segments; `None` when nothing
+    /// classified (uncategorized time is excluded from the denominator).
+    pub pulse_score: Option<f64>,
+    pub context_switches: i64,
+    /// ms per category (active only).
+    pub by_category: Vec<CategoryTotal>,
+    /// ms per app (active only), sorted descending.
+    pub top_apps: Vec<AppTotal>,
+    /// ms per local hour bucket [0..24] (active only).
+    pub by_hour: [i64; 24],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategoryTotal {
+    pub category: String,
+    pub ms: i64,
+    pub productivity_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppTotal {
+    pub app_name: String,
+    pub bundle_id: Option<String>,
+    pub ms: i64,
+    pub category: Option<String>,
+    pub productivity_level: Option<String>,
+    pub segment_count: i64,
+}
+
+/// One day's roll-up inside a range query (the weekly view payload).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DayRollupDto {
+    pub day: String,
+    pub total_active_ms: i64,
+    pub total_idle_ms: i64,
+    pub pulse_score: Option<f64>,
+    pub context_switches: i64,
+    /// ms per category (active only), top entries sorted desc.
+    pub by_category: Vec<CategoryTotal>,
+}
+
+/// Aggregated stats over a date range (e.g. the last 7 days).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RangeStatsDto {
+    pub days: Vec<DayRollupDto>,
+    /// Range-wide totals.
+    pub total_active_ms: i64,
+    pub total_idle_ms: i64,
+    pub pulse_score: Option<f64>,
+    /// ms per app across the whole range, sorted desc (the week's top apps).
+    pub top_apps: Vec<AppTotal>,
+    /// ms per category across the whole range, sorted desc.
+    pub by_category: Vec<CategoryTotal>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

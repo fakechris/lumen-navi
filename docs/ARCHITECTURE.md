@@ -70,6 +70,30 @@ Act plane ──► open-source cua-driver (MIT)
 8. **Edge adapters use a stable local API** — Chrome/agents later plug in without core rewrites.  
 9. **Core has zero UI dependency**.  
 10. **Cheap signals first** — frontmost app, hashes, VAD before heavy media when possible.
+11. **Experiment before contract** — ship a runnable end-to-end spike first
+    (data in → something observable out), then distill the stable CLI / API
+    contract from what the experiment proved. Never design the contract
+    upfront from speculation; the spike is the spec. A feature is not "done"
+    until both halves exist: the working experiment *and* the documented
+    contract that lets future code rely on it without reading the experiment's
+    source.
+12. **Time tracking ≠ screen capture.** Activity tracking
+    (`activity.focus.v1`, frontmost/idle probes) is independent of Cua and
+    Screen Recording permission. Do not couple them; do not debug Cua when
+    the issue is only about time tracking.
+13. **Dev binaries must be signed.** `tauri dev` recompiles unsigned; Cua
+    `peer_auth` rejects unsigned clients. Use `scripts/macos/tauri-dev-signed.sh`.
+    See `docs/DESKTOP.md` § Dev.
+14. **Frontmost from a daemon requires CGWindowList.**
+    `NSWorkspace.frontmostApplication()` returns the caller's own bundle from
+    a background process. Use `CGWindowListCopyWindowInfo` (filtered) instead.
+    See `crates/lumen-platform-macos/src/frontmost.rs`.
+15. **Do not re-run disproved experiments.** The TCC decision document
+    (`research/lumen-navi-screen-recording-tcc-decision.md` §7) lists
+    explicitly excluded approaches (daemon screenshots, same-identifier TCC
+    inheritance, no-Team-ID self-signing with `tccutil reset`, Terminal
+    permission borrowing, auto-restart patches). These are frozen — do not
+    attempt them.
 
 ---
 

@@ -58,6 +58,7 @@ if [[ "$icon_key" != "AppIcon" ]]; then
   exit 1
 fi
 
+
 identity="${APPLE_SIGNING_IDENTITY:-$("$root/scripts/macos/resolve-identity.sh")}"
 if [[ "$identity" == "-" ]]; then
   echo "Lumen Cua requires a certificate-backed identity; ad-hoc signing cannot preserve or authenticate TCC access." >&2
