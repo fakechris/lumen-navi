@@ -1293,15 +1293,30 @@ impl SqliteStore {
 
         // Top apps — group by bundle identity so "Lumen Navi" and
         // "lumen-navi-desktop" collapse; prefer a human display name.
+        // NOTE: SQLite does not allow GROUP_CONCAT(DISTINCT col, sep).
+        // Use a CTE to group by identity key, then collect distinct names per group.
         let mut app_stmt = conn
             .prepare(
-                r#"SELECT GROUP_CONCAT(DISTINCT app_name, char(31)),
-                          bundle_id, SUM(duration_ms),
-                          MAX(category), MAX(productivity_level), COUNT(1)
-                   FROM activity_segments
-                   WHERE day = ?1 AND is_idle = 0 AND app_name IS NOT NULL
-                   GROUP BY COALESCE(bundle_id, app_name)
-                   ORDER BY SUM(duration_ms) DESC
+                r#"WITH grouped AS (
+                     SELECT COALESCE(bundle_id, app_name) AS gkey,
+                            bundle_id, app_name, duration_ms,
+                            category, productivity_level
+                     FROM activity_segments
+                     WHERE day = ?1 AND is_idle = 0 AND app_name IS NOT NULL
+                   )
+                   SELECT (SELECT GROUP_CONCAT(DISTINCT g2.app_name)
+                           FROM grouped g2 WHERE g2.gkey = grouped.gkey),
+                          grouped.bundle_id, grouped.total_ms,
+                          grouped.category, grouped.level, grouped.segs
+                   FROM (
+                     SELECT gkey, bundle_id, SUM(duration_ms) AS total_ms,
+                            MAX(category) AS category,
+                            MAX(productivity_level) AS level,
+                            COUNT(1) AS segs
+                     FROM grouped
+                     GROUP BY gkey
+                   ) grouped
+                   ORDER BY grouped.total_ms DESC
                    LIMIT 20"#,
             )
             .map_err(StoreError::db)?;
@@ -1505,13 +1520,26 @@ impl SqliteStore {
         // Range-wide top apps (bundle identity + preferred display name).
         let mut app_stmt = conn
             .prepare(
-                r#"SELECT GROUP_CONCAT(DISTINCT app_name, char(31)),
-                          bundle_id, SUM(duration_ms),
-                          MAX(category), MAX(productivity_level), COUNT(1)
-                   FROM activity_segments
-                   WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0 AND app_name IS NOT NULL
-                   GROUP BY COALESCE(bundle_id, app_name)
-                   ORDER BY SUM(duration_ms) DESC
+                r#"WITH grouped AS (
+                     SELECT COALESCE(bundle_id, app_name) AS gkey,
+                            bundle_id, app_name, duration_ms,
+                            category, productivity_level
+                     FROM activity_segments
+                     WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0 AND app_name IS NOT NULL
+                   )
+                   SELECT (SELECT GROUP_CONCAT(DISTINCT g2.app_name)
+                           FROM grouped g2 WHERE g2.gkey = grouped.gkey),
+                          grouped.bundle_id, grouped.total_ms,
+                          grouped.category, grouped.level, grouped.segs
+                   FROM (
+                     SELECT gkey, bundle_id, SUM(duration_ms) AS total_ms,
+                            MAX(category) AS category,
+                            MAX(productivity_level) AS level,
+                            COUNT(1) AS segs
+                     FROM grouped
+                     GROUP BY gkey
+                   ) grouped
+                   ORDER BY grouped.total_ms DESC
                    LIMIT 15"#,
             )
             .map_err(StoreError::db)?;
