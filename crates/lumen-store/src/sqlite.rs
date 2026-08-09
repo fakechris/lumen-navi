@@ -2921,13 +2921,17 @@ fn preferred_name_from_concat(concat: &str) -> String {
 
 /// Fold `activity.focus.v1` events into continuous `activity_segments` rows.
 ///
-/// The accumulator emits an event on every state change plus a heartbeat every
-/// ~5s during steady activity. This projection merges consecutive events with
-/// identical (app, bundle, title, is_idle, is_locked) into a single segment,
-/// extending `ended_at`/`duration_ms`/`event_count` as new heartbeats arrive.
-/// A new segment starts whenever the identity changes or a gap larger than the
-/// heartbeat window appears (so two genuinely separate sessions of the same app
-/// don't get glued together).
+/// Model (ActivityWatch-style):
+/// - Same identity within 30s → **extend** the open segment (heartbeat).
+/// - Identity change (or first sample) → **close** the previous open segment
+///   up to `now` (so time between last heartbeat and the switch is not lost),
+///   then open a new segment.
+///
+/// Identity = (app_name, bundle_id, window_title, is_idle, is_locked).
+///
+/// Transient probe failures: if `bundle_id` is missing, **carry forward** the
+/// last non-null bundle for the same `app_name` within a short window so one
+/// flaky poll does not invent a second uncategorized identity.
 fn project_activity_event(
     tx: &rusqlite::Transaction<'_>,
     event: &SourceEvent,
@@ -2940,10 +2944,11 @@ fn project_activity_event(
         .payload
         .get("app_name")
         .and_then(serde_json::Value::as_str);
-    let bundle_id = event
+    let mut bundle_id = event
         .payload
         .get("bundle_id")
-        .and_then(serde_json::Value::as_str);
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty());
     let window_title = event
         .payload
         .get("window_title")
@@ -2964,6 +2969,34 @@ fn project_activity_event(
     // Local-day bucket (the day the user experienced, not UTC). chrono Local
     // gives us the system timezone; convert the UTC event ts to it.
     let day = ts.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string();
+
+    // Carry-forward bundle when the probe briefly returns name without bid
+    // (seen in production: Comet 1/417 events, Ghostty historical null rows).
+    let carried_bundle: Option<String>;
+    if bundle_id.is_none() {
+        if let Some(name) = app_name {
+            carried_bundle = tx
+                .query_row(
+                    r#"SELECT bundle_id FROM activity_segments
+                       WHERE app_name = ?1
+                         AND bundle_id IS NOT NULL AND bundle_id != ''
+                         AND ended_at IS NOT NULL
+                         AND (julianday(?2) - julianday(ended_at)) * 86400.0 < 120.0
+                         AND (julianday(?2) - julianday(ended_at)) * 86400.0 >= 0.0
+                       ORDER BY ended_at DESC LIMIT 1"#,
+                    params![name, ts_str],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(StoreError::db)?;
+            bundle_id = carried_bundle.as_deref();
+        } else {
+            carried_bundle = None;
+        }
+    } else {
+        carried_bundle = None;
+    }
+    let _ = carried_bundle;
 
     // Classification (user rules → defaults → cache → LS UTI → family).
     let user_rules = load_user_category_rules(tx).unwrap_or_default();
@@ -2994,7 +3027,8 @@ fn project_activity_event(
     }
 
     // Look for a segment with the same identity that ended within the merge
-    // window (heartbeat interval + slack). If found, extend it; else insert.
+    // window (heartbeat interval + slack). If found, extend it; else close
+    // the previous open segment and insert a new one.
     // 30s window covers the 5s heartbeat with margin for scheduler jitter.
     let identity_match = r#"
         app_name IS ?1
@@ -3042,6 +3076,11 @@ fn project_activity_event(
         )
         .map_err(StoreError::db)?;
     } else {
+        // Identity change (or first sample): finalize the previously open
+        // segment so time from its last heartbeat → this event is attributed
+        // to the *previous* app/title, not dropped as a 0ms stub.
+        close_open_activity_segment(tx, &ts_str, now.as_str(), app_name, bundle_id, window_title, is_idle, is_locked)?;
+
         // New segment. Deterministic id so replays are idempotent.
         let identity = format!(
             "{day}|{app_name:?}|{bundle_id:?}|{window_title:?}|{is_idle}|{is_locked}|{ts_str}"
@@ -3077,6 +3116,67 @@ fn project_activity_event(
         .map_err(StoreError::db)?;
     }
 
+    Ok(())
+}
+
+/// Close the most recent segment that is still within the merge window and is
+/// **not** the incoming identity. Sets `ended_at` / `duration_ms` to `ts`.
+fn close_open_activity_segment(
+    tx: &rusqlite::Transaction<'_>,
+    ts_str: &str,
+    now: &str,
+    app_name: Option<&str>,
+    bundle_id: Option<&str>,
+    window_title: Option<&str>,
+    is_idle: bool,
+    is_locked: bool,
+) -> Result<(), StoreError> {
+    let prev: Option<(String, String)> = tx
+        .query_row(
+            r#"SELECT seg_id, started_at FROM activity_segments
+               WHERE ended_at IS NOT NULL
+                 AND (julianday(?1) - julianday(ended_at)) * 86400.0 < 30.0
+                 AND (julianday(?1) - julianday(ended_at)) * 86400.0 >= 0.0
+                 AND NOT (
+                   app_name IS ?2
+                   AND bundle_id IS ?3
+                   AND window_title IS ?4
+                   AND is_idle = ?5
+                   AND is_locked = ?6
+                 )
+               ORDER BY ended_at DESC LIMIT 1"#,
+            params![
+                ts_str,
+                app_name,
+                bundle_id,
+                window_title,
+                is_idle as i64,
+                is_locked as i64,
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(StoreError::db)?;
+
+    let Some((seg_id, started_at)) = prev else {
+        return Ok(());
+    };
+    let started_dt = chrono::DateTime::parse_from_rfc3339(&started_at)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| StoreError::Other(format!("parse started_at for close: {e}")))?;
+    let end_dt = chrono::DateTime::parse_from_rfc3339(ts_str)
+        .map(|d| d.with_timezone(&Utc))
+        .map_err(|e| StoreError::Other(format!("parse end ts for close: {e}")))?;
+    let duration_ms = (end_dt - started_dt).num_milliseconds().max(0) as i64;
+    tx.execute(
+        r#"UPDATE activity_segments
+           SET ended_at = ?1,
+               duration_ms = ?2,
+               updated_at = ?3
+           WHERE seg_id = ?4"#,
+        params![ts_str, duration_ms, now, seg_id],
+    )
+    .map_err(StoreError::db)?;
     Ok(())
 }
 
@@ -3883,7 +3983,8 @@ mod tests {
         store.append_event(mk(0, "Safari", false)).unwrap();
         store.append_event(mk(5, "Safari", false)).unwrap();
         store.append_event(mk(10, "Safari", false)).unwrap();
-        // Switch to Mail — new segment.
+        // Switch to Mail — new segment; Safari must be closed through t=12
+        // (time from last Safari heartbeat at 10s → switch is not dropped).
         store.append_event(mk(12, "Mail", false)).unwrap();
         // Idle boundary on Safari — new segment (is_idle=true differs).
         store.append_event(mk(200, "Safari", true)).unwrap();
@@ -3894,7 +3995,7 @@ mod tests {
             .unwrap();
         assert_eq!(count, 3, "three distinct segments: safari, mail, safari-idle");
 
-        // The Safari segment should span 0–10s (10s = 10000ms).
+        // Safari active segment: closed on switch at t=12 → 12000ms.
         let safari_ms: i64 = conn
             .query_row(
                 "SELECT duration_ms FROM activity_segments WHERE app_name = 'Safari' AND is_idle = 0",
@@ -3902,10 +4003,120 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(safari_ms, 10_000, "merged segment duration covers first→last heartbeat");
+        assert_eq!(
+            safari_ms, 12_000,
+            "previous segment closed on identity change (not stuck at last heartbeat)"
+        );
 
-        // Safari should be classified (browser dev domain? no — falls back;
-        // here it's unclassified since "Safari" isn't in default rules).
+        // Mail only got one sample at t=12; next event is at t=200 (>30s merge
+        // window) so we correctly do NOT invent 188s of unobserved Mail time.
+        let mail_ms: i64 = conn
+            .query_row(
+                "SELECT duration_ms FROM activity_segments WHERE app_name = 'Mail'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            mail_ms, 0,
+            "no close across gaps larger than the merge window"
+        );
+
+        drop(conn);
+    }
+
+    #[test]
+    fn activity_projection_closes_on_title_change() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-08-07T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let mk = |off: i64, title: &str| {
+            let mut e = SourceEvent::new(
+                SourceKind::Activity,
+                event_kind::ACTIVITY_FOCUS_V1,
+                json!({
+                    "app_name": "Comet",
+                    "bundle_id": "ai.perplexity.comet",
+                    "window_title": title,
+                    "is_idle": false,
+                    "is_locked": false,
+                }),
+            );
+            e.ts = base + chrono::Duration::seconds(off);
+            e.id = Uuid::new_v4();
+            e
+        };
+
+        store.append_event(mk(0, "Tab A")).unwrap();
+        store.append_event(mk(5, "Tab B")).unwrap(); // title change
+
+        let conn = store.conn.lock().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(1) FROM activity_segments", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+        let a_ms: i64 = conn
+            .query_row(
+                "SELECT duration_ms FROM activity_segments WHERE window_title = 'Tab A'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(a_ms, 5_000, "title change must close previous tab interval");
+        drop(conn);
+    }
+
+    #[test]
+    fn activity_projection_carries_forward_null_bundle() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-08-07T11:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let mk = |off: i64, bid: Option<&str>| {
+            let mut e = SourceEvent::new(
+                SourceKind::Activity,
+                event_kind::ACTIVITY_FOCUS_V1,
+                json!({
+                    "app_name": "Comet",
+                    "bundle_id": bid,
+                    "window_title": "Home",
+                    "is_idle": false,
+                    "is_locked": false,
+                }),
+            );
+            e.ts = base + chrono::Duration::seconds(off);
+            e.id = Uuid::new_v4();
+            e
+        };
+
+        store
+            .append_event(mk(0, Some("ai.perplexity.comet")))
+            .unwrap();
+        // Probe flake: same app, missing bundle for one poll.
+        store.append_event(mk(5, None)).unwrap();
+        store
+            .append_event(mk(10, Some("ai.perplexity.comet")))
+            .unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(1) FROM activity_segments", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "null-bundle poll must not create a second identity");
+        let (bid, ms): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT bundle_id, duration_ms FROM activity_segments",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(bid.as_deref(), Some("ai.perplexity.comet"));
+        assert_eq!(ms, 10_000);
         drop(conn);
     }
 
