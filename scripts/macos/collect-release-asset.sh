@@ -118,6 +118,7 @@ fi
 cua_app="$app_path/Contents/Resources/helpers/Lumen Cua.app"
 cua_plist="$cua_app/Contents/Info.plist"
 cua_path="$cua_app/Contents/MacOS/lumen-cua"
+cua_icon="$cua_app/Contents/Resources/AppIcon.icns"
 if [[ ! -x "$cua_path" ]]; then
   echo "Bundled Lumen Cua missing at $cua_path" >&2
   exit 1
@@ -128,6 +129,14 @@ if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$cua_plist")" !
 fi
 if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$cua_plist")" != "$expected_version" ]]; then
   echo "Bundled Lumen Cua version does not match tag $expected_version" >&2
+  exit 1
+fi
+if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$cua_plist" 2>/dev/null || true)" != "AppIcon" ]]; then
+  echo "Bundled Lumen Cua is missing CFBundleIconFile=AppIcon" >&2
+  exit 1
+fi
+if [[ ! -f "$cua_icon" ]]; then
+  echo "Bundled Lumen Cua is missing app icon at $cua_icon" >&2
   exit 1
 fi
 cua_archs="$(lipo -archs "$cua_path")"
