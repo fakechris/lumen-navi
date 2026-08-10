@@ -426,13 +426,37 @@ pub fn activity_segments(state: State<'_, AppState>, day: String) -> Result<Vec<
 }
 
 #[tauri::command]
-pub fn activity_stats(state: State<'_, AppState>, day: String) -> Result<lumen_api::DayStatsDto, String> {
-    state.store.activity_day_stats(&day).map_err(err)
+pub fn activity_stats(
+    state: State<'_, AppState>,
+    day: String,
+    group_by: Option<String>,
+) -> Result<lumen_api::DayStatsDto, String> {
+    state
+        .store
+        .activity_day_stats(&day, parse_group_by(group_by.as_deref()))
+        .map_err(err)
 }
 
 #[tauri::command]
-pub fn activity_range(state: State<'_, AppState>, from: String, to: String) -> Result<lumen_api::RangeStatsDto, String> {
-    state.store.activity_range_stats(&from, &to).map_err(err)
+pub fn activity_range(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+    group_by: Option<String>,
+) -> Result<lumen_api::RangeStatsDto, String> {
+    state
+        .store
+        .activity_range_stats(&from, &to, parse_group_by(group_by.as_deref()))
+        .map_err(err)
+}
+
+/// Parse the `group_by` invoke param: "site"/"domain"/"website" → Site,
+/// anything else (including None) → App (default).
+fn parse_group_by(s: Option<&str>) -> lumen_store::GroupBy {
+    match s.map(|x| x.to_ascii_lowercase()).as_deref() {
+        Some("site") | Some("domain") | Some("website") => lumen_store::GroupBy::Site,
+        _ => lumen_store::GroupBy::App,
+    }
 }
 
 #[tauri::command]

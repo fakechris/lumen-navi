@@ -57,10 +57,10 @@ export const api = {
     invoke<string>("generate_day_summary", { day: day ?? null }),
   activitySegments: (day: string) =>
     invoke<ActivitySegment[]>("activity_segments", { day }),
-  activityStats: (day: string) =>
-    invoke<DayStats>("activity_stats", { day }),
-  activityRange: (from: string, to: string) =>
-    invoke<RangeStats>("activity_range", { from, to }),
+  activityStats: (day: string, groupBy?: "app" | "site") =>
+    invoke<DayStats>("activity_stats", { day, groupBy }),
+  activityRange: (from: string, to: string, groupBy?: "app" | "site") =>
+    invoke<RangeStats>("activity_range", { from, to, groupBy }),
   activityAddManualSegment: (opts: {
     startedAt: string;
     endedAt: string;

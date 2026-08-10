@@ -12,7 +12,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::blob::BlobStore;
-use crate::categorization::{ActivityFields, CategoryRule, Classification, ProductivityLevel};
+use crate::categorization::{
+    ActivityFields, CategoryRule, Classification, GroupBy, ProductivityLevel,
+};
 use crate::enrichment::{self, BrewCaskRow};
 use crate::schema::{
     MIGRATE_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, MIGRATE_V5, MIGRATE_V6, MIGRATE_V7,
@@ -1260,7 +1262,11 @@ impl SqliteStore {
 
     /// Aggregated stats for one day — feeds the dashboard's stat cards, hour
     /// distribution chart, category breakdown, and top-apps ranking.
-    pub fn activity_day_stats(&self, day: &str) -> Result<DayStatsDto, StoreError> {
+    pub fn activity_day_stats(
+        &self,
+        day: &str,
+        group_by: GroupBy,
+    ) -> Result<DayStatsDto, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
 
         // Active/idle totals + context switches (count of active segments).
@@ -1323,54 +1329,64 @@ impl SqliteStore {
             by_category.push(r.map_err(StoreError::db)?);
         }
 
-        // Top apps — group by bundle identity so "Lumen Navi" and
-        // "lumen-navi-desktop" collapse; prefer a human display name.
-        // NOTE: SQLite does not allow GROUP_CONCAT(DISTINCT col, sep).
-        // Use a CTE to group by identity key, then collect distinct names per group.
-        let mut app_stmt = conn
-            .prepare(
-                r#"WITH grouped AS (
-                     SELECT COALESCE(bundle_id, app_name) AS gkey,
-                            bundle_id, app_name, duration_ms,
-                            category, productivity_level
-                     FROM activity_segments
-                     WHERE day = ?1 AND is_idle = 0 AND app_name IS NOT NULL
-                   )
-                   SELECT (SELECT GROUP_CONCAT(DISTINCT g2.app_name)
-                           FROM grouped g2 WHERE g2.gkey = grouped.gkey),
-                          grouped.bundle_id, grouped.total_ms,
-                          grouped.category, grouped.level, grouped.segs
-                   FROM (
-                     SELECT gkey, bundle_id, SUM(duration_ms) AS total_ms,
-                            MAX(category) AS category,
-                            MAX(productivity_level) AS level,
-                            COUNT(1) AS segs
-                     FROM grouped
-                     GROUP BY gkey
-                     HAVING SUM(duration_ms) > 0
-                   ) grouped
-                   ORDER BY grouped.total_ms DESC
-                   LIMIT 20"#,
-            )
-            .map_err(StoreError::db)?;
-        let app_rows = app_stmt
-            .query_map(params![day], |row| {
-                Ok(AppTotal {
-                    app_name: preferred_name_from_concat(
-                        &row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                    ),
-                    bundle_id: row.get(1)?,
-                    ms: row.get(2)?,
-                    category: row.get(3)?,
-                    productivity_level: row.get(4)?,
-                    segment_count: row.get(5)?,
+        // Top apps (or top sites when group_by == Site).
+        let top_apps = if group_by == GroupBy::Site {
+            // Site mode: aggregate browser time by registrable domain, extracted
+            // in Rust from each segment's full URL (SQLite can't reliably parse
+            // hosts). Mirrors the classifier's registrable_domain so a site row
+            // carries the same category a Domain rule would assign.
+            top_sites(&conn, "day = ?1", params![day], 20)?
+        } else {
+            // App mode (default): group by bundle identity so "Lumen Navi" and
+            // "lumen-navi-desktop" collapse; prefer a human display name.
+            // NOTE: SQLite does not allow GROUP_CONCAT(DISTINCT col, sep).
+            // Use a CTE to group by identity key, then collect distinct names per group.
+            let mut app_stmt = conn
+                .prepare(
+                    r#"WITH grouped AS (
+                         SELECT COALESCE(bundle_id, app_name) AS gkey,
+                                bundle_id, app_name, duration_ms,
+                                category, productivity_level
+                         FROM activity_segments
+                         WHERE day = ?1 AND is_idle = 0 AND app_name IS NOT NULL
+                       )
+                       SELECT (SELECT GROUP_CONCAT(DISTINCT g2.app_name)
+                               FROM grouped g2 WHERE g2.gkey = grouped.gkey),
+                              grouped.bundle_id, grouped.total_ms,
+                              grouped.category, grouped.level, grouped.segs
+                       FROM (
+                         SELECT gkey, bundle_id, SUM(duration_ms) AS total_ms,
+                                MAX(category) AS category,
+                                MAX(productivity_level) AS level,
+                                COUNT(1) AS segs
+                         FROM grouped
+                         GROUP BY gkey
+                         HAVING SUM(duration_ms) > 0
+                       ) grouped
+                       ORDER BY grouped.total_ms DESC
+                       LIMIT 20"#,
+                )
+                .map_err(StoreError::db)?;
+            let app_rows = app_stmt
+                .query_map(params![day], |row| {
+                    Ok(AppTotal {
+                        app_name: preferred_name_from_concat(
+                            &row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        ),
+                        bundle_id: row.get(1)?,
+                        ms: row.get(2)?,
+                        category: row.get(3)?,
+                        productivity_level: row.get(4)?,
+                        segment_count: row.get(5)?,
+                    })
                 })
-            })
-            .map_err(StoreError::db)?;
-        let mut top_apps = Vec::new();
-        for r in app_rows {
-            top_apps.push(r.map_err(StoreError::db)?);
-        }
+                .map_err(StoreError::db)?;
+            let mut out = Vec::new();
+            for r in app_rows {
+                out.push(r.map_err(StoreError::db)?);
+            }
+            out
+        };
 
         // Per-hour distribution (local-hour buckets from started_at).
         let mut hour_stmt = conn
@@ -1422,6 +1438,7 @@ impl SqliteStore {
         &self,
         from_day: &str,
         to_day: &str,
+        group_by: GroupBy,
     ) -> Result<RangeStatsDto, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
 
@@ -1550,51 +1567,62 @@ impl SqliteStore {
         }
         drop(day_stmt);
 
-        // Range-wide top apps (bundle identity + preferred display name).
-        let mut app_stmt = conn
-            .prepare(
-                r#"WITH grouped AS (
-                     SELECT COALESCE(bundle_id, app_name) AS gkey,
-                            bundle_id, app_name, duration_ms,
-                            category, productivity_level
-                     FROM activity_segments
-                     WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0 AND app_name IS NOT NULL
-                   )
-                   SELECT (SELECT GROUP_CONCAT(DISTINCT g2.app_name)
-                           FROM grouped g2 WHERE g2.gkey = grouped.gkey),
-                          grouped.bundle_id, grouped.total_ms,
-                          grouped.category, grouped.level, grouped.segs
-                   FROM (
-                     SELECT gkey, bundle_id, SUM(duration_ms) AS total_ms,
-                            MAX(category) AS category,
-                            MAX(productivity_level) AS level,
-                            COUNT(1) AS segs
-                     FROM grouped
-                     GROUP BY gkey
-                     HAVING SUM(duration_ms) > 0
-                   ) grouped
-                   ORDER BY grouped.total_ms DESC
-                   LIMIT 15"#,
-            )
-            .map_err(StoreError::db)?;
-        let app_rows = app_stmt
-            .query_map(params![from_day, to_day], |row| {
-                Ok(AppTotal {
-                    app_name: preferred_name_from_concat(
-                        &row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                    ),
-                    bundle_id: row.get(1)?,
-                    ms: row.get(2)?,
-                    category: row.get(3)?,
-                    productivity_level: row.get(4)?,
-                    segment_count: row.get(5)?,
+        // Range-wide top apps (or top sites when group_by == Site).
+        let top_apps = if group_by == GroupBy::Site {
+            top_sites(
+                &conn,
+                "day BETWEEN ?1 AND ?2",
+                params![from_day, to_day],
+                15,
+            )?
+        } else {
+            // App mode (default): bundle identity + preferred display name.
+            let mut app_stmt = conn
+                .prepare(
+                    r#"WITH grouped AS (
+                         SELECT COALESCE(bundle_id, app_name) AS gkey,
+                                bundle_id, app_name, duration_ms,
+                                category, productivity_level
+                         FROM activity_segments
+                         WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0 AND app_name IS NOT NULL
+                       )
+                       SELECT (SELECT GROUP_CONCAT(DISTINCT g2.app_name)
+                               FROM grouped g2 WHERE g2.gkey = grouped.gkey),
+                              grouped.bundle_id, grouped.total_ms,
+                              grouped.category, grouped.level, grouped.segs
+                       FROM (
+                         SELECT gkey, bundle_id, SUM(duration_ms) AS total_ms,
+                                MAX(category) AS category,
+                                MAX(productivity_level) AS level,
+                                COUNT(1) AS segs
+                         FROM grouped
+                         GROUP BY gkey
+                         HAVING SUM(duration_ms) > 0
+                       ) grouped
+                       ORDER BY grouped.total_ms DESC
+                       LIMIT 15"#,
+                )
+                .map_err(StoreError::db)?;
+            let app_rows = app_stmt
+                .query_map(params![from_day, to_day], |row| {
+                    Ok(AppTotal {
+                        app_name: preferred_name_from_concat(
+                            &row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        ),
+                        bundle_id: row.get(1)?,
+                        ms: row.get(2)?,
+                        category: row.get(3)?,
+                        productivity_level: row.get(4)?,
+                        segment_count: row.get(5)?,
+                    })
                 })
-            })
-            .map_err(StoreError::db)?;
-        let mut top_apps = Vec::new();
-        for r in app_rows {
-            top_apps.push(r.map_err(StoreError::db)?);
-        }
+                .map_err(StoreError::db)?;
+            let mut out = Vec::new();
+            for r in app_rows {
+                out.push(r.map_err(StoreError::db)?);
+            }
+            out
+        };
 
         // Range-wide category breakdown.
         let mut rcat_stmt = conn
@@ -2926,6 +2954,83 @@ fn preferred_name_from_concat(concat: &str) -> String {
     crate::categorization::preferred_display_name(&names)
 }
 
+/// Aggregate browser time by registrable domain. Fetches segments that have a
+/// URL (i.e. the frontmost app was a scriptable browser — PR #24), extracts the
+/// domain in Rust via `registrable_domain` (same logic the classifier uses for
+/// `MatchField::Domain`), and sums duration per domain. Non-browser segments
+/// (url IS NULL) are excluded — they have no site to attribute to.
+///
+/// `where_clause` + params let this serve both the day and range rollups
+/// (e.g. `"day = ?1"` vs `"day BETWEEN ?1 AND ?2"`).
+fn top_sites<P: rusqlite::Params>(
+    conn: &rusqlite::Connection,
+    where_clause: &str,
+    params: P,
+    limit: usize,
+) -> Result<Vec<AppTotal>, StoreError> {
+    use crate::categorization::registrable_domain;
+    use std::collections::BTreeMap;
+
+    // Fetch the raw browser segments. duration_ms > 0 mirrors the app query's
+    // HAVING filter; is_idle = 0 excludes away time.
+    let sql = format!(
+        r#"SELECT url, duration_ms, category, productivity_level
+           FROM activity_segments
+           WHERE {where_clause}
+             AND is_idle = 0
+             AND url IS NOT NULL AND url != ''
+             AND duration_ms > 0"#
+    );
+    let mut stmt = conn.prepare(&sql).map_err(StoreError::db)?;
+    // Per-domain accumulator: (total_ms, segment_count, last category/level seen).
+    // We take MAX(category)/MAX(level) to mirror the SQL app query's behavior.
+    let mut acc: BTreeMap<String, (i64, i64, Option<String>, Option<String>)> = BTreeMap::new();
+    let rows = stmt
+        .query_map(params, |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(StoreError::db)?;
+    for r in rows {
+        let (url, ms, category, level) = r.map_err(StoreError::db)?;
+        if let Some(domain) = registrable_domain(&url) {
+            let e = acc.entry(domain).or_insert((0, 0, None, None));
+            e.0 += ms;
+            e.1 += 1;
+            // MAX(category) semantics: keep the lexicographically larger non-null value.
+            match (&e.2, &category) {
+                (None, Some(_)) => e.2 = category,
+                (Some(a), Some(b)) if b > a => e.2 = category,
+                _ => {}
+            }
+            match (&e.3, &level) {
+                (None, Some(_)) => e.3 = level,
+                (Some(a), Some(b)) if b > a => e.3 = level,
+                _ => {}
+            }
+        }
+    }
+    let mut out: Vec<AppTotal> = acc
+        .into_iter()
+        .map(|(domain, (ms, segs, category, level))| AppTotal {
+            app_name: domain,
+            bundle_id: None,
+            ms,
+            category,
+            productivity_level: level,
+            segment_count: segs,
+        })
+        .collect();
+    // Sort by duration desc, take top N.
+    out.sort_by(|a, b| b.ms.cmp(&a.ms));
+    out.truncate(limit);
+    Ok(out)
+}
+
 /// Fold `activity.focus.v1` events into continuous `activity_segments` rows.
 ///
 /// Model (ActivityWatch-style):
@@ -4254,7 +4359,9 @@ mod tests {
             .with_timezone(&chrono::Local)
             .format("%Y-%m-%d")
             .to_string();
-        let stats = store.activity_day_stats(&day).unwrap();
+        let stats = store
+            .activity_day_stats(&day, GroupBy::App)
+            .unwrap();
 
         let names: Vec<&str> = stats.top_apps.iter().map(|a| a.app_name.as_str()).collect();
         assert!(

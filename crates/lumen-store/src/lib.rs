@@ -13,7 +13,7 @@ mod sqlite;
 pub use categorization::{
     classify, classify_from_itunes_genre, classify_from_metadata_texts, classify_from_text_hint,
     classify_ls_application_category, default_rules, preferred_display_name, ActivityFields,
-    CategoryRule, Classification, MatchField, ProductivityLevel,
+    CategoryRule, Classification, GroupBy, MatchField, ProductivityLevel,
 };
 pub use enrichment::{cask_token_candidates, guess_cask_token, EnrichmentHit};
 pub use rule_engine::{
