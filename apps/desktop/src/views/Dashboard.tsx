@@ -654,6 +654,22 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
 function HourDistribution({ stats }: { stats: DayStats }) {
   const ref = useRef<HTMLDivElement>(null);
   const data = stats.by_hour;
+  const [tooltip, setTooltip] = useState<{
+    x: number; y: number; hour: number; cats: { category: string; ms: number }[]; total: number;
+  } | null>(null);
+
+  // Pre-bucket by_hour_category by hour for hover lookup.
+  const byHourMap = useMemo(() => {
+    const m = new Map<number, { category: string; ms: number }[]>();
+    for (const h of stats.by_hour_category ?? []) {
+      const arr = m.get(h.hour) ?? [];
+      arr.push({ category: h.category, ms: h.ms });
+      m.set(h.hour, arr);
+    }
+    // sort each hour's categories desc
+    for (const arr of m.values()) arr.sort((a, b) => b.ms - a.ms);
+    return m;
+  }, [stats.by_hour_category]);
 
   useEffect(() => {
     const el = ref.current;
@@ -689,7 +705,30 @@ function HourDistribution({ stats }: { stats: DayStats }) {
       .attr("height", (d) => innerH - y(d))
       .attr("rx", 2)
       .attr("fill", accent)
-      .attr("opacity", 0.9);
+      .attr("opacity", 0.9)
+      .style("cursor", "pointer")
+      .on("mouseenter", function (event, d) {
+        showTip(event, d);
+      })
+      .on("mousemove", function (event, d) {
+        showTip(event, d);
+      })
+      .on("mouseleave", function () {
+        setTooltip(null);
+      });
+
+    function showTip(event: { offsetX: number; clientX: number; clientY: number }, ms: number) {
+      const rect = el!.getBoundingClientRect();
+      // Which hour bar is under the cursor? barW = innerW / 24.
+      const hour = Math.min(23, Math.max(0, Math.floor(event.offsetX / barW)));
+      setTooltip({
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
+        hour,
+        cats: byHourMap.get(hour) ?? [],
+        total: ms,
+      });
+    }
 
     // Hour labels every 3h
     g.selectAll("text.h")
@@ -712,9 +751,45 @@ function HourDistribution({ stats }: { stats: DayStats }) {
       .attr("stroke", gridColor);
 
     return () => { svg.remove(); };
-  }, [data]);
+  }, [data, byHourMap]);
 
-  return <div ref={ref} />;
+  return (
+    <div style={{ position: "relative" }}>
+      <div ref={ref} />
+      {tooltip && (
+        <div style={{
+          position: "absolute",
+          left: tooltip.x + 12,
+          top: tooltip.y - 8,
+          transform: "translateY(-100%)",
+          background: "var(--surface-elevated, var(--surface))",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius-md)",
+          padding: "8px 10px",
+          fontSize: "var(--text-xs)",
+          pointerEvents: "none",
+          whiteSpace: "nowrap",
+          boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
+          zIndex: 10,
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            {String(tooltip.hour).padStart(2, "0")}:00 · {fmtDuration(tooltip.total)}
+          </div>
+          {tooltip.cats.length === 0 ? (
+            <div style={{ color: "var(--text-tertiary)" }}>无分类明细</div>
+          ) : (
+            tooltip.cats.slice(0, 6).map((c) => (
+              <div key={c.category} style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text-secondary)" }}>
+                <span style={{ width: 7, height: 7, borderRadius: "50%", background: categoryColor(c.category), flexShrink: 0 }} />
+                <span style={{ flex: 1 }}>{c.category}</span>
+                <span style={{ fontFamily: "var(--font-mono)" }}>{fmtDuration(c.ms)}</span>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // --- Top apps ranking (list with duration bars) --------------------------

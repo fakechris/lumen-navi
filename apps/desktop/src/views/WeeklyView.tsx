@@ -190,6 +190,9 @@ function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }
 
 function DailyStackChart({ stats }: { stats: RangeStats }) {
   const ref = useRef<HTMLDivElement>(null);
+  const [tooltip, setTooltip] = useState<{
+    x: number; y: number; day: string; cats: { category: string; ms: number }[]; total: number;
+  } | null>(null);
 
   useEffect(() => {
     const el = ref.current;
@@ -217,12 +220,12 @@ function DailyStackChart({ stats }: { stats: RangeStats }) {
     }
 
     // Build stacked data per day.
+    type DayStackRow = { day: string; byCat: Map<string, number> };
     const stack = d3.stack<string, DayStackRow, string>()
       .keys(catOrder)
       .value((d, key) => d.byCat.get(key) ?? 0)
       .order(d3.stackOrderNone)
       .offset(d3.stackOffsetNone);
-    type DayStackRow = { day: string; byCat: Map<string, number> };
     const rows: DayStackRow[] = stats.days.map((d) => ({
       day: d.day,
       byCat: new Map(d.by_category.map((c) => [c.category, c.ms])),
@@ -254,7 +257,37 @@ function DailyStackChart({ stats }: { stats: RangeStats }) {
       .attr("y", (d) => y(d.seg[1]))
       .attr("width", x.bandwidth())
       .attr("height", (d) => Math.max(0, y(d.seg[0]) - y(d.seg[1])))
-      .attr("rx", 2);
+      .attr("rx", 2)
+      .style("cursor", "pointer")
+      .on("mouseenter", function (event, d) {
+        const day = d_segDay(d.seg);
+        const dayRow = stats.days.find((dr) => dr.day === day);
+        if (!dayRow) return;
+        const rect = el.getBoundingClientRect();
+        setTooltip({
+          x: event.clientX - rect.left,
+          y: event.clientY - rect.top,
+          day,
+          cats: [...dayRow.by_category].sort((a, b) => b.ms - a.ms),
+          total: dayRow.total_active_ms,
+        });
+      })
+      .on("mousemove", function (event, d) {
+        const day = d_segDay(d.seg);
+        const dayRow = stats.days.find((dr) => dr.day === day);
+        if (!dayRow) return;
+        const rect = el.getBoundingClientRect();
+        setTooltip({
+          x: event.clientX - rect.left,
+          y: event.clientY - rect.top,
+          day,
+          cats: [...dayRow.by_category].sort((a, b) => b.ms - a.ms),
+          total: dayRow.total_active_ms,
+        });
+      })
+      .on("mouseleave", function () {
+        setTooltip(null);
+      });
 
     // X-axis labels (weekday + month/day).
     g.selectAll("text.x")
@@ -286,7 +319,39 @@ function DailyStackChart({ stats }: { stats: RangeStats }) {
     return () => { svg.remove(); };
   }, [stats]);
 
-  return <div ref={ref} />;
+  return (
+    <div style={{ position: "relative" }}>
+      <div ref={ref} />
+      {tooltip && (
+        <div style={{
+          position: "absolute",
+          left: tooltip.x + 12,
+          top: tooltip.y - 8,
+          transform: "translateY(-100%)",
+          background: "var(--surface-elevated, var(--surface))",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius-md)",
+          padding: "8px 10px",
+          fontSize: "var(--text-xs)",
+          pointerEvents: "none",
+          whiteSpace: "nowrap",
+          boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
+          zIndex: 10,
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            {weekdayLabel(tooltip.day)} · 共 {fmtDuration(tooltip.total)}
+          </div>
+          {tooltip.cats.slice(0, 6).map((c) => (
+            <div key={c.category} style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text-secondary)" }}>
+              <span style={{ width: 7, height: 7, borderRadius: "50%", background: categoryColor(c.category), flexShrink: 0 }} />
+              <span style={{ flex: 1 }}>{c.category}</span>
+              <span style={{ fontFamily: "var(--font-mono)" }}>{fmtDuration(c.ms)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // d3 stack segment is [number, number] with a `.data` property carrying the row.

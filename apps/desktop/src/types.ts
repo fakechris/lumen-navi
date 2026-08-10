@@ -36,6 +36,12 @@ export interface AppTotal {
   title?: string | null;
 }
 
+export interface HourCategoryTotal {
+  hour: number; // 0..24, local
+  category: string;
+  ms: number;
+}
+
 export interface DayStats {
   day: string;
   total_active_ms: number;
@@ -45,6 +51,7 @@ export interface DayStats {
   by_category: CategoryTotal[];
   top_apps: AppTotal[];
   by_hour: number[];
+  by_hour_category?: HourCategoryTotal[];
 }
 
 export interface DayRollup {

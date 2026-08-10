@@ -1389,10 +1389,13 @@ impl SqliteStore {
             out
         };
 
-        // Per-hour distribution (local-hour buckets from started_at).
+        // Per-hour distribution (local-hour buckets from started_at). Also
+        // accumulates by (hour, category) so the hourly bar tooltip can show
+        // "15:00 · Development 30m / Browsing 15m".
         let mut hour_stmt = conn
             .prepare(
-                r#"SELECT started_at, duration_ms, is_idle FROM activity_segments
+                r#"SELECT started_at, duration_ms, is_idle, COALESCE(category, 'Uncategorized')
+                   FROM activity_segments
                    WHERE day = ?1"#,
             )
             .map_err(StoreError::db)?;
@@ -1401,12 +1404,15 @@ impl SqliteStore {
                 let ts: String = row.get(0)?;
                 let ms: i64 = row.get(1)?;
                 let is_idle: bool = row.get::<_, i64>(2)? != 0;
-                Ok((ts, ms, is_idle))
+                let category: String = row.get(3)?;
+                Ok((ts, ms, is_idle, category))
             })
             .map_err(StoreError::db)?;
         let mut by_hour = [0i64; 24];
+        use std::collections::BTreeMap;
+        let mut by_hour_cat: BTreeMap<(usize, String), i64> = BTreeMap::new();
         for r in hour_rows {
-            let (ts, ms, is_idle) = r.map_err(StoreError::db)?;
+            let (ts, ms, is_idle, category) = r.map_err(StoreError::db)?;
             if is_idle {
                 continue;
             }
@@ -1415,10 +1421,19 @@ impl SqliteStore {
                 if let Ok(h) = hour.parse::<usize>() {
                     if h < 24 {
                         by_hour[h] = by_hour[h].saturating_add(ms);
+                        *by_hour_cat.entry((h, category)).or_insert(0) += ms;
                     }
                 }
             }
         }
+        let by_hour_category: Vec<lumen_api::HourCategoryTotal> = by_hour_cat
+            .into_iter()
+            .map(|((hour, category), ms)| lumen_api::HourCategoryTotal {
+                hour: hour as u8,
+                category,
+                ms,
+            })
+            .collect();
 
         Ok(DayStatsDto {
             day: day.to_string(),
@@ -1429,6 +1444,7 @@ impl SqliteStore {
             by_category,
             top_apps,
             by_hour,
+            by_hour_category,
         })
     }
 
