@@ -707,12 +707,16 @@ export default function App() {
                         ? "等待扩展"
                         : browserPairing?.configured
                           ? "等待本地服务"
-                          : "未配对"
+                          : cfg?.screen
+                            ? "无扩展"
+                            : "未配对"
                   }
                   hint={
                     health?.browser
                       ? `${health.browser.accepted_events} events · ${fmtTime(health.browser.last_ingest_at)}`
-                      : "扩展仍可独立采集"
+                      : cfg?.screen
+                        ? "已通过前台 AppleScript 记录每网站时长（Safari/Chrome/Comet 等）；装扩展可补充 Firefox / 详情"
+                        : "扩展仍可独立采集"
                   }
                 />
               </div>
@@ -1001,12 +1005,16 @@ export default function App() {
                           ? "Navi 已就绪，等待扩展发送数据"
                           : browserPairing?.configured
                             ? "配对已配置；开启浏览器通道后提供同步 API"
-                            : "扩展尚未与 Navi 配对"
+                            : cfg?.screen
+                              ? "无扩展模式：前台 AppleScript 已在记录每网站时长（可选装扩展补充 Firefox / 访问详情）"
+                              : "扩展尚未与 Navi 配对"
                     }
                   />
                   <p className="meta">
-                    扩展始终先写自己的 IndexedDB。只有填入下方地址与 token 后，Navi
-                    才能看到同步事件；未配对时 App 无法读取扩展内部数据。
+                    每网站时长已通过前台 AppleScript 自动记录（Safari / Chrome / Comet
+                    等，无需扩展）。下方为可选的扩展同步通道：扩展先写自己的
+                    IndexedDB，填入地址与 token 后 Navi 才能看到同步事件，可补充
+                    Firefox 支持与访问详情（滚动深度、可见时长等）。
                   </p>
                   {browserPairing?.configured && (
                     <>
