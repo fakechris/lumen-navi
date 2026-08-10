@@ -30,7 +30,7 @@ use lumen_store::{EventStore, SCHEMA_VERSION, SqliteStore};
 use lumen_types::{SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
-use tracing::{info, warn, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 const CUA_SOCKET_ENV: &str = "LUMEN_CUA_SOCKET";
@@ -254,37 +254,59 @@ async fn main() -> Result<()> {
     };
 
     // --- Local control API ---
-    let _api_handle = if config.api.enabled {
-        control_server::spawn(
-            &config.api.bind,
-            control_server::ControlState::new(
-                Arc::clone(&store),
-                config.privacy.paused,
-                config.privacy.closed_eyes,
-                config.retention.max_blob_mb.saturating_mul(1024 * 1024),
-                vec![
-                    screen_status.clone(),
-                    audio_status.clone(),
-                    SourceStatus {
-                        id: "browser".into(),
-                        enabled: config.sources.browser,
-                        running: config.sources.browser
-                            && !config.browser.effective_ingest_token().is_empty(),
-                        last_error: None,
-                    },
-                ],
-                control_server::BrowserRuntimeConfig {
+    // Two listeners: a Unix socket (primary — the shell connects here, no TCP
+    // port to conflict over) and TCP loopback (best-effort — for the browser
+    // extension, which can't open sockets). Socket bind failure is fatal
+    // (exit 1 → supervisor alert + restart); TCP failure is non-fatal.
+    let _api_handle: Option<tokio::task::JoinHandle<()>> = if config.api.enabled {
+        let control_state = control_server::ControlState::new(
+            Arc::clone(&store),
+            config.privacy.paused,
+            config.privacy.closed_eyes,
+            config.retention.max_blob_mb.saturating_mul(1024 * 1024),
+            vec![
+                screen_status.clone(),
+                audio_status.clone(),
+                SourceStatus {
+                    id: "browser".into(),
                     enabled: config.sources.browser,
-                    token: config.browser.effective_ingest_token(),
-                    policy: BrowserIngestPolicy {
-                        content_allow_hosts: config.browser.content_allow_hosts.clone(),
-                        excluded_hosts: config.browser.excluded_hosts.clone(),
-                        max_batch_size: config.browser.max_batch_size,
-                        max_artifact_bytes: config.browser.max_artifact_bytes,
-                    },
+                    running: config.sources.browser
+                        && !config.browser.effective_ingest_token().is_empty(),
+                    last_error: None,
                 },
-            ),
-        )
+            ],
+            control_server::BrowserRuntimeConfig {
+                enabled: config.sources.browser,
+                token: config.browser.effective_ingest_token(),
+                policy: BrowserIngestPolicy {
+                    content_allow_hosts: config.browser.content_allow_hosts.clone(),
+                    excluded_hosts: config.browser.excluded_hosts.clone(),
+                    max_batch_size: config.browser.max_batch_size,
+                    max_artifact_bytes: config.browser.max_artifact_bytes,
+                },
+            },
+        );
+
+        let socket_path = config.data_dir.join("daemon.sock");
+        // Fatal on bind failure: the shell depends on this socket.
+        match control_server::spawn(&socket_path, control_state.clone()) {
+            Ok(handle) => {
+                // Best-effort TCP listener for the browser extension. Tries
+                // 7420, then increments; writes actual port to daemon.tcp_port.
+                let port_file = config.data_dir.join("daemon.tcp_port");
+                let _ = control_server::spawn_tcp(
+                    &config.api.bind,
+                    20,
+                    &port_file,
+                    control_state,
+                );
+                Some(handle)
+            }
+            Err(e) => {
+                error!(error = %e, "fatal: control socket bind failed; exiting so supervisor can restart");
+                std::process::exit(1);
+            }
+        }
     } else {
         None
     };
