@@ -35,6 +35,23 @@ function todayStr(): string {
   return `${y}-${m}-${day}`;
 }
 
+/** Format a YYYY-MM-DD for display, e.g. "8月9日 周六". */
+function prettyDay(dayStr: string): string {
+  const d = new Date(dayStr + "T00:00:00");
+  const weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${weekdays[d.getDay()]}`;
+}
+
+/** Shift a YYYY-MM-DD by `delta` days (local). Returns YYYY-MM-DD. */
+function shiftDay(dayStr: string, delta: number): string {
+  const d = new Date(dayStr + "T00:00:00");
+  d.setDate(d.getDate() + delta);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 /** Map a category name to one of the 8 design-system category palette tokens.
  *  Deterministic so the same category always gets the same color. */
 const PALETTE_SIZE = 8;
@@ -75,7 +92,7 @@ export function registrableDomain(url: string | null | undefined): string | null
 // --- main view ------------------------------------------------------------
 
 export function DashboardView() {
-  const [day] = useState(todayStr());
+  const [day, setDay] = useState(todayStr());
   const [view, setView] = useState<"today" | "week">("today");
   const [segments, setSegments] = useState<ActivitySegment[] | null>(null);
   const [stats, setStats] = useState<DayStats | null>(null);
@@ -130,9 +147,34 @@ export function DashboardView() {
 
       {view === "today" && (
         <>
+      {/* Day navigation: prev / label / next / today */}
+      <div className="row" style={{ alignItems: "center", gap: 8 }}>
+        <button
+          className="btn"
+          onClick={() => setDay((d) => shiftDay(d, -1))}
+          aria-label="前一天"
+          style={{ padding: "4px 10px", minWidth: 0 }}
+        >‹</button>
+        <span style={{ fontSize: "var(--text-sm)", fontWeight: "var(--weight-semibold)", minWidth: 110, textAlign: "center" }}>
+          {prettyDay(day)}
+        </span>
+        <button
+          className="btn"
+          onClick={() => setDay((d) => shiftDay(d, 1))}
+          disabled={day >= todayStr()}
+          aria-label="后一天"
+          style={{ padding: "4px 10px", minWidth: 0 }}
+        >›</button>
+        {day !== todayStr() && (
+          <button className="btn" onClick={() => setDay(todayStr())} style={{ padding: "4px 10px", fontSize: "var(--text-xs)" }}>
+            今天
+          </button>
+        )}
+      </div>
+
       {loading && (
         <Card pad={16}>
-          <div style={{ color: "var(--text-tertiary)" }}>加载今日活动…</div>
+          <div style={{ color: "var(--text-tertiary)" }}>加载活动…（{prettyDay(day)}）</div>
         </Card>
       )}
 
