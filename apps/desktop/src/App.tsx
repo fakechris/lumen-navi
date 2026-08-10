@@ -523,6 +523,26 @@ export default function App() {
     return () => unlisten?.();
   }, [togglePause]);
 
+  // Daemon crash alert: the supervisor (Rust) emits `daemon://exited` when the
+  // daemon process dies unexpectedly. Before this, a SIGSEGV was invisible —
+  // the UI just silently showed "本地服务未运行" with no explanation. The
+  // supervisor also auto-restarts; this banner just tells the user what
+  // happened. Cleared on next successful refresh.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<number>("daemon://exited", (event) => {
+      const crashes = event.payload;
+      setError(
+        crashes > 5
+          ? `本地服务反复崩溃（已尝试 ${crashes} 次），已停止自动重启。请检查日志或重启 App。`
+          : `本地服务意外退出（第 ${crashes} 次），正在自动重启…`
+      );
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
+
   async function onSearch() {
     setBusy(true);
     try {
