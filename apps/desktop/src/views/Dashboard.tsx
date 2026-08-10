@@ -100,6 +100,8 @@ export function DashboardView() {
   // Top-apps grouping: "app" (bundle identity, default) or "site" (domain).
   // Only affects the top-apps ranking, not the timeline/categories.
   const [groupBy, setGroupBy] = useState<"app" | "site">("app");
+  // Calendar popover open state for the day picker.
+  const [calendarOpen, setCalendarOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -147,17 +149,22 @@ export function DashboardView() {
 
       {view === "today" && (
         <>
-      {/* Day navigation: prev / label / next / today */}
-      <div className="row" style={{ alignItems: "center", gap: 8 }}>
+      {/* Day navigation: prev / label (click for calendar) / next / today */}
+      <div className="row" style={{ alignItems: "center", gap: 8, position: "relative" }}>
         <button
           className="btn"
           onClick={() => setDay((d) => shiftDay(d, -1))}
           aria-label="前一天"
           style={{ padding: "4px 10px", minWidth: 0 }}
         >‹</button>
-        <span style={{ fontSize: "var(--text-sm)", fontWeight: "var(--weight-semibold)", minWidth: 110, textAlign: "center" }}>
-          {prettyDay(day)}
-        </span>
+        <button
+          className="btn"
+          onClick={() => setCalendarOpen((v) => !v)}
+          style={{ fontSize: "var(--text-sm)", fontWeight: "var(--weight-semibold)", minWidth: 110, textAlign: "center", padding: "4px 8px" }}
+          aria-label="选择日期"
+        >
+          {prettyDay(day)} 📅
+        </button>
         <button
           className="btn"
           onClick={() => setDay((d) => shiftDay(d, 1))}
@@ -169,6 +176,13 @@ export function DashboardView() {
           <button className="btn" onClick={() => setDay(todayStr())} style={{ padding: "4px 10px", fontSize: "var(--text-xs)" }}>
             今天
           </button>
+        )}
+        {calendarOpen && (
+          <CalendarPicker
+            selected={day}
+            onPick={(d) => { setDay(d); setCalendarOpen(false); }}
+            onClose={() => setCalendarOpen(false)}
+          />
         )}
       </div>
 
@@ -277,6 +291,93 @@ export function DashboardView() {
   );
 }
 
+/**
+ * Lightweight month calendar popover. Renders one month at a time with
+ * prev/next month nav; clicking a day (not in the future) calls onPick.
+ * Closes on outside click (a backdrop) or Escape.
+ */
+function CalendarPicker({
+  selected,
+  onPick,
+  onClose,
+}: {
+  selected: string; // YYYY-MM-DD
+  onPick: (day: string) => void;
+  onClose: () => void;
+}) {
+  // The month being viewed, anchored on the selected day's month initially.
+  const [viewYear, setViewYear] = useState(() => new Date(selected + "T00:00:00").getFullYear());
+  const [viewMonth, setViewMonth] = useState(() => new Date(selected + "T00:00:00").getMonth());
+  const today = todayStr();
+
+  const firstWeekday = new Date(viewYear, viewMonth, 1).getDay(); // 0=Sun
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+  const weekdayLabels = ["日", "一", "二", "三", "四", "五", "六"];
+  const monthLabel = `${viewYear}年${viewMonth + 1}月`;
+
+  const shiftMonth = (delta: number) => {
+    const d = new Date(viewYear, viewMonth + delta, 1);
+    setViewYear(d.getFullYear());
+    setViewMonth(d.getMonth());
+  };
+
+  const cells: (number | null)[] = [];
+  for (let i = 0; i < firstWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const fmt = (d: number) =>
+    `${viewYear}-${String(viewMonth + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+  return (
+    <>
+      {/* backdrop: click anywhere closes */}
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 50 }} />
+      <div
+        onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}
+        style={{
+          position: "absolute", top: "100%", left: 0, marginTop: 4, zIndex: 51,
+          background: "var(--surface-elevated, var(--surface))",
+          border: "1px solid var(--border)",
+          borderRadius: "var(--radius-md)",
+          boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+          padding: 12, width: 240,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+          <button className="btn" onClick={() => shiftMonth(-1)} style={{ padding: "2px 8px", minWidth: 0 }}>‹</button>
+          <span style={{ fontSize: "var(--text-sm)", fontWeight: "var(--weight-semibold)" }}>{monthLabel}</span>
+          <button className="btn" onClick={() => shiftMonth(1)} style={{ padding: "2px 8px", minWidth: 0 }}>›</button>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 2 }}>
+          {weekdayLabels.map((w) => (
+            <div key={w} style={{ textAlign: "center", fontSize: 10, color: "var(--text-tertiary)", padding: "2px 0" }}>{w}</div>
+          ))}
+          {cells.map((d, i) => {
+            if (d === null) return <div key={`b${i}`} />;
+            const ds = fmt(d);
+            const isFuture = ds > today;
+            const isSelected = ds === selected;
+            return (
+              <button
+                key={ds}
+                disabled={isFuture}
+                onClick={() => onPick(ds)}
+                style={{
+                  padding: "5px 0", fontSize: "var(--text-xs)",
+                  cursor: isFuture ? "not-allowed" : "pointer",
+                  borderRadius: "var(--radius-sm)", border: "none",
+                  background: isSelected ? "var(--accent)" : "transparent",
+                  color: isSelected ? "#fff" : isFuture ? "var(--text-tertiary)" : "var(--text)",
+                  fontWeight: isSelected ? "var(--weight-semibold)" : "normal",
+                }}
+              >{d}</button>
+            );
+          })}
+        </div>
+      </div>
+    </>
+  );
+}
 function ViewTab({ active, onClick, children, first }: {
   active: boolean; onClick: () => void; children: React.ReactNode; first?: boolean;
 }) {
