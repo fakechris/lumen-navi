@@ -214,6 +214,11 @@ pub struct AppTotal {
     pub category: Option<String>,
     pub productivity_level: Option<String>,
     pub segment_count: i64,
+    /// In "group by site" mode: a representative page title for the domain
+    /// (the title from the longest-held segment), so the UI can show
+    /// "DeepSeek Platform" instead of just "deepseek.com". None in app mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// One day's roll-up inside a range query (the weekly view payload).

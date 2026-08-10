@@ -258,7 +258,7 @@ export function DashboardView() {
                 ))}
               </div>
             </div>
-            <TopApps stats={stats!} />
+            <TopApps stats={stats!} groupBy={groupBy} />
           </Card>
         </>
       )}
@@ -618,14 +618,21 @@ function HourDistribution({ stats }: { stats: DayStats }) {
 
 // --- Top apps ranking (list with duration bars) --------------------------
 
-function TopApps({ stats }: { stats: DayStats }) {
+function TopApps({ stats, groupBy = "app" }: { stats: DayStats; groupBy?: "app" | "site" }) {
   const maxMs = Math.max(1, ...stats.top_apps.map((a) => a.ms));
   if (stats.top_apps.length === 0) {
     return <div style={{ color: "var(--text-tertiary)", fontSize: "var(--text-sm)" }}>暂无数据</div>;
   }
   return (
     <div className="stack">
-      {stats.top_apps.map((app, i) => (
+      {stats.top_apps.map((app, i) => {
+        // Site mode: prefer the representative page title as the primary label,
+        // show the domain as a secondary line (mirrors ActivityWatch's
+        // title-first grouping). App mode: just the app name.
+        const useTitle = groupBy === "site" && app.title && app.title.trim();
+        const primary = useTitle ? app.title! : app.app_name;
+        const secondary = useTitle ? app.app_name : null;
+        return (
         <div key={`${app.app_name}-${i}`} style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{
             width: 8, height: 8, borderRadius: "50%",
@@ -640,7 +647,7 @@ function TopApps({ stats }: { stats: DayStats }) {
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
-              }}>{app.app_name}</span>
+              }}>{primary}</span>
               <span style={{
                 fontSize: "var(--text-xs)",
                 fontFamily: "var(--font-mono)",
@@ -648,6 +655,17 @@ function TopApps({ stats }: { stats: DayStats }) {
                 flexShrink: 0,
               }}>{fmtDuration(app.ms)}</span>
             </div>
+            {secondary && (
+              <div style={{
+                fontSize: "var(--text-xs)",
+                color: "var(--text-tertiary)",
+                marginTop: 1,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                fontFamily: "var(--font-mono)",
+              }}>{secondary}</div>
+            )}
             <div style={{
               height: 4,
               borderRadius: 2,
@@ -671,7 +689,8 @@ function TopApps({ stats }: { stats: DayStats }) {
             )}
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

@@ -32,6 +32,8 @@ export interface AppTotal {
   category: string | null;
   productivity_level: string | null;
   segment_count: number;
+  /** In site mode: a representative page title for the domain. */
+  title?: string | null;
 }
 
 export interface DayStats {

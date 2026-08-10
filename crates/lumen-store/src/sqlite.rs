@@ -1378,6 +1378,7 @@ impl SqliteStore {
                         category: row.get(3)?,
                         productivity_level: row.get(4)?,
                         segment_count: row.get(5)?,
+                        title: None,
                     })
                 })
                 .map_err(StoreError::db)?;
@@ -1614,6 +1615,7 @@ impl SqliteStore {
                         category: row.get(3)?,
                         productivity_level: row.get(4)?,
                         segment_count: row.get(5)?,
+                        title: None,
                     })
                 })
                 .map_err(StoreError::db)?;
@@ -2972,9 +2974,10 @@ fn top_sites<P: rusqlite::Params>(
     use std::collections::BTreeMap;
 
     // Fetch the raw browser segments. duration_ms > 0 mirrors the app query's
-    // HAVING filter; is_idle = 0 excludes away time.
+    // HAVING filter; is_idle = 0 excludes away time. window_title feeds the
+    // representative-title label (see below).
     let sql = format!(
-        r#"SELECT url, duration_ms, category, productivity_level
+        r#"SELECT url, duration_ms, category, productivity_level, window_title
            FROM activity_segments
            WHERE {where_clause}
              AND is_idle = 0
@@ -2982,9 +2985,15 @@ fn top_sites<P: rusqlite::Params>(
              AND duration_ms > 0"#
     );
     let mut stmt = conn.prepare(&sql).map_err(StoreError::db)?;
-    // Per-domain accumulator: (total_ms, segment_count, last category/level seen).
-    // We take MAX(category)/MAX(level) to mirror the SQL app query's behavior.
-    let mut acc: BTreeMap<String, (i64, i64, Option<String>, Option<String>)> = BTreeMap::new();
+    // Per-domain accumulator:
+    //   (total_ms, segment_count, category, level, best_title_ms, best_title)
+    // MAX(category)/MAX(level) mirror the SQL app query. best_title holds the
+    // window_title from the longest-held segment for that domain — a stable,
+    // representative label that's far more readable than the bare domain.
+    let mut acc: BTreeMap<
+        String,
+        (i64, i64, Option<String>, Option<String>, i64, Option<String>),
+    > = BTreeMap::new();
     let rows = stmt
         .query_map(params, |row| {
             Ok((
@@ -2992,16 +3001,18 @@ fn top_sites<P: rusqlite::Params>(
                 row.get::<_, i64>(1)?,
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })
         .map_err(StoreError::db)?;
     for r in rows {
-        let (url, ms, category, level) = r.map_err(StoreError::db)?;
+        let (url, ms, category, level, title) = r.map_err(StoreError::db)?;
         if let Some(domain) = registrable_domain(&url) {
-            let e = acc.entry(domain).or_insert((0, 0, None, None));
+            let e = acc
+                .entry(domain)
+                .or_insert((0, 0, None, None, 0, None));
             e.0 += ms;
             e.1 += 1;
-            // MAX(category) semantics: keep the lexicographically larger non-null value.
             match (&e.2, &category) {
                 (None, Some(_)) => e.2 = category,
                 (Some(a), Some(b)) if b > a => e.2 = category,
@@ -3012,17 +3023,23 @@ fn top_sites<P: rusqlite::Params>(
                 (Some(a), Some(b)) if b > a => e.3 = level,
                 _ => {}
             }
+            // Keep the title from the longest segment (most representative).
+            if ms >= e.4 && title.as_deref().map(|t| !t.is_empty()).unwrap_or(false) {
+                e.4 = ms;
+                e.5 = title;
+            }
         }
     }
     let mut out: Vec<AppTotal> = acc
         .into_iter()
-        .map(|(domain, (ms, segs, category, level))| AppTotal {
+        .map(|(domain, (ms, segs, category, level, _best_ms, title))| AppTotal {
             app_name: domain,
             bundle_id: None,
             ms,
             category,
             productivity_level: level,
             segment_count: segs,
+            title,
         })
         .collect();
     // Sort by duration desc, take top N.
