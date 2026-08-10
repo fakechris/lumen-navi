@@ -92,13 +92,23 @@ pub struct ActivityFields<'a> {
 /// aggregation so both use identical logic. Deliberately simple — not a full
 /// Public Suffix List, good enough for the common cases.
 pub(crate) fn registrable_domain(url: &str) -> Option<String> {
-    // Strip scheme, take the host, drop the first subdomain label when
-    // there are 3+ parts (www.github.com → github.com). Deliberately
-    // simple — not a full PSL, good enough for the common cases.
+    // Strip scheme, take the authority, drop port/path/query.
     let no_scheme = url.split("://").nth(1).unwrap_or(url);
-    let host = no_scheme.split('/').next()?;
-    let host = host.split('?').next()?;
-    let host = host.to_ascii_lowercase();
+    let authority = no_scheme.split('/').next()?;
+    let authority = authority.split('?').next()?;
+    let host = authority.rsplit(':').nth(1).unwrap_or(authority).to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    // IPv4 literal (e.g. 127.0.0.1) — keep whole, PSL doesn't apply. The old
+    // code split it on '.' and returned "0.1" (the last two octets) — a bug.
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Some(host);
+    }
+    // localhost / single-label host (intranet, *.local) — no registrable domain.
+    if !host.contains('.') {
+        return Some(host);
+    }
     let parts: Vec<&str> = host.split('.').collect();
     match parts.len() {
         0 => None,
@@ -380,6 +390,28 @@ mod tests {
         assert_eq!(
             registrable_domain("https://stackoverflow.com/q/1"),
             Some("stackoverflow.com".into())
+        );
+    }
+
+    #[test]
+    fn domain_extraction_handles_ip_localhost_and_port() {
+        // Regression: http://127.0.0.1:3080 used to return "0.1" (split the IP
+        // on dots, took last two octets). IP literals must stay whole.
+        assert_eq!(
+            registrable_domain("http://127.0.0.1:3080/"),
+            Some("127.0.0.1".into())
+        );
+        assert_eq!(
+            registrable_domain("https://192.168.1.5:8080/x"),
+            Some("192.168.1.5".into())
+        );
+        // localhost / single-label host — no registrable domain to extract.
+        assert_eq!(registrable_domain("http://localhost:3000/"), Some("localhost".into()));
+        assert_eq!(registrable_domain("http://intranet/page"), Some("intranet".into()));
+        // Port stripped from a normal domain.
+        assert_eq!(
+            registrable_domain("https://example.com:8443/p"),
+            Some("example.com".into())
         );
     }
 
