@@ -410,7 +410,7 @@ export default function App() {
   const loadTimeline = useCallback(async () => {
     try {
       const items = await api.listTimeline({
-        limit: 60,
+        limit: 200,
         kindContains: kindFilter || undefined,
         appContains: appFilter || undefined,
       });

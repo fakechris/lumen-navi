@@ -75,7 +75,17 @@ pub struct CaptureOrchestrator {
 
 const DHASH_HISTORY_LEN: usize = 12;
 const DHASH_HAMMING_THRESHOLD: u32 = 5;
-const DHASH_SAFETY_VALVE: Duration = Duration::from_secs(10);
+/// Heartbeat interval for a visually-static screen: even when the MAD probe
+/// reports no change (a browser page being read, a paused video, a PDF), force
+/// one capture this often so the user still gets occasional evidence frames.
+///
+/// Tuned to 2 minutes. At the previous 10s this fired every 10s on a static
+/// browser page (Safari reading), producing ~6 screenshots/minute that crowded
+/// out every other app in the 60-item timeline ("Comet never shows up"). A
+/// 2-minute cadence is enough to record "user still on this page" without
+/// flooding storage or the timeline. Dynamic activity still captures at its
+/// own cadence (same_app_min_ms / visual_change_threshold), unaffected.
+const DHASH_SAFETY_VALVE: Duration = Duration::from_secs(120);
 const DHASH_HISTORY_TTL: Duration = Duration::from_secs(60);
 
 impl CaptureOrchestrator {
@@ -655,7 +665,7 @@ mod tests {
         for d in o.select_displays().await.unwrap() {
             o.last_full_capture.insert(
                 d.id.0,
-                Instant::now() - Duration::from_secs(11),
+                Instant::now() - Duration::from_secs(121),
             );
         }
 
