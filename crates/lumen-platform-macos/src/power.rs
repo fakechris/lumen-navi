@@ -30,12 +30,23 @@ impl lumen_platform::DisplaySleepProbe for MacPower {
 
 pub struct MacPower;
 
+// IOKit / Power framework FFI.
+//
+// NOTE: `IOPMCopyAssertionsByProcess` uses the out-parameter pattern — it
+// writes the result dictionary through `*AssertionsByPid` and returns an
+// `IOReturn` (kern_return_t = i32) status code. Declaring it as a direct
+// return was an ABI mismatch that caused the returned `IOReturn` int (0 on
+// success) to be reinterpreted as a CFDictionary pointer, and the real
+// dictionary was written to a garbage out-address — SIGSEGV inside CF's
+// CF_IS_OBJC header check on CFDictionaryGetCount. (Apple SDK header:
+// IOPMLib.h `IOPMCopyAssertionsByProcess(CFDictionaryRef *)`.)
 #[link(name = "IOKit", kind = "framework")]
 extern "C" {
-    /// Returns a CFDictionary (retained) mapping pid (CFNumber) → CFArray of
-    /// assertion CFDictionary, or NULL on failure. Caller must CFRelease.
-    fn IOPMCopyAssertionsByProcess() -> *const c_void;
+    fn IOPMCopyAssertionsByProcess(assertions_by_pid: *mut *const c_void) -> i32;
 }
+
+/// kIOReturnSuccess
+const K_IO_RETURN_SUCCESS: i32 = 0;
 
 /// True if any process currently holds a display-sleep / user-idle-sleep
 /// assertion. On any error reading the table, returns false (fail-open: don't
@@ -51,9 +62,11 @@ fn display_sleep_prevented_native() -> bool {
     }
 }
 
-/// Assertion types that mean "keep the user's screen awake." The first is what
-/// video playback and explicit Caffeine assertions hold; the second is the
-/// broader "prevent system sleep on user idle" (calls, media, `caffeinate -i`).
+/// Assertion *values* that mean "keep the user's screen awake." The first is
+/// what video playback and explicit Caffeine assertions hold; the second is
+/// the broader "prevent system sleep on user idle" (calls, media,
+/// `caffeinate -i`). The key name (`AssertionType` vs legacy `AssertType`)
+/// is handled in `lookup_assertion_type`.
 const BLOCKING_TYPES: &[&[u8]] = &[b"PreventDisplaySleep", b"PreventUserIdleSystemSleep"];
 
 #[cfg(target_os = "macos")]
@@ -64,11 +77,14 @@ unsafe fn scan_assertions() -> bool {
         CFDictionaryGetCount, CFDictionaryGetKeysAndValues, CFDictionaryRef,
     };
 
-    let dict = IOPMCopyAssertionsByProcess();
-    if dict.is_null() {
+    // Out-parameter call: the dictionary is written through the pointer, and
+    // the return value is an IOReturn status code (0 = success).
+    let mut dict_ptr: *const c_void = std::ptr::null();
+    let kr = IOPMCopyAssertionsByProcess(&mut dict_ptr);
+    if kr != K_IO_RETURN_SUCCESS || dict_ptr.is_null() {
         return false;
     }
-    let dict = dict as CFDictionaryRef;
+    let dict = dict_ptr as CFDictionaryRef;
 
     let count = CFDictionaryGetCount(dict) as usize;
     if count == 0 {
@@ -107,11 +123,27 @@ unsafe fn scan_assertions() -> bool {
     hit
 }
 
-/// Read one assertion dict's `AssertionType` value; true if it's a blocking type.
+/// Read one assertion dict's type value; true if it's a blocking type. Tries
+/// both `AssertionType` (modern) and `AssertType` (legacy alias) keys — older
+/// macOS releases and some assertion creators use the short form.
 #[cfg(target_os = "macos")]
 unsafe fn assertion_type_blocks(
     entry: core_foundation_sys::dictionary::CFDictionaryRef,
 ) -> bool {
+    // Try both known key names; whichever resolves gives the type string.
+    lookup_assertion_type(entry, c"AssertionType".as_ptr())
+        .or_else(|| lookup_assertion_type(entry, c"AssertType".as_ptr()))
+        .is_some_and(|matches_blocking| matches_blocking)
+}
+
+/// Look up `key` in the assertion dict, read its CFString value into bytes,
+/// and return `Some(true)` if it's a blocking type, `Some(false)` if it's a
+/// known non-blocking type, `None` if the key/value is absent or unreadable.
+#[cfg(target_os = "macos")]
+unsafe fn lookup_assertion_type(
+    entry: core_foundation_sys::dictionary::CFDictionaryRef,
+    key_bytes: *const c_char,
+) -> Option<bool> {
     use core_foundation_sys::base::{kCFAllocatorDefault, CFRelease, CFTypeRef, Boolean};
     use core_foundation_sys::dictionary::CFDictionaryGetValueIfPresent;
     use core_foundation_sys::string::{
@@ -119,18 +151,16 @@ unsafe fn assertion_type_blocks(
         kCFStringEncodingUTF8,
     };
 
-    let key_bytes = c"AssertionType".as_ptr();
     let cf_key = CFStringCreateWithCString(kCFAllocatorDefault, key_bytes, kCFStringEncodingUTF8);
     if cf_key.is_null() {
-        return false;
+        return None;
     }
-
     let mut out: CFTypeRef = std::ptr::null();
     let found: Boolean = CFDictionaryGetValueIfPresent(entry, cf_key as *const c_void, &mut out);
     CFRelease(cf_key as CFTypeRef);
     // core-foundation-sys Boolean is u8; nonzero == true.
     if found == 0 || out.is_null() {
-        return false;
+        return None;
     }
 
     let val_ref = out as CFStringRef;
@@ -145,13 +175,13 @@ unsafe fn assertion_type_blocks(
             kCFStringEncodingUTF8,
         );
         if ok == 0 {
-            return false;
+            return None;
         }
         let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        BLOCKING_TYPES.iter().any(|t| *t == &buf[..len])
+        Some(BLOCKING_TYPES.iter().any(|t| *t == &buf[..len]))
     } else {
         let bytes = std::ffi::CStr::from_ptr(ptr).to_bytes();
-        BLOCKING_TYPES.iter().any(|t| *t == bytes)
+        Some(BLOCKING_TYPES.iter().any(|t| *t == bytes))
     }
 }
 
