@@ -197,6 +197,19 @@ pub struct DayStatsDto {
     pub top_apps: Vec<AppTotal>,
     /// ms per local hour bucket [0..24] (active only).
     pub by_hour: [i64; 24],
+    /// ms per (local hour, category) for active segments — drives the
+    /// hover tooltip on the hourly bar chart ("15:00 · Development 30m").
+    /// Sparse: only (hour, category) pairs with >0ms appear.
+    #[serde(default)]
+    pub by_hour_category: Vec<HourCategoryTotal>,
+}
+
+/// One (hour, category) cell of the hourly breakdown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HourCategoryTotal {
+    pub hour: u8, // 0..24, local time
+    pub category: String,
+    pub ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
