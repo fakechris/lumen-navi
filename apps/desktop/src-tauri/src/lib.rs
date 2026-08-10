@@ -59,15 +59,24 @@ pub fn run() {
             // UI silently showed "本地服务未运行" with no alert and no restart.
             // This task emits `daemon://exited` on an unexpected exit (so the UI
             // can show a banner) and auto-restarts with capped backoff.
+            //
+            // Liveness check: connect to the daemon's Unix socket. This is more
+            // reliable than checking the child slot — it recognizes daemons the
+            // supervisor didn't spawn (e.g. an orphan from a previous app run
+            // that's still serving on the socket) and avoids restart loops where
+            // a freshly-spawned daemon exits immediately (socket-in-use) but the
+            // child slot briefly looks alive.
             {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    // First check is delayed so the auto-start above has time to spawn.
+                    // First check is delayed so the auto-start above has time to spawn
+                    // and bind the socket.
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     let mut interval =
                         tokio::time::interval(std::time::Duration::from_secs(2));
                     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     let mut consecutive_crashes = 0u32;
+                    let mut last_restart_at: Option<std::time::Instant> = None;
                     loop {
                         interval.tick().await;
                         let Some(state) = handle.try_state::<AppState>() else {
@@ -81,15 +90,31 @@ pub fn run() {
                             consecutive_crashes = 0;
                             continue;
                         }
-                        if state.observe_running() {
+                        // PRIMARY liveness: socket reachable → daemon is serving,
+                        // regardless of the child slot. This handles orphans and
+                        // avoids false crash reports.
+                        let socket = state.data_dir.join("daemon.sock");
+                        if daemon_socket_alive(&socket) {
                             consecutive_crashes = 0;
+                            // Reap a dead child slot if any (harmless when alive).
+                            let _ = state.observe_running();
                             continue;
                         }
-                        // Daemon died unexpectedly. Tell the UI, then try to restart.
+                        // Grace period after a restart: give a freshly spawned
+                        // daemon ~8s to bind the socket before counting a crash.
+                        // Without this, the first 2s tick after restart sees the
+                        // socket still down and re-counts, producing the "always
+                        // crash #1" loop.
+                        if let Some(t) = last_restart_at {
+                            if t.elapsed() < std::time::Duration::from_secs(8) {
+                                continue;
+                            }
+                        }
+                        // Daemon truly down. Notify + restart with backoff.
                         consecutive_crashes = consecutive_crashes.saturating_add(1);
                         tracing::error!(
                             crashes = consecutive_crashes,
-                            "observe daemon exited unexpectedly; notifying UI + attempting restart"
+                            "observe daemon unreachable; notifying UI + attempting restart"
                         );
                         let _ = handle.emit(
                             "daemon://exited",
@@ -106,11 +131,14 @@ pub fn run() {
                         let backoff_secs = 2u64 << consecutive_crashes.min(5);
                         tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                         match commands::observe_start_inner(&state) {
-                            Ok(st) => tracing::info!(
-                                ?st.pid,
-                                attempt = consecutive_crashes,
-                                "observe daemon restarted after crash"
-                            ),
+                            Ok(st) => {
+                                last_restart_at = Some(std::time::Instant::now());
+                                tracing::info!(
+                                    ?st.pid,
+                                    attempt = consecutive_crashes,
+                                    "observe daemon restarted after crash"
+                                );
+                            }
                             Err(e) => tracing::warn!(error = %e, "observe daemon restart failed"),
                         }
                     }
@@ -218,4 +246,29 @@ pub fn run() {
             }
         }
     });
+}
+
+/// Quick liveness probe for the daemon's Unix socket: true if a client can
+/// connect (the daemon is bound and accepting). Used by the supervisor as the
+/// primary "is the daemon serving" signal — more reliable than checking the
+/// child slot, since it recognizes daemons the supervisor didn't spawn (e.g.
+/// an orphan from a prior app run still holding the socket).
+fn daemon_socket_alive(socket_path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+        UnixStream::connect(socket_path)
+            .and_then(|s| {
+                s.set_read_timeout(Some(Duration::from_millis(200)))?;
+                s.set_write_timeout(Some(Duration::from_millis(200)))?;
+                Ok(())
+            })
+            .is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = socket_path;
+        false
+    }
 }
