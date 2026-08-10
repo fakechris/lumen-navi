@@ -10,7 +10,7 @@ mod state;
 mod tray;
 
 use state::AppState;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tracing_subscriber::EnvFilter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -50,6 +50,68 @@ pub fn run() {
                         match commands::observe_start_inner(&state) {
                             Ok(st) => tracing::info!(?st.pid, "auto-started Observe"),
                             Err(e) => tracing::warn!(error = %e, "auto-start Observe failed"),
+                        }
+                    }
+                });
+            }
+            // Daemon supervisor: watch the child process and act on crashes.
+            // Without this, a SIGSEGV/Panic in lumen-daemon was invisible — the
+            // UI silently showed "本地服务未运行" with no alert and no restart.
+            // This task emits `daemon://exited` on an unexpected exit (so the UI
+            // can show a banner) and auto-restarts with capped backoff.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // First check is delayed so the auto-start above has time to spawn.
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(2));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    let mut consecutive_crashes = 0u32;
+                    loop {
+                        interval.tick().await;
+                        let Some(state) = handle.try_state::<AppState>() else {
+                            continue;
+                        };
+                        // Intentional stop: nothing to watch. Reset backoff.
+                        if state
+                            .observe_stopping
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                        {
+                            consecutive_crashes = 0;
+                            continue;
+                        }
+                        if state.observe_running() {
+                            consecutive_crashes = 0;
+                            continue;
+                        }
+                        // Daemon died unexpectedly. Tell the UI, then try to restart.
+                        consecutive_crashes = consecutive_crashes.saturating_add(1);
+                        tracing::error!(
+                            crashes = consecutive_crashes,
+                            "observe daemon exited unexpectedly; notifying UI + attempting restart"
+                        );
+                        let _ = handle.emit(
+                            "daemon://exited",
+                            consecutive_crashes,
+                        );
+                        // Cap retries to avoid a tight crash loop (e.g. a bad
+                        // config or a crash-on-start). After 5 crashes within
+                        // the supervisor's lifetime, stop trying and let the
+                        // user investigate — they can still manually restart.
+                        if consecutive_crashes > 5 {
+                            continue;
+                        }
+                        // Backoff: 2s, 4s, 8s, 16s, 32s between attempts.
+                        let backoff_secs = 2u64 << consecutive_crashes.min(5);
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                        match commands::observe_start_inner(&state) {
+                            Ok(st) => tracing::info!(
+                                ?st.pid,
+                                attempt = consecutive_crashes,
+                                "observe daemon restarted after crash"
+                            ),
+                            Err(e) => tracing::warn!(error = %e, "observe daemon restart failed"),
                         }
                     }
                 });

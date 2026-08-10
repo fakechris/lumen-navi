@@ -717,6 +717,9 @@ pub fn observe_start_inner(state: &AppState) -> Result<ObserveStatus, String> {
 
     let pid = child.id();
     *state.observe_child.lock().map_err(err)? = Some(child);
+    // (Re)starting clears any prior intentional-stop flag so the supervisor
+    // will treat a future crash as a crash again.
+    state.observe_stopping.store(false, std::sync::atomic::Ordering::SeqCst);
     tracing::info!(pid, path = %daemon.display(), "observe daemon started");
     Ok(ObserveStatus {
         running: true,
@@ -735,6 +738,9 @@ pub fn observe_stop(state: State<'_, AppState>) -> Result<ObserveStatus, String>
 }
 
 fn observe_stop_inner(state: &AppState) -> Result<ObserveStatus, String> {
+    // Mark intentional stop so the supervisor doesn't treat the upcoming
+    // child exit as a crash and auto-restart it.
+    state.observe_stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut guard = state.observe_child.lock().map_err(err)?;
     if let Some(mut child) = guard.take() {
         let _ = child.kill();

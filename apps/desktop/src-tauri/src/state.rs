@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Child;
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
@@ -21,6 +22,11 @@ pub struct AppState {
     pub shell: Mutex<ShellConfig>,
     /// Child `lumen-daemon` when Observe is running from the shell.
     pub observe_child: Mutex<Option<Child>>,
+    /// True while the user (or app shutdown) intentionally stopped Observe.
+    /// The supervisor reads this to distinguish an intentional stop (don't
+    /// restart) from a crash (alert + auto-restart). Set by observe_stop_inner,
+    /// cleared by observe_start_inner.
+    pub observe_stopping: AtomicBool,
     /// In-flight assistant (selection popup) streaming requests, by id.
     pub assistant_tasks:
         Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
@@ -62,6 +68,7 @@ impl AppState {
             paused: Mutex::new(config.privacy.paused),
             shell: Mutex::new(shell_cfg),
             observe_child: Mutex::new(None),
+            observe_stopping: AtomicBool::new(false),
             assistant_tasks: Mutex::new(HashMap::new()),
         })
     }
