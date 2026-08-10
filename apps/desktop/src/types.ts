@@ -6,6 +6,8 @@ export interface ActivitySegment {
   app_name: string | null;
   bundle_id: string | null;
   window_title: string | null;
+  /** Browser tab URL when the segment's frontmost app is a scriptable browser. */
+  url?: string | null;
   started_at: string;
   ended_at: string | null;
   duration_ms: number;

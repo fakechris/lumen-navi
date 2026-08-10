@@ -50,6 +50,28 @@ export function readCssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+/**
+ * Extract the registrable domain (e.g. "github.com") from a full URL for
+ * compact display. Drops scheme, path, query, and leading www./m./mail.
+ * Returns null for non-URL strings, about:blank, chrome://, etc.
+ */
+export function registrableDomain(url: string | null | undefined): string | null {
+  if (!url) return null;
+  let host: string | null = null;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return null;
+  }
+  if (!host) return null;
+  // Drop common leading prefixes (www, m, mail, mobile) when 3+ labels.
+  const labels = host.split(".");
+  if (labels.length >= 3 && /^(www|m|mail|mobile)$/i.test(labels[0])) {
+    return labels.slice(1).join(".");
+  }
+  return host;
+}
+
 // --- main view ------------------------------------------------------------
 
 export function DashboardView() {
@@ -412,6 +434,18 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
               }}>手动</span>
             )}
           </div>
+          {(() => {
+            const domain = registrableDomain(tooltip.seg.url);
+            return domain && !tooltip.seg.is_idle ? (
+              <div style={{
+                color: "var(--text-secondary)", marginBottom: 2, maxWidth: 280,
+                overflow: "hidden", textOverflow: "ellipsis",
+                fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)",
+              }}>
+                {domain}
+              </div>
+            ) : null;
+          })()}
           {tooltip.seg.window_title && !tooltip.seg.is_idle && (
             <div style={{ color: "var(--text-secondary)", marginBottom: 2, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis" }}>
               {tooltip.seg.window_title}
