@@ -514,12 +514,27 @@ async fn get_ocr_search(
 #[derive(Deserialize)]
 struct ActivityDayQuery {
     day: String,
+    /// "app" (default) or "site" — switches top-apps grouping between bundle
+    /// identity and registrable domain.
+    #[serde(default)]
+    group_by: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ActivityRangeQuery {
     from: String,
     to: String,
+    #[serde(default)]
+    group_by: Option<String>,
+}
+
+/// Parse the `group_by` query param into the store enum. Anything other than
+/// "site" (case-insensitive) falls back to the default App grouping.
+fn parse_group_by(s: Option<&str>) -> lumen_store::GroupBy {
+    match s.map(|x| x.to_ascii_lowercase()).as_deref() {
+        Some("site") | Some("domain") | Some("website") => lumen_store::GroupBy::Site,
+        _ => lumen_store::GroupBy::App,
+    }
 }
 
 #[derive(Deserialize)]
@@ -560,7 +575,7 @@ async fn get_activity_stats(
     State(st): State<ControlState>,
     Query(q): Query<ActivityDayQuery>,
 ) -> impl IntoResponse {
-    match st.store.activity_day_stats(&q.day) {
+    match st.store.activity_day_stats(&q.day, parse_group_by(q.group_by.as_deref())) {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -576,7 +591,7 @@ async fn get_activity_range(
     State(st): State<ControlState>,
     Query(q): Query<ActivityRangeQuery>,
 ) -> impl IntoResponse {
-    match st.store.activity_range_stats(&q.from, &q.to) {
+    match st.store.activity_range_stats(&q.from, &q.to, parse_group_by(q.group_by.as_deref())) {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

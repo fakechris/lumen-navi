@@ -22,6 +22,17 @@ pub enum ProductivityLevel {
     Distracting,
 }
 
+/// Aggregation dimension for top-apps / top-sites rollups.
+/// `App` groups by bundle identity (the default, pre-existing behavior).
+/// `Site` breaks browser time down by registrable domain (github.com) extracted
+/// from the segment's `url`; non-browser segments (no url) are excluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupBy {
+    #[default]
+    App,
+    Site,
+}
+
 impl ProductivityLevel {
     /// Weight used by the pulse-score weighted average. Unclassified
     /// (`None`) is intentionally absent so it stays out of the denominator.
@@ -75,30 +86,35 @@ pub struct ActivityFields<'a> {
     pub ls_category_type: Option<&'a str>,
 }
 
-impl<'a> ActivityFields<'a> {
-    fn registrable_domain(url: &str) -> Option<String> {
-        // Strip scheme, take the host, drop the first subdomain label when
-        // there are 3+ parts (www.github.com → github.com). Deliberately
-        // simple — not a full PSL, good enough for the common cases.
-        let no_scheme = url.split("://").nth(1).unwrap_or(url);
-        let host = no_scheme.split('/').next()?;
-        let host = host.split('?').next()?;
-        let host = host.to_ascii_lowercase();
-        let parts: Vec<&str> = host.split('.').collect();
-        match parts.len() {
-            0 => None,
-            1 => Some(host),
-            _ => {
-                // Drop leading "www" / "m" / "mail" etc. when 3+ labels.
-                if parts.len() >= 3 {
-                    Some(parts[parts.len() - 2..].join("."))
-                } else {
-                    Some(host)
-                }
+/// Extract the registrable domain from a full URL — e.g. `https://github.com/foo`
+/// → `github.com`, `https://mail.google.com/x` → `google.com`. Shared by the
+/// classifier (`MatchField::Domain`) and the dashboard's "group by site"
+/// aggregation so both use identical logic. Deliberately simple — not a full
+/// Public Suffix List, good enough for the common cases.
+pub(crate) fn registrable_domain(url: &str) -> Option<String> {
+    // Strip scheme, take the host, drop the first subdomain label when
+    // there are 3+ parts (www.github.com → github.com). Deliberately
+    // simple — not a full PSL, good enough for the common cases.
+    let no_scheme = url.split("://").nth(1).unwrap_or(url);
+    let host = no_scheme.split('/').next()?;
+    let host = host.split('?').next()?;
+    let host = host.to_ascii_lowercase();
+    let parts: Vec<&str> = host.split('.').collect();
+    match parts.len() {
+        0 => None,
+        1 => Some(host),
+        _ => {
+            // Drop leading "www" / "m" / "mail" etc. when 3+ labels.
+            if parts.len() >= 3 {
+                Some(parts[parts.len() - 2..].join("."))
+            } else {
+                Some(host)
             }
         }
     }
+}
 
+impl<'a> ActivityFields<'a> {
     fn matches(&self, rule: &CategoryRule) -> bool {
         let v = rule.value.to_ascii_lowercase();
         let candidate = match rule.field {
@@ -106,7 +122,7 @@ impl<'a> ActivityFields<'a> {
             MatchField::AppName => self.app_name.map(|s| s.to_ascii_lowercase()),
             MatchField::Domain => self
                 .url
-                .and_then(Self::registrable_domain)
+                .and_then(registrable_domain)
                 .map(|d| d.to_ascii_lowercase()),
             MatchField::Url => self.url.map(|s| s.to_ascii_lowercase()),
             MatchField::Title => self.window_title.map(|s| s.to_ascii_lowercase()),
@@ -354,15 +370,15 @@ mod tests {
     #[test]
     fn domain_extraction_drops_subdomain() {
         assert_eq!(
-            ActivityFields::registrable_domain("https://docs.github.com/pulls"),
+            registrable_domain("https://docs.github.com/pulls"),
             Some("github.com".into())
         );
         assert_eq!(
-            ActivityFields::registrable_domain("mail.google.com"),
+            registrable_domain("mail.google.com"),
             Some("google.com".into())
         );
         assert_eq!(
-            ActivityFields::registrable_domain("https://stackoverflow.com/q/1"),
+            registrable_domain("https://stackoverflow.com/q/1"),
             Some("stackoverflow.com".into())
         );
     }

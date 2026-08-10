@@ -95,7 +95,10 @@ fn refresh_tray_display<R: Runtime>(app: &AppHandle<R>) {
     let now = chrono::Local::now();
     let today = now.format("%Y-%m-%d").to_string();
 
-    let stats = state.store.activity_day_stats(&today).ok();
+    let stats = state
+        .store
+        .activity_day_stats(&today, lumen_store::GroupBy::default())
+        .ok();
     let latest = state
         .store
         .list_activity_segments(&today)

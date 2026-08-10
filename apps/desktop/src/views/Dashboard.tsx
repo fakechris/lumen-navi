@@ -80,12 +80,15 @@ export function DashboardView() {
   const [segments, setSegments] = useState<ActivitySegment[] | null>(null);
   const [stats, setStats] = useState<DayStats | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Top-apps grouping: "app" (bundle identity, default) or "site" (domain).
+  // Only affects the top-apps ranking, not the timeline/categories.
+  const [groupBy, setGroupBy] = useState<"app" | "site">("app");
 
   const load = useCallback(async () => {
     try {
       const [segs, st] = await Promise.all([
         api.activitySegments(day),
-        api.activityStats(day),
+        api.activityStats(day, groupBy),
       ]);
       setSegments(segs);
       setStats(st);
@@ -93,7 +96,7 @@ export function DashboardView() {
     } catch (e) {
       setError(String(e));
     }
-  }, [day]);
+  }, [day, groupBy]);
 
   useEffect(() => {
     void load();
@@ -185,9 +188,34 @@ export function DashboardView() {
             <HourDistribution stats={stats!} />
           </Card>
 
-          {/* Top apps */}
+          {/* Top apps / top sites */}
           <Card pad={16}>
-            <SectionHeader title="应用排行" subtitle="按活跃时长排序" />
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
+              <SectionHeader
+                title={groupBy === "site" ? "网站排行" : "应用排行"}
+                subtitle={groupBy === "site" ? "浏览器时长按域名聚合（Safari/Chrome/Comet）" : "按活跃时长排序"}
+              />
+              <div style={{ display: "flex", gap: 0, borderRadius: "var(--radius-md)", overflow: "hidden", border: "1px solid var(--border)", flex: "0 0 auto" }}>
+                {(["app", "site"] as const).map((g) => (
+                  <button
+                    key={g}
+                    onClick={() => setGroupBy(g)}
+                    style={{
+                      padding: "4px 10px",
+                      fontSize: "var(--text-xs)",
+                      cursor: "pointer",
+                      background: groupBy === g ? "var(--accent)" : "transparent",
+                      color: groupBy === g ? "#fff" : "var(--text-secondary)",
+                      fontWeight: groupBy === g ? "var(--weight-semibold)" : "normal",
+                      border: "none",
+                      borderBottom: "none",
+                    }}
+                  >
+                    {g === "app" ? "应用" : "网站"}
+                  </button>
+                ))}
+              </div>
+            </div>
             <TopApps stats={stats!} />
           </Card>
         </>
