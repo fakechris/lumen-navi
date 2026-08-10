@@ -1,10 +1,11 @@
 import React from "react";
 
-const toneColor = { running: "var(--accent)", done: "var(--success)", failed: "var(--danger)", idle: "var(--text-tertiary)" };
+const toneColor = { running: "var(--success)", done: "var(--success)", failed: "var(--danger)", idle: "var(--text-tertiary)" };
 
 /**
- * Small colored dot for live/inline status. `running` pulses; the rest
- * are static. Optional trailing label text.
+ * Small colored dot for live/inline status. `running` and `done` share the
+ * success/green token; `running` is distinguished by its pulse animation.
+ * Optional trailing label text.
  */
 export function StatusDot({ status = "idle", label, style }) {
   const color = toneColor[status] || toneColor.idle;

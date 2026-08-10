@@ -161,6 +161,12 @@ pub struct ActivitySegmentDto {
     pub app_name: Option<String>,
     pub bundle_id: Option<String>,
     pub window_title: Option<String>,
+    /// Active browser tab URL when the segment's frontmost app is a scriptable
+    /// browser (Safari/Chrome/Comet/…); None for non-browsers. Present since
+    /// PR #24 — the segment identity includes it so each website accrues its
+    /// own duration. Surfaced to the UI so the timeline can show per-site time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub duration_ms: i64,

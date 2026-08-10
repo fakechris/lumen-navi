@@ -1210,7 +1210,7 @@ impl SqliteStore {
         let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let mut stmt = conn
             .prepare(
-                r#"SELECT seg_id, day, app_name, bundle_id, window_title,
+                r#"SELECT seg_id, day, app_name, bundle_id, window_title, url,
                           started_at, ended_at, duration_ms, is_idle, is_locked,
                           category, productivity_level, event_count, source
                    FROM activity_segments
@@ -1220,15 +1220,15 @@ impl SqliteStore {
             .map_err(StoreError::db)?;
         let rows = stmt
             .query_map(params![day], |row| {
-                let started: String = row.get(5)?;
+                let started: String = row.get(6)?;
                 let started_at = chrono::DateTime::parse_from_rfc3339(&started)
                     .map(|d| d.with_timezone(&Utc))
                     .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                        5,
+                        6,
                         rusqlite::types::Type::Text,
                         Box::new(e),
                     ))?;
-                let ended: Option<String> = row.get(6)?;
+                let ended: Option<String> = row.get(7)?;
                 let ended_at = ended
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
                     .map(|d| d.with_timezone(&Utc));
@@ -1238,15 +1238,16 @@ impl SqliteStore {
                     app_name: row.get(2)?,
                     bundle_id: row.get(3)?,
                     window_title: row.get(4)?,
+                    url: row.get(5)?,
                     started_at,
                     ended_at,
-                    duration_ms: row.get(7)?,
-                    is_idle: row.get::<_, i64>(8)? != 0,
-                    is_locked: row.get::<_, i64>(9)? != 0,
-                    category: row.get(10)?,
-                    productivity_level: row.get(11)?,
-                    event_count: row.get(12)?,
-                    source: row.get::<_, Option<String>>(13)?.unwrap_or_else(|| "auto".into()),
+                    duration_ms: row.get(8)?,
+                    is_idle: row.get::<_, i64>(9)? != 0,
+                    is_locked: row.get::<_, i64>(10)? != 0,
+                    category: row.get(11)?,
+                    productivity_level: row.get(12)?,
+                    event_count: row.get(13)?,
+                    source: row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "auto".into()),
                 })
             })
             .map_err(StoreError::db)?;
