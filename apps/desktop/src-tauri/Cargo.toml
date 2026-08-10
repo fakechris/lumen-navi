@@ -22,7 +22,7 @@ lumen-config = { workspace = true }
 lumen-cua = { workspace = true }
 lumen-models = { workspace = true }
 lumen-platform = { workspace = true }
-lumen-platform-macos = { workspace = true }
+lumen-platform-host = { workspace = true }
 lumen-process = { workspace = true }
 lumen-store = { workspace = true }
 lumen-types = { workspace = true }

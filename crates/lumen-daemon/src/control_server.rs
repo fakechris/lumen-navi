@@ -77,7 +77,7 @@ impl ControlState {
             paused: Arc::new(AtomicBool::new(paused)),
             closed_eyes,
             max_blob_bytes,
-            screen_locked: Arc::new(lumen_platform_macos::is_screen_locked),
+            screen_locked: Arc::new(lumen_platform_host::is_screen_locked),
             sources,
             browser: BrowserRuntimeState {
                 enabled: browser.enabled,
@@ -871,7 +871,7 @@ mod tests {
                 policy: BrowserIngestPolicy::default(),
             },
         );
-        // Unit tests must not depend on whether the host Mac happens to be locked.
+        // Unit tests must not depend on whether the host desktop happens to be locked.
         state.screen_locked = Arc::new(|| false);
         (dir, state)
     }
@@ -992,6 +992,17 @@ mod tests {
     async fn closed_eyes_is_a_hard_browser_write_gate() {
         let (_dir, mut state) = state();
         state.closed_eyes = true;
+        let response = router(state)
+            .oneshot(ingest_request(Some("fixture-browser-token")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::LOCKED);
+    }
+
+    #[tokio::test]
+    async fn a_locked_screen_is_a_hard_browser_write_gate() {
+        let (_dir, mut state) = state();
+        state.screen_locked = Arc::new(|| true);
         let response = router(state)
             .oneshot(ingest_request(Some("fixture-browser-token")))
             .await

@@ -27,6 +27,7 @@ import type {
   ObserveStatus,
   OnboardingState,
   Permissions,
+  PlatformInfo,
   SearchHit,
   SourcesUpdate,
   TabId,
@@ -164,6 +165,7 @@ export default function App() {
   const [tab, setTab] = useState<TabId>("overview");
   const [health, setHealth] = useState<Health | null>(null);
   const [perms, setPerms] = useState<Permissions | null>(null);
+  const [platform, setPlatform] = useState<PlatformInfo | null>(null);
   const [cfg, setCfg] = useState<ConfigSummary | null>(null);
   const [observe, setObserve] = useState<ObserveStatus | null>(null);
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
@@ -249,9 +251,10 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [h, p, c, o, ob, models, asst, browser] = await Promise.all([
+      const [h, p, plat, c, o, ob, models, asst, browser] = await Promise.all([
         api.getHealth(),
         api.getPermissions(),
+        api.getPlatformInfo(),
         api.getConfigSummary(),
         api.observeStatus(),
         api.getOnboarding(),
@@ -261,6 +264,7 @@ export default function App() {
       ]);
       setHealth(h);
       setPerms(p);
+      setPlatform(plat);
       setCfg(c);
       setObserve(o);
       setOnboarding(ob);
@@ -276,7 +280,11 @@ export default function App() {
   async function openPrivacySettings(kind: string) {
     try {
       await api.openPrivacySettings(kind);
-      setStatusNote("已打开 macOS 隐私与安全设置。授权后 Navi 会自动刷新状态。");
+      setStatusNote(
+        platform?.os === "windows"
+          ? "已打开 Windows 隐私设置。授权后 Navi 会自动刷新状态。"
+          : "已打开 macOS 隐私与安全设置。授权后 Navi 会自动刷新状态。",
+      );
       setError(null);
     } catch (e) {
       setError(`无法打开系统设置：${String(e)}`);
@@ -744,7 +752,11 @@ export default function App() {
                 <div className="stack mt">
                   <StatusDot
                     status={permStatus(perms?.screen_recording ?? "")}
-                    label={`屏幕录制 · ${perms?.screen_recording ?? "—"}`}
+                    label={
+                      platform && !platform.screen_permission_gate
+                        ? "屏幕截取 · 无需授权"
+                        : `屏幕录制 · ${perms?.screen_recording ?? "—"}`
+                    }
                   />
                   <StatusDot
                     status={
@@ -762,14 +774,17 @@ export default function App() {
                     status={permStatus(perms?.microphone ?? "")}
                     label={`麦克风 · ${perms?.microphone ?? "—"}`}
                   />
-                  <StatusDot
-                    status={permStatus(perms?.accessibility ?? "")}
-                    label={`辅助功能 · ${perms?.accessibility ?? "—"}`}
-                  />
+                  {platform?.accessibility_gate !== false && (
+                    <StatusDot
+                      status={permStatus(perms?.accessibility ?? "")}
+                      label={`辅助功能 · ${perms?.accessibility ?? "—"}`}
+                    />
+                  )}
                 </div>
                 <p className="meta mt">
-                  屏幕录制由共享的 Lumen Cua 请求授权；麦克风与辅助功能仍属于 Lumen Navi。
-                  语音识别权限用于本机转写，不做听写注入。
+                  {platform?.os === "windows"
+                    ? "桌面程序截屏无需授权；首次录音需在「设置 → 隐私和安全性 → 麦克风」允许桌面应用。听写产品见 Lumen ASR。"
+                    : "屏幕录制由共享的 Lumen Cua 请求授权；麦克风与辅助功能仍属于 Lumen Navi。语音识别权限用于本机转写，不做听写注入。"}
                 </p>
                 {perms?.direct_capture_error && (
                   <p className="meta mt">{perms.direct_capture_error}</p>
@@ -830,7 +845,9 @@ export default function App() {
                     <div className="meta">
                       <span>{fmtTime(h.event_ts)}</span>
                       <span className="mono">{h.event_id.slice(0, 8)}</span>
-                      <span>conf {h.confidence.toFixed(2)}</span>
+                      {h.confidence > 0 && (
+                        <span>conf {h.confidence.toFixed(2)}</span>
+                      )}
                     </div>
                     <div className="meta">{h.text_preview}</div>
                   </div>
@@ -1145,7 +1162,9 @@ export default function App() {
                     >
                       <option value="sensevoice">SenseVoice（本地 sherpa，默认）</option>
                       <option value="whisper">Whisper（本地 sherpa）</option>
-                      <option value="speech">macOS Speech</option>
+                      {platform?.system_speech_asr !== false && (
+                        <option value="speech">macOS Speech</option>
+                      )}
                       <option value="openai_audio">OpenAI 兼容 HTTP</option>
                       <option value="qwen">Qwen ASR（HTTP，如 0.8B）</option>
                     </select>
@@ -1282,7 +1301,11 @@ export default function App() {
                         <span className="meta">本地模型目录（可空=自动）</span>
                         <input
                           className="input"
-                          placeholder="~/Library/Application Support/Lumen/models/sensevoice"
+                          placeholder={
+                            platform?.os === "windows"
+                              ? "%LOCALAPPDATA%\\Lumen\\models\\sensevoice"
+                              : "~/Library/Application Support/Lumen/models/sensevoice"
+                          }
                           value={cfg?.asr_model_dir ?? ""}
                           onChange={(e) => {
                             const asr_model_dir = e.target.value;
@@ -1397,29 +1420,36 @@ export default function App() {
                       )}
                     </>
                   )}
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={cfg?.asr_fallback_speech ?? true}
-                      onChange={(e) => {
-                        const checked = e.target.checked;
-                        setBusy(true);
-                        void api
-                          .updateSourcesConfig({ asr_fallback_speech: checked })
-                          .then((c) => {
-                            setCfg(c);
-                            setStatusNote(
-                              checked
-                                ? "本地模型不可用时回退 macOS Speech。"
-                                : "已关闭 Speech 回退。",
-                            );
-                          })
-                          .catch((err) => setError(String(err)))
-                          .finally(() => setBusy(false));
-                      }}
-                    />
-                    本地引擎不可用时回退 Speech
-                  </label>
+                  {platform?.system_speech_asr === false ? (
+                    <p className="meta">
+                      本系统没有内置语音识别引擎，本地模型不可用时不会回退 Speech；
+                      请配置云端 ASR 引擎作为兜底。
+                    </p>
+                  ) : (
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={cfg?.asr_fallback_speech ?? true}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setBusy(true);
+                          void api
+                            .updateSourcesConfig({ asr_fallback_speech: checked })
+                            .then((c) => {
+                              setCfg(c);
+                              setStatusNote(
+                                checked
+                                  ? "本地模型不可用时回退系统 Speech。"
+                                  : "已关闭 Speech 回退。",
+                              );
+                            })
+                            .catch((err) => setError(String(err)))
+                            .finally(() => setBusy(false));
+                        }}
+                      />
+                      本地引擎不可用时回退 Speech
+                    </label>
+                  )}
                 </div>
                 <div className="meta mt">
                   api={cfg?.api_bind} · chunk={cfg?.audio_chunk_ms}ms · engine=
@@ -1443,7 +1473,14 @@ export default function App() {
                     />
                     鼠标划词后自动弹出面板
                   </label>
-                  {assistant?.popup_enabled &&
+                  {assistant?.selection_supported === false && (
+                    <p className="meta">
+                      本系统暂不支持读取其他应用中的选中文字（macOS 走辅助功能 API，
+                      Windows 的 UI Automation 实现尚未完成），划词弹窗不会触发。
+                    </p>
+                  )}
+                  {assistant?.selection_supported !== false &&
+                    assistant?.popup_enabled &&
                     !assistant?.accessibility_trusted && (
                       <div>
                         <p className="meta">
@@ -1487,7 +1524,7 @@ export default function App() {
                         })
                       }
                     />
-                    无 AX 应用（钉钉文档 / 终端）用 ⌘C 兜底取词（读取后立即恢复剪贴板）
+                    无 AX 应用（钉钉文档 / 终端）用复制键兜底取词（读取后立即恢复剪贴板）
                   </label>
                   <label className="field">
                     <span className="meta">LLM base URL（OpenAI 兼容 …/v1）</span>

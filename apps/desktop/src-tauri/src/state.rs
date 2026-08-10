@@ -132,13 +132,24 @@ fn stop_observe_child(slot: &mut Option<Child>) {
 }
 
 fn default_data_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     #[cfg(target_os = "macos")]
     {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         PathBuf::from(home).join("Library/Application Support/LumenNavi")
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
+        // Local (not Roaming) AppData: the store is a SQLite database plus
+        // screenshot blobs — machine-local, frequently written, and far too
+        // large to sync with a roaming profile.
+        match std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
+            Some(local) => PathBuf::from(local).join("LumenNavi"),
+            None => std::env::temp_dir().join("LumenNavi"),
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         PathBuf::from(home).join(".lumen-navi")
     }
 }

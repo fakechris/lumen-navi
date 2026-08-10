@@ -126,6 +126,18 @@ export interface Permissions {
   accessibility: string;
 }
 
+/** What the OS backend can actually do — drives platform-specific copy. */
+export interface PlatformInfo {
+  os: "macos" | "windows" | "other";
+  screen_capture: boolean;
+  microphone: boolean;
+  ocr: boolean;
+  system_speech_asr: boolean;
+  text_selection: boolean;
+  screen_permission_gate: boolean;
+  accessibility_gate: boolean;
+}
+
 export interface SearchHit {
   event_id: string;
   session_id: string | null;
@@ -246,6 +258,8 @@ export interface AssistantConfig {
   /** Key is never echoed back — only whether one is configured. */
   api_key_set: boolean;
   accessibility_trusted: boolean;
+  /** False where the OS cannot read another app's selection at all. */
+  selection_supported: boolean;
   clipboard_fallback: boolean;
 }
 

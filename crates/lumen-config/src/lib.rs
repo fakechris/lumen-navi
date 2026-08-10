@@ -183,7 +183,9 @@ pub struct AsrConfig {
     /// `sensevoice` | `whisper` | `speech` | `openai_audio` | `qwen`
     pub engine: String,
     /// Shared Lumen cluster models root (sensevoice/whisper install + scan).
-    /// Empty = `LUMEN_MODELS_DIR` or `~/Library/Application Support/Lumen/models`.
+    /// Empty = `LUMEN_MODELS_DIR`, else the platform default:
+    /// `~/Library/Application Support/Lumen/models` (macOS) or
+    /// `%LOCALAPPDATA%\Lumen\models` (Windows).
     /// All Lumen apps (navi, asr, …) should share this so models download once.
     pub models_root: String,
     /// Specific engine model directory. Empty = auto under `models_root` / discovery.
@@ -249,11 +251,22 @@ impl AsrConfig {
     /// Shared cluster models root if configured; `None` → engine default resolution.
     pub fn models_root_path(&self) -> Option<std::path::PathBuf> {
         let t = self.models_root.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(std::path::PathBuf::from(t))
+        if !t.is_empty() {
+            return Some(std::path::PathBuf::from(t));
         }
+        // `None` lets the shared lumen-models crate pick the cluster default,
+        // which is correct on macOS. Its non-macOS fallback is `~/.lumen/models`,
+        // so Windows names the Local AppData root explicitly to stay in the same
+        // shared location Lumen ASR downloads into.
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(local) =
+                std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty())
+            {
+                return Some(std::path::PathBuf::from(local).join("Lumen").join("models"));
+            }
+        }
+        None
     }
 
     /// Effective API key: env override then config.

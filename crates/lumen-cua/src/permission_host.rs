@@ -143,7 +143,7 @@ fn ensure_running_inside_lumen_cua_app() -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};

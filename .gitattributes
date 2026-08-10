@@ -1,0 +1,12 @@
+# Check every text file out with LF, on every platform. Windows git defaults
+# to core.autocrlf=true, which rewrites line endings at checkout -- that
+# silently changes the bytes of files whose byte-identity we assert
+# (docs/SHARED_MODELS_CONTRACT.md is pinned by hash) and would make the same
+# source tree hash differently on Windows than on macOS.
+* text=auto eol=lf
+
+# Never line-ending-convert these, regardless of content sniffing.
+*.icns binary
+*.ico binary
+*.png binary
+*.woff2 binary

@@ -20,25 +20,7 @@ use core_foundation::base::{TCFType, CFTypeRef};
 #[cfg(target_os = "macos")]
 use core_foundation::string::{CFString, CFStringRef};
 
-/// What the Accessibility API reported for the frontmost text selection.
-#[derive(Debug, Clone)]
-pub struct SelectionInfo {
-    pub text: String,
-    /// Screen rect (x, y, w, h) in global points (top-left origin), if available.
-    pub bounds: Option<(f64, f64, f64, f64)>,
-    /// PID owning the focused element (used by the desktop to skip itself).
-    pub pid: Option<i32>,
-}
-
-/// Trim + normalize raw AX text; returns None when effectively empty.
-/// Truncates to `max_chars` (char-boundary safe).
-pub fn normalize_selection(raw: &str, max_chars: usize) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.chars().take(max_chars.max(1)).collect())
-}
+pub use lumen_platform::{MouseUp, SelectionInfo};
 
 /// Whether this process is Accessibility-trusted. `prompt = true` shows the
 /// system dialog once (same pattern as `AXIsProcessTrustedWithOptions`).
@@ -108,14 +90,6 @@ pub fn focused_element_pid() -> Option<i32> {
     {
         None
     }
-}
-
-/// What a left-mouse-up means for selection tracking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MouseUp {
-    /// Drag distance since mouse-down exceeded a few px, or a multi-click —
-    /// a selection is plausible and worth querying (with retries).
-    pub maybe_selection: bool,
 }
 
 /// Whether a mouse-up could plausibly have produced a selection.
@@ -548,22 +522,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn normalize_trims_and_rejects_empty() {
-        assert_eq!(normalize_selection("  hello  ", 100), Some("hello".into()));
-        assert_eq!(normalize_selection("   ", 100), None);
-        assert_eq!(normalize_selection("", 100), None);
-    }
-
-    #[test]
-    fn normalize_truncates_on_char_boundary() {
-        let s = "你好世界abc";
-        assert_eq!(normalize_selection(s, 4), Some("你好世界".into()));
-        assert_eq!(normalize_selection(s, 100), Some(s.into()));
-        // max_chars clamped to >= 1
-        assert_eq!(normalize_selection(s, 0), Some("你".into()));
-    }
 
     #[test]
     fn maybe_selection_drag_and_multiclick() {

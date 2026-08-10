@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "helpers/Lumen Cua.app": "helpers/Lumen Cua.app"
+    },
+    "targets": [
+      "dmg"
+    ],
+    "macOS": {
+      "signingIdentity": "Lumen Local Codesign",
+      "entitlements": "Entitlements.plist",
+      "minimumSystemVersion": "14.0",
+      "infoPlist": "Info.plist"
+    }
+  }
+}

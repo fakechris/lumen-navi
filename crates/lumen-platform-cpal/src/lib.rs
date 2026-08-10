@@ -1,7 +1,8 @@
-//! Microphone capture via cpal.
+//! Microphone capture via cpal — CoreAudio on macOS, WASAPI on Windows.
 //!
-//! The cpal `Stream` is `!Send` on macOS, so it lives on a dedicated audio
-//! thread. Fixed-duration chunks are pushed through a bounded channel.
+//! The cpal `Stream` is `!Send` on several backends, so it lives on a
+//! dedicated audio thread. Fixed-duration chunks are pushed through a bounded
+//! channel.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -14,10 +15,10 @@ use cpal::{Sample, SampleFormat, StreamConfig};
 use lumen_platform::{MicCapturer, MicOpenConfig, MicStream, PcmChunk, PlatformError};
 use tracing::{debug, warn};
 
-/// macOS / desktop mic capturer (cpal default host).
-pub struct MacMicCapturer;
+/// Desktop mic capturer over the cpal default host.
+pub struct CpalMicCapturer;
 
-impl MicCapturer for MacMicCapturer {
+impl MicCapturer for CpalMicCapturer {
     fn open(&self, cfg: MicOpenConfig) -> Result<MicStream, PlatformError> {
         open_mic(cfg)
     }

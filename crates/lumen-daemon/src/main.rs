@@ -16,11 +16,10 @@ use lumen_asr_engine::{
 };
 use lumen_config::{AsrConfig, AudioConfig, Config, PrivacyConfig};
 use lumen_cua::{CuaCaptureAdapter, CuaClient};
-use lumen_platform::{MicCapturer, MicOpenConfig, OcrEngine, PlatformError};
-use lumen_platform_macos::{
-    microphone_permission_state, MacFrontmost, MacIdle, MacMicCapturer, MacPower, MacScreenLock,
-    MacSpeechAsr, MacVisionOcr,
+use lumen_platform::{
+    DisplayEnumerator, MicOpenConfig, PlatformError, ScreenCapturer,
 };
+use lumen_platform_host as host;
 use lumen_process::{
     OcrWorker, OcrWorkerConfig, TranscribeWorker, TranscribeWorkerConfig, JOB_KIND_TRANSCRIBE_AUDIO,
 };
@@ -61,8 +60,6 @@ async fn main() -> Result<()> {
         "daemon starting"
     );
 
-    // The desktop app passes the config path via env; fall back to cwd-relative
-    // `navi.toml` for standalone runs (e.g. tests, dogfood from a shell).
     // The desktop app passes the config path via env; fall back to cwd-relative
     // `navi.toml` for standalone runs (tests, dogfood from a shell).
     let config_path = std::env::var("LUMEN_NAVI_CONFIG").unwrap_or_else(|_| "navi.toml".into());
@@ -119,30 +116,44 @@ async fn main() -> Result<()> {
         )])
         .await?;
 
-    info!(mic = ?microphone_permission_state(), "permissions");
+    let perms = host::permissions();
+    let mut status = perms.status().await?;
+    info!(screen = ?status.screen_recording, mic = ?status.microphone, "permissions");
+    if config.sources.screen && !status.can_capture_screen() {
+        let _ = host::request_screen_recording();
+        status = perms.status().await?;
+        info!(screen = ?status.screen_recording, "after screen request");
+    }
+
     let cua_client = cua_client_from_env();
     let (screen_ready, screen_error) = if config.sources.screen {
-        match cua_client.as_ref() {
-            Some(client) => {
-                let client = client.clone();
-                match tokio::task::spawn_blocking(move || client.status()).await {
-                    Ok(Ok(status))
-                        if status.screen_recording == lumen_platform::PermissionState::Granted =>
-                    {
-                        (true, None)
+        if host::capabilities().os == "macos" {
+            match cua_client.as_ref() {
+                Some(client) => {
+                    let client = client.clone();
+                    match tokio::task::spawn_blocking(move || client.status()).await {
+                        Ok(Ok(status))
+                            if status.screen_recording == lumen_platform::PermissionState::Granted =>
+                        {
+                            (true, None)
+                        }
+                        Ok(Ok(_)) => (
+                            false,
+                            Some("Screen Recording permission is required for Lumen Cua".into()),
+                        ),
+                        Ok(Err(error)) => (false, Some(error.to_string())),
+                        Err(error) => (
+                            false,
+                            Some(format!("Lumen Cua status task failed: {error}")),
+                        ),
                     }
-                    Ok(Ok(_)) => (
-                        false,
-                        Some("Screen Recording permission is required for Lumen Cua".into()),
-                    ),
-                    Ok(Err(error)) => (false, Some(error.to_string())),
-                    Err(error) => (
-                        false,
-                        Some(format!("Lumen Cua status task failed: {error}")),
-                    ),
                 }
+                None => (false, Some("Lumen Cua connection was not provided".into())),
             }
-            None => (false, Some("Lumen Cua connection was not provided".into())),
+        } else if status.can_capture_screen() {
+            (true, None)
+        } else {
+            (false, Some("Screen capture permission is unavailable".into()))
         }
     } else {
         (false, None)
@@ -151,9 +162,7 @@ async fn main() -> Result<()> {
     // --- OCR worker ---
     let (ocr_cancel_tx, ocr_cancel_rx) = watch::channel(false);
     let ocr_handle = if config.ocr.enabled {
-        let engine = Arc::new(MacVisionOcr::with_max_image_bytes(
-            config.ocr.max_image_bytes as usize,
-        ));
+        let engine = host::ocr(config.ocr.max_image_bytes as usize);
         if engine.is_supported() {
             let worker = Arc::new(OcrWorker::new(
                 Arc::clone(&store),
@@ -184,7 +193,10 @@ async fn main() -> Result<()> {
                 }),
             ))
         } else {
-            warn!("Vision OCR not supported on this OS; worker not started");
+            warn!(
+                os = host::capabilities().os,
+                "on-device OCR not available on this OS; worker not started"
+            );
             None
         }
     } else {
@@ -377,10 +389,10 @@ async fn main() -> Result<()> {
         let mut orch = CaptureOrchestrator::new(
             Arc::new(lumen_platform::NullDisplays),
             Arc::new(lumen_platform::NullCapturer),
-            Arc::new(MacFrontmost),
-            Arc::new(MacScreenLock),
-            Arc::new(MacIdle),
-            Arc::new(MacPower),
+            host::frontmost(),
+            host::screen_lock(),
+            host::idle(),
+            host::display_sleep(),
             config.capture.clone(),
             config.privacy.clone(),
         );
@@ -412,16 +424,22 @@ async fn main() -> Result<()> {
     }
 
     if screen_ready {
-        let capture = CuaCaptureAdapter::new(
-            cua_client.expect("screen_ready requires an initialized Lumen Cua client"),
-        );
+        let (displays, capturer): (Arc<dyn DisplayEnumerator>, Arc<dyn ScreenCapturer>) =
+            if host::capabilities().os == "macos" {
+                let capture = Arc::new(CuaCaptureAdapter::new(
+                    cua_client.expect("macOS screen_ready requires an initialized Lumen Cua client"),
+                ));
+                (capture.clone(), capture)
+            } else {
+                (host::displays(), host::screen_capturer())
+            };
         let mut orch = CaptureOrchestrator::new(
-            Arc::new(capture.clone()),
-            Arc::new(capture),
-            Arc::new(MacFrontmost),
-            Arc::new(MacScreenLock),
-            Arc::new(MacIdle),
-            Arc::new(MacPower),
+            displays,
+            capturer,
+            host::frontmost(),
+            host::screen_lock(),
+            host::idle(),
+            host::display_sleep(),
             config.capture.clone(),
             config.privacy.clone(),
         );
@@ -724,7 +742,7 @@ async fn run_audio_loop(
         chunk_ms: config.effective_chunk_ms(),
         device: config.device.clone(),
     };
-    let capturer = MacMicCapturer;
+    let capturer = host::mic();
     let stream = tokio::task::spawn_blocking(move || capturer.open(open_cfg))
         .await
         .context("join mic open")?
@@ -887,10 +905,16 @@ fn build_asr_engine(asr: &AsrConfig) -> Result<Arc<dyn AsrEngine>, String> {
         other => match build_engine(&build_cfg) {
             Ok(Some(eng)) => Ok(eng),
             Ok(None) => Err(format!("engine {other:?} unexpectedly returned none")),
-            Err(e) if asr.fallback_speech && other != EngineKind::OpenAiAudio => {
+            // The `speech` fallback only exists where the OS ships a
+            // recognizer. On Windows there is none, so surface the real
+            // engine error instead of swapping in an unsupported engine.
+            Err(e) if asr.fallback_speech
+                && other != EngineKind::OpenAiAudio
+                && host::capabilities().system_speech_asr =>
+            {
                 warn!(
                     error = %e,
-                    "preferred ASR engine failed; falling back to macOS Speech"
+                    "preferred ASR engine failed; falling back to system speech"
                 );
                 Ok(speech_engine(asr))
             }
@@ -901,18 +925,19 @@ fn build_asr_engine(asr: &AsrConfig) -> Result<Arc<dyn AsrEngine>, String> {
 
 fn speech_engine(asr: &AsrConfig) -> Arc<dyn AsrEngine> {
     Arc::new(SpeechEngineAdapter {
-        inner: MacSpeechAsr::with_max_audio_bytes(asr.max_audio_bytes as usize),
+        inner: host::system_speech_asr(asr.max_audio_bytes as usize),
         locale: asr.locale.clone(),
         max_audio_bytes: asr.max_audio_bytes as usize,
     })
 }
 
-/// macOS Speech.framework stays in navi's platform layer
-/// ([`MacSpeechAsr`] implements `lumen_platform::AsrEngine`); this adapter
-/// exposes it through the shared `lumen_asr_engine::AsrEngine` trait, matching
-/// the shared crate's `EngineKind::Speech → Ok(None)` contract.
+/// The OS speech recognizer stays in navi's platform layer (it implements
+/// `lumen_platform::AsrEngine`); this adapter exposes it through the shared
+/// `lumen_asr_engine::AsrEngine` trait, matching the shared crate's
+/// `EngineKind::Speech → Ok(None)` contract. Where the OS ships no recognizer
+/// the inner engine reports `is_supported() == false`.
 struct SpeechEngineAdapter {
-    inner: MacSpeechAsr,
+    inner: Arc<dyn lumen_platform::AsrEngine>,
     locale: String,
     max_audio_bytes: usize,
 }
@@ -924,7 +949,7 @@ impl AsrEngine for SpeechEngineAdapter {
     }
 
     fn is_supported(&self) -> bool {
-        lumen_platform::AsrEngine::is_supported(&self.inner)
+        self.inner.is_supported()
     }
 
     fn max_audio_bytes(&self) -> Option<usize> {
@@ -939,7 +964,9 @@ impl AsrEngine for SpeechEngineAdapter {
     }
 
     async fn transcribe_wav(&self, audio: &[u8], locale: &str) -> Result<AsrResult, AsrError> {
-        let r = lumen_platform::AsrEngine::transcribe(&self.inner, audio, locale)
+        let r = self
+            .inner
+            .transcribe(audio, locale)
             .await
             .map_err(platform_err_to_asr)?;
         let mut out = AsrResult::new(r.text, AsrEngineId::Speech);

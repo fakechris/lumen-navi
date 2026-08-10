@@ -464,6 +464,11 @@ fn resolve_cua_payload_app() -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_dir())
 }
 
+#[cfg(not(target_os = "macos"))]
+fn resolve_cua_payload_app() -> Option<PathBuf> {
+    None
+}
+
 #[cfg(target_os = "macos")]
 fn install_app_bundle(
     source: &Path,

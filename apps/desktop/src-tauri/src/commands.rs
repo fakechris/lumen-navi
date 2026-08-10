@@ -7,8 +7,8 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chrono::{DateTime, Utc};
 use lumen_api::{EventSummary, HealthResponse, OcrSearchHitDto, SourceStatus, API_VERSION};
 use lumen_config::Config;
-use lumen_platform_macos::{accessibility_permission_state, microphone_permission_state};
-use lumen_store::{EventStore, TimelineQuery, SCHEMA_VERSION};
+use lumen_platform_host as host;
+use lumen_store::{EventStore, SCHEMA_VERSION, TimelineQuery};
 use lumen_types::event_kind;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -89,6 +89,20 @@ pub struct TimelineItemDto {
     pub media_type: Option<String>,
     pub has_image: bool,
     pub artifact_bytes: Option<u64>,
+}
+
+/// What this OS build can actually do, so the UI never offers a remedy the
+/// platform does not have.
+#[derive(Debug, Serialize)]
+pub struct PlatformInfoDto {
+    pub os: String,
+    pub screen_capture: bool,
+    pub microphone: bool,
+    pub ocr: bool,
+    pub system_speech_asr: bool,
+    pub text_selection: bool,
+    pub screen_permission_gate: bool,
+    pub accessibility_gate: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -221,17 +235,19 @@ fn daemon_health_url(api_bind: &str) -> String {
 
 #[tauri::command]
 pub async fn get_permissions(state: State<'_, AppState>) -> Result<PermissionsDto, String> {
-    let microphone = microphone_permission_state();
-    let accessibility = accessibility_permission_state();
-    let cua = state.cua.clone();
-    let cua_status = tauri::async_runtime::spawn_blocking(move || cua.status())
-        .await
-        .map_err(err)?
-        .map_err(|error| {
-            tracing::warn!(%error, "Lumen Cua permission status unavailable");
-        });
+    let status = host::permissions().status().await.map_err(err)?;
+    let microphone = status.microphone;
+    let accessibility = status.accessibility;
     let (screen_recording, screen_capture_ready, direct_capture_status, direct_capture_error) =
-        match cua_status {
+        if host::capabilities().os == "macos" {
+            let cua = state.cua.clone();
+            let cua_status = tauri::async_runtime::spawn_blocking(move || cua.status())
+                .await
+                .map_err(err)?
+                .map_err(|error| {
+                    tracing::warn!(%error, "Lumen Cua permission status unavailable");
+                });
+            match cua_status {
             Ok(status) => {
                 let direct_capture_status = serde_json::to_value(status.direct_capture_status)
                     .ok()
@@ -248,6 +264,14 @@ pub async fn get_permissions(state: State<'_, AppState>) -> Result<PermissionsDt
                 )
             }
             Err(()) => ("Unavailable".into(), None, "unavailable".into(), None),
+            }
+        } else {
+            (
+                format!("{:?}", status.screen_recording),
+                Some(status.can_capture_screen()),
+                "native".into(),
+                None,
+            )
         };
     Ok(PermissionsDto {
         screen_recording,
@@ -256,6 +280,21 @@ pub async fn get_permissions(state: State<'_, AppState>) -> Result<PermissionsDt
         direct_capture_error,
         microphone: format!("{microphone:?}"),
         accessibility: format!("{accessibility:?}"),
+    })
+}
+
+#[tauri::command]
+pub fn get_platform_info() -> Result<PlatformInfoDto, String> {
+    let c = host::capabilities();
+    Ok(PlatformInfoDto {
+        os: c.os.into(),
+        screen_capture: c.screen_capture,
+        microphone: c.microphone,
+        ocr: c.ocr,
+        system_speech_asr: c.system_speech_asr,
+        text_selection: c.text_selection,
+        screen_permission_gate: c.screen_permission_gate,
+        accessibility_gate: c.accessibility_gate,
     })
 }
 
@@ -742,7 +781,7 @@ pub fn observe_start_inner(state: &AppState) -> Result<ObserveStatus, String> {
     let stdout = std::fs::File::create(log_path.join("daemon.stdout.log")).map_err(err)?;
     let stderr = std::fs::File::create(log_path.join("daemon.stderr.log")).map_err(err)?;
 
-    let cua_ready = if cfg.sources.screen {
+    let cua_ready = if cfg.sources.screen && host::capabilities().os == "macos" {
         match state.cua.ensure_running() {
             Ok(_) => true,
             Err(error) => {
@@ -765,6 +804,13 @@ pub fn observe_start_inner(state: &AppState) -> Result<ObserveStatus, String> {
         daemon_command
             .env("LUMEN_CUA_SOCKET", state.cua.socket_path())
             .env("LUMEN_CUA_TOKEN_FILE", state.cua.token_file());
+    }
+    // CREATE_NO_WINDOW — without it Windows gives the console-subsystem daemon
+    // its own black console window on every start.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        daemon_command.creation_flags(0x0800_0000);
     }
     let child = daemon_command
         .spawn()
@@ -810,8 +856,7 @@ fn observe_stop_inner(state: &AppState) -> Result<ObserveStatus, String> {
 
 #[tauri::command]
 pub fn open_data_dir(state: State<'_, AppState>) -> Result<(), String> {
-    let dir = state.data_dir.display().to_string();
-    open_path(&dir)
+    host::shell::open_path(&state.data_dir).map_err(err)
 }
 
 #[tauri::command]
@@ -890,6 +935,9 @@ pub fn set_launch_observe(state: State<'_, AppState>, enabled: bool) -> Result<(
 
 #[tauri::command]
 pub async fn request_screen_permission(state: State<'_, AppState>) -> Result<bool, String> {
+    if host::capabilities().os != "macos" {
+        return Ok(host::request_screen_recording());
+    }
     let cua = state.cua.clone();
     tauri::async_runtime::spawn_blocking(move || cua.request_screen_permission())
         .await
@@ -898,6 +946,13 @@ pub async fn request_screen_permission(state: State<'_, AppState>) -> Result<boo
 
 #[tauri::command]
 pub async fn refresh_screen_permission(state: State<'_, AppState>) -> Result<bool, String> {
+    if host::capabilities().os != "macos" {
+        return host::permissions()
+            .status()
+            .await
+            .map(|status| status.can_capture_screen())
+            .map_err(err);
+    }
     let cua = state.cua.clone();
     tauri::async_runtime::spawn_blocking(move || cua.refresh_screen_permission())
         .await
@@ -906,7 +961,7 @@ pub async fn refresh_screen_permission(state: State<'_, AppState>) -> Result<boo
 
 #[tauri::command]
 pub async fn request_microphone_permission() -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(lumen_platform_macos::request_microphone_access)
+    tauri::async_runtime::spawn_blocking(host::request_microphone_access)
         .await
         .map_err(|e| format!("microphone permission task failed: {e}"))?
         .map_err(|e| e.to_string())
@@ -914,7 +969,13 @@ pub async fn request_microphone_permission() -> Result<bool, String> {
 
 #[tauri::command]
 pub fn open_privacy_settings(kind: String) -> Result<(), String> {
-    open_url(privacy_settings_url(&kind)?)
+    match host::shell::privacy_settings_uri(&kind) {
+        Some(uri) => host::shell::open_uri(uri).map_err(err),
+        None => Err(format!(
+            "{} has no settings page for '{kind}' on this system",
+            host::capabilities().os
+        )),
+    }
 }
 
 fn privacy_settings_url(kind: &str) -> Result<&'static str, String> {
@@ -938,41 +999,13 @@ fn privacy_settings_url(kind: &str) -> Result<&'static str, String> {
     }
 }
 
-fn open_path(path: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .arg(path)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = path;
-        Err("open path only supported on macOS".into())
-    }
-}
 
-fn open_url(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let status = Command::new("open")
-            .arg(url)
-            .status()
-            .map_err(|e| e.to_string())?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("open failed for {url}: {status}"))
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = url;
-        Err("open url only supported on macOS".into())
-    }
-}
+/// Executable name of the bundled Observe daemon for this platform.
+const DAEMON_BIN: &str = if cfg!(windows) {
+    "lumen-daemon.exe"
+} else {
+    "lumen-daemon"
+};
 
 #[cfg(test)]
 mod command_tests {
@@ -1060,24 +1093,23 @@ mod command_tests {
 fn resolve_daemon_binary() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
-    // 1) Bundled next to the desktop binary (Tauri externalBin / DMG layout).
+    // 1) Bundled next to the desktop binary (Tauri externalBin layout — the
+    //    .app on macOS, the install directory on Windows).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("lumen-daemon"));
-            // Some layouts keep helpers under ../Resources
+            candidates.push(dir.join(DAEMON_BIN));
+            // Some macOS layouts keep helpers under ../Resources.
             if let Some(contents) = dir.parent() {
-                candidates.push(contents.join("Resources/lumen-daemon"));
-                candidates.push(contents.join("MacOS/lumen-daemon"));
+                candidates.push(contents.join("Resources").join(DAEMON_BIN));
+                candidates.push(contents.join("MacOS").join(DAEMON_BIN));
             }
         }
     }
 
     // 2) Workspace builds during development.
-    candidates.push(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target/release/lumen-daemon"),
-    );
-    candidates
-        .push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target/debug/lumen-daemon"));
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target");
+    candidates.push(workspace.join("release").join(DAEMON_BIN));
+    candidates.push(workspace.join("debug").join(DAEMON_BIN));
 
     for c in &candidates {
         if c.is_file() {
@@ -1086,15 +1118,13 @@ fn resolve_daemon_binary() -> Option<PathBuf> {
     }
 
     // 3) PATH
-    if let Ok(out) = Command::new("which").arg("lumen-daemon").output() {
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !p.is_empty() {
-                let path = PathBuf::from(p);
-                if path.is_file() {
-                    return Some(path);
-                }
-            }
+    for dir in std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .unwrap_or_default()
+    {
+        let candidate = dir.join(DAEMON_BIN);
+        if candidate.is_file() {
+            return Some(candidate);
         }
     }
     None
@@ -1119,6 +1149,9 @@ pub struct AssistantConfigDto {
     /// Never echoes the key back — only whether one is configured.
     pub api_key_set: bool,
     pub accessibility_trusted: bool,
+    /// False where the OS backend cannot read another app's selection, so the
+    /// settings page can explain instead of showing a permission remedy.
+    pub selection_supported: bool,
     pub clipboard_fallback: bool,
 }
 
@@ -1143,7 +1176,8 @@ fn assistant_dto(cfg: &lumen_config::Config) -> AssistantConfigDto {
         target_lang: cfg.assistant.target_lang.clone(),
         max_selection_chars: cfg.assistant.max_selection_chars,
         api_key_set: !cfg.assistant.effective_api_key().is_empty(),
-        accessibility_trusted: lumen_platform_macos::accessibility_trusted(false),
+        accessibility_trusted: host::selection::accessibility_trusted(false),
+        selection_supported: host::selection::supported(),
         clipboard_fallback: cfg.assistant.clipboard_fallback,
     }
 }
@@ -1204,7 +1238,7 @@ pub fn assistant_update_config(
 
 #[tauri::command]
 pub fn request_accessibility_permission() -> Result<bool, String> {
-    Ok(lumen_platform_macos::accessibility_trusted(true))
+    Ok(host::selection::accessibility_trusted(true))
 }
 
 /// Start a streaming assistant request; returns its id. Progress arrives as

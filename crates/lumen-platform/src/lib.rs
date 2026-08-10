@@ -484,6 +484,37 @@ impl OcrEngine for NullOcr {
     }
 }
 
+// --- Text selection (desktop 划词弹窗 only; never on the capture path) ---
+
+/// What the platform's accessibility layer reported for the frontmost
+/// text selection.
+#[derive(Debug, Clone)]
+pub struct SelectionInfo {
+    pub text: String,
+    /// Screen rect (x, y, w, h) in global points (top-left origin), if available.
+    pub bounds: Option<(f64, f64, f64, f64)>,
+    /// PID owning the focused element (used by the desktop to skip itself).
+    pub pid: Option<i32>,
+}
+
+/// What a left-mouse-up means for selection tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseUp {
+    /// Drag distance since mouse-down exceeded a few px, or a multi-click —
+    /// a selection is plausible and worth querying (with retries).
+    pub maybe_selection: bool,
+}
+
+/// Trim + normalize raw accessibility text; returns None when effectively
+/// empty. Truncates to `max_chars` (char-boundary safe).
+pub fn normalize_selection(raw: &str, max_chars: usize) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(max_chars.max(1)).collect())
+}
+
 // --- Null stubs (tests / non-macOS) ---
 
 pub struct NullPermissions;
@@ -557,6 +588,7 @@ impl ScreenCapturer for NullCapturer {
     ) -> Result<ScreenshotFrame, PlatformError> {
         Err(PlatformError::Unsupported("null capturer".into()))
     }
+
     async fn capture_display_raw(
         &self,
         _id: DisplayId,
@@ -641,6 +673,22 @@ pub fn hamming64(a: u64, b: u64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_selection_trims_and_rejects_empty() {
+        assert_eq!(normalize_selection("  hello  ", 100), Some("hello".into()));
+        assert_eq!(normalize_selection("   ", 100), None);
+        assert_eq!(normalize_selection("", 100), None);
+    }
+
+    #[test]
+    fn normalize_selection_truncates_on_char_boundary() {
+        let s = "你好世界abc";
+        assert_eq!(normalize_selection(s, 4), Some("你好世界".into()));
+        assert_eq!(normalize_selection(s, 100), Some(s.into()));
+        // max_chars clamped to >= 1
+        assert_eq!(normalize_selection(s, 0), Some("你".into()));
+    }
 
     #[test]
     fn gray_distance_identical_is_zero() {

@@ -1,0 +1,98 @@
+name: Windows CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build and test (Windows x64)
+    runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: "navi-windows-x64"
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: apps/desktop
+
+      - name: Build desktop frontend
+        run: npm run build
+        working-directory: apps/desktop
+
+      - name: Test workspace crates
+        run: cargo test --workspace --exclude lumen-navi-desktop
+
+      - name: Prepare bundled lumen-daemon
+        shell: pwsh
+        run: ./scripts/windows/prepare-daemon-binary.ps1 -Target x86_64-pc-windows-msvc
+
+      - name: Build unsigned NSIS installer
+        run: npm run tauri -- build --bundles nsis
+        working-directory: apps/desktop
+
+      - name: Upload installer for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nsis-${{ github.sha }}
+          path: target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  extension:
+    name: Browser extension tests
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: extensions/browser/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: extensions/browser
+
+      - name: Run tests
+        run: npm test
+        working-directory: extensions/browser

@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{bail, Context, Result};
 use lumen_platform::{DisplayEnumerator, DisplayId, ScreenCapturer};
+#[cfg(target_os = "macos")]
 use lumen_platform_macos::{MacDisplays, MacScreenCapturer};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -127,6 +128,13 @@ async fn handle_connection(stream: tokio::net::UnixStream, token: &str) -> Resul
 }
 
 async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = command;
+        bail!("Lumen Cua capture service requires macOS")
+    }
+
+    #[cfg(target_os = "macos")]
     match command {
         Command::Status => Ok((ResponseResult::Status { status: status() }, Vec::new())),
         Command::ListDisplays => {
