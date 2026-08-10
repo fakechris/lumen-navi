@@ -2230,7 +2230,7 @@ dependencies = [
  "lumen-intake",
  "lumen-models",
  "lumen-platform",
- "lumen-platform-macos",
+ "lumen-platform-host",
  "lumen-process",
  "lumen-sources-browser",
  "lumen-sources-media",
@@ -2282,7 +2282,7 @@ dependencies = [
  "lumen-cua",
  "lumen-models",
  "lumen-platform",
- "lumen-platform-macos",
+ "lumen-platform-host",
  "lumen-process",
  "lumen-store",
  "lumen-types",
@@ -2310,6 +2310,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen-platform-cpal"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "lumen-platform",
+ "tracing",
+]
+
+[[package]]
+name = "lumen-platform-host"
+version = "0.1.0"
+dependencies = [
+ "lumen-platform",
+ "lumen-platform-cpal",
+ "lumen-platform-macos",
+ "lumen-platform-windows",
+]
+
+[[package]]
 name = "lumen-platform-macos"
 version = "0.1.0"
 dependencies = [
@@ -2318,16 +2337,29 @@ dependencies = [
  "core-foundation",
  "core-foundation-sys",
  "core-graphics 0.24.0",
- "cpal",
  "foreign-types",
  "image",
  "lumen-platform",
+ "lumen-platform-cpal",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "lumen-platform-windows"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "image",
+ "lumen-platform",
+ "lumen-platform-cpal",
+ "tokio",
+ "tracing",
+ "windows 0.61.3",
 ]
 
 [[package]]

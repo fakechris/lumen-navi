@@ -4,8 +4,11 @@ members = [
   "crates/lumen-types",
   "crates/lumen-config",
   "crates/lumen-platform",
+  "crates/lumen-platform-cpal",
   "crates/lumen-platform-macos",
   "crates/lumen-cua",
+  "crates/lumen-platform-windows",
+  "crates/lumen-platform-host",
   "crates/lumen-intake",
   "crates/lumen-sources-media",
   "crates/lumen-sources-browser",
@@ -19,7 +22,10 @@ default-members = [
   "crates/lumen-types",
   "crates/lumen-config",
   "crates/lumen-platform",
+  "crates/lumen-platform-cpal",
   "crates/lumen-platform-macos",
+  "crates/lumen-platform-windows",
+  "crates/lumen-platform-host",
   "crates/lumen-intake",
   "crates/lumen-sources-media",
   "crates/lumen-sources-browser",
@@ -59,8 +65,11 @@ ureq = { version = "2", default-features = true, features = ["json"] }
 lumen-types = { path = "crates/lumen-types" }
 lumen-config = { path = "crates/lumen-config" }
 lumen-platform = { path = "crates/lumen-platform" }
+lumen-platform-cpal = { path = "crates/lumen-platform-cpal" }
 lumen-platform-macos = { path = "crates/lumen-platform-macos" }
 lumen-cua = { path = "crates/lumen-cua" }
+lumen-platform-windows = { path = "crates/lumen-platform-windows" }
+lumen-platform-host = { path = "crates/lumen-platform-host" }
 # Shared Lumen product-cluster crates (lumen-suite). `cloud` enables the
 # OpenAI-compatible HTTP engine navi has always shipped. Keep all lumen-suite
 # deps on a single rev.

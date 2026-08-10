@@ -187,6 +187,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_health,
             commands::get_permissions,
+            commands::get_platform_info,
             commands::search_text,
             commands::list_events,
             commands::list_timeline,

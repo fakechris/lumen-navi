@@ -16,6 +16,7 @@ import type {
   ObserveStatus,
   OnboardingState,
   Permissions,
+  PlatformInfo,
   SearchHit,
   SourcesUpdate,
   TimelineItem,
@@ -24,6 +25,7 @@ import type {
 export const api = {
   getHealth: () => invoke<Health>("get_health"),
   getPermissions: () => invoke<Permissions>("get_permissions"),
+  getPlatformInfo: () => invoke<PlatformInfo>("get_platform_info"),
   searchText: (query: string, limit = 30) =>
     invoke<SearchHit[]>("search_text", { query, limit }),
   listEvents: (limit = 50) =>

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use lumen_platform::PermissionState;
+#[cfg(target_os = "macos")]
 use lumen_platform_macos::{request_screen_recording, screen_recording_access_granted};
 
 use crate::{CuaStatus, DirectCaptureError, DirectCaptureStatus};
@@ -14,6 +15,16 @@ const DIRECT_CAPTURE_PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 /// - TCC to register the process in the Screen Recording list
 /// - session caches / XPC notifications to settle
 const POST_REQUEST_SETTLE: Duration = Duration::from_secs(3);
+
+#[cfg(not(target_os = "macos"))]
+fn screen_recording_access_granted() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+fn request_screen_recording() -> bool {
+    false
+}
 
 pub(crate) fn read_only_status() -> CuaStatus {
     status_from_observations(screen_recording_access_granted(), None)

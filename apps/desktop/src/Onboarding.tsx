@@ -6,32 +6,42 @@ import type {
   AsrModelStatus,
   OnboardingState,
   Permissions,
+  PlatformInfo,
 } from "./types";
 
-const STEPS = [
-  {
-    title: "欢迎使用 Lumen Navi",
-    body: "本地持续记录屏幕与声音，转成可搜索的上下文。数据默认留在本机 Application Support。",
-  },
-  {
-    title: "屏幕录制",
-    body: "屏幕通道需要 Screen Recording 权限才能截取屏幕。点击下方按钮请求权限并打开系统设置。",
-    kind: "screen" as const,
-  },
-  {
-    title: "麦克风",
-    body: "音频 chunk 需要麦克风权限。持续转写默认走本机 SenseVoice；也可改用 macOS Speech。",
-    kind: "microphone" as const,
-  },
-  {
-    title: "本地 ASR 模型",
-    body: "默认 SenseVoice。模型装在 Lumen 共享目录（navi / asr 等共用，只下一次）。可自选任意已有目录，或下载官方 int8 包。",
-  },
-  {
-    title: "准备就绪",
-    body: "可以随时在概览页分别开关屏幕、麦克风与浏览器通道。配置会自动生效。",
-  },
-];
+function stepsFor(platform: PlatformInfo | null) {
+  const windows = platform?.os === "windows";
+  return [
+    {
+      title: "欢迎使用 Lumen Navi",
+      body: windows
+        ? "本地持续记录屏幕与声音，转成可搜索的上下文。数据默认留在本机 %LOCALAPPDATA%\\LumenNavi。"
+        : "本地持续记录屏幕与声音，转成可搜索的上下文。数据默认留在本机 Application Support。",
+    },
+    {
+      title: "屏幕截取",
+      body: windows
+        ? "Windows 桌面程序截屏无需单独授权，直接进入下一步即可。若截图为空，请确认没有全屏独占的应用挡住采集。"
+        : "Observe 需要 Screen Recording 权限才能截取屏幕。点击下方按钮打开系统设置并授权本应用。",
+      kind: "screen" as const,
+    },
+    {
+      title: "麦克风",
+      body: windows
+        ? "音频 chunk 需要麦克风权限：在「设置 → 隐私和安全性 → 麦克风」允许桌面应用访问。持续转写走本机 SenseVoice。"
+        : "音频 chunk 需要麦克风权限。持续转写默认走本机 SenseVoice；也可改用 macOS Speech。",
+      kind: "microphone" as const,
+    },
+    {
+      title: "本地 ASR 模型",
+      body: "默认 SenseVoice。模型装在 Lumen 共享目录（navi / asr 等共用，只下一次）。可自选任意已有目录，或下载官方 int8 包。",
+    },
+    {
+      title: "准备就绪",
+      body: "可以随时在概览页分别开关屏幕、麦克风与浏览器通道。配置会自动生效。",
+    },
+  ];
+}
 
 export function Onboarding({
   initial,
@@ -40,7 +50,9 @@ export function Onboarding({
   initial: OnboardingState;
   onDone: () => void;
 }) {
-  const [step, setStep] = useState(Math.min(initial.step, STEPS.length - 1));
+  const [platform, setPlatform] = useState<PlatformInfo | null>(null);
+  const STEPS = stepsFor(platform);
+  const [step, setStep] = useState(Math.min(initial.step, 4));
   const [perms, setPerms] = useState<Permissions | null>(null);
   const [launch, setLaunch] = useState(initial.launch_observe);
   const [busy, setBusy] = useState(false);
@@ -61,6 +73,10 @@ export function Onboarding({
     } catch (e) {
       setError(String(e));
     }
+  }, []);
+
+  useEffect(() => {
+    void api.getPlatformInfo().then(setPlatform).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -237,16 +253,20 @@ export function Onboarding({
             <span className={`pill ${permClass(perms?.screen_recording)}`}>
               Screen {perms?.screen_recording ?? "…"}
             </span>
-            <span className={`pill ${perms?.screen_capture_ready ? "ok" : "warn"}`}>
-              Capture {perms?.direct_capture_status ?? "…"}
-            </span>
-            <button
-              className="btn primary"
-              disabled={busy}
-              onClick={() => void requestScreen()}
-            >
-              请求 / 打开屏幕权限
-            </button>
+            {platform?.screen_permission_gate !== false && (
+              <>
+                <span className={`pill ${perms?.screen_capture_ready ? "ok" : "warn"}`}>
+                  Capture {perms?.direct_capture_status ?? "…"}
+                </span>
+                <button
+                  className="btn primary"
+                  disabled={busy}
+                  onClick={() => void requestScreen()}
+                >
+                  请求 / 打开屏幕权限
+                </button>
+              </>
+            )}
           </div>
         )}
 
@@ -263,13 +283,15 @@ export function Onboarding({
               >
                 请求 / 打开麦克风权限
               </button>
-              <button
-                className="btn"
-                disabled={busy}
-                onClick={() => void api.openPrivacySettings("speech")}
-              >
-                语音识别设置（Speech 回退）
-              </button>
+              {platform?.system_speech_asr !== false && (
+                <button
+                  className="btn"
+                  disabled={busy}
+                  onClick={() => void api.openPrivacySettings("speech")}
+                >
+                  语音识别设置（Speech 回退）
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -286,7 +308,9 @@ export function Onboarding({
               >
                 <option value="sensevoice">SenseVoice（本地，推荐）</option>
                 <option value="whisper">Whisper（本地）</option>
-                <option value="speech">macOS Speech（无需下载）</option>
+                {platform?.system_speech_asr !== false && (
+                  <option value="speech">macOS Speech（无需下载）</option>
+                )}
               </select>
             </div>
 

@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use lumen_platform_macos::{
-    accessibility_trusted, focused_element_pid, focused_selection, mouse_location,
+use lumen_platform_host::selection::{
+    self, accessibility_trusted, focused_element_pid, focused_selection, mouse_location,
     normalize_selection, start_mouse_up_monitor,
 };
 use serde_json::json;
@@ -69,6 +69,14 @@ pub fn init_from_config(app: &AppHandle, enabled: bool) {
 /// Idempotently start the mouse monitor (used by config changes and by the
 /// settings poll for self-heal after the user grants Accessibility).
 pub fn ensure_monitor(app: &AppHandle) {
+    if !selection::supported() {
+        // Windows: no UI Automation backend yet. Stay quiet after the first
+        // notice — the settings page tells the user the same thing.
+        if !MONITOR_STARTED.swap(true, Ordering::SeqCst) {
+            tracing::info!("selection popup is not supported on this platform");
+        }
+        return;
+    }
     if MONITOR_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -85,7 +93,7 @@ pub fn ensure_monitor(app: &AppHandle) {
     }
 }
 
-fn on_mouse_up(app: &AppHandle, up: lumen_platform_macos::MouseUp) {
+fn on_mouse_up(app: &AppHandle, up: selection::MouseUp) {
     if !popup_enabled() {
         return;
     }
@@ -176,7 +184,7 @@ async fn clipboard_fallback_or_hide(handle: &AppHandle, epoch: u64) {
             .flatten();
         if pid != Some(std::process::id() as i32) {
             let grabbed = tauri::async_runtime::spawn_blocking(
-                lumen_platform_macos::clipboard_grab_selection,
+                selection::clipboard_grab_selection,
             )
             .await
             .ok()

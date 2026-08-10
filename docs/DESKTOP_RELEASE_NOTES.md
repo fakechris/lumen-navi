@@ -1,0 +1,74 @@
+## macOS 安装说明
+
+请根据 Mac 类型下载对应的 DMG：
+
+- **Apple Silicon**（M1 及后续机型）：`Lumen-Navi-v*-arm64.dmg`
+- **Intel Mac**：`Lumen-Navi-v*-x64.dmg`
+
+双击 DMG，将 **Lumen Navi** 拖入 Applications。
+
+### 首次打开
+
+发布构建使用 **Developer ID 签名并公证**。如果 macOS 仍阻止启动，请先确认安装包来自本仓库发布页且校验值一致，不要绕过来源不明应用的 Gatekeeper 提示。
+
+请只从本仓库的 [GitHub Releases](https://github.com/fakechris/lumen-navi/releases) 下载，并用 `SHA256SUMS.txt` 校验：
+
+```bash
+# Apple Silicon
+grep 'arm64\.dmg$' SHA256SUMS.txt | shasum -a 256 --check
+
+# Intel
+grep 'x64\.dmg$' SHA256SUMS.txt | shasum -a 256 --check
+```
+
+### 权限
+
+按应用首次引导授予：
+
+| 权限 | 用途 |
+|------|------|
+| 屏幕录制（Lumen Cua） | 截图 Observe |
+| 麦克风 | 音频 chunk |
+| 语音识别 | 本地转写（Observe ASR） |
+
+### 说明
+
+- 应用内嵌 `lumen-daemon`（采集 + OCR + ASR 工人进程）。
+- 数据默认：`~/Library/Application Support/LumenNavi/`
+- **听写/热键注入** 请用独立产品 [Lumen ASR](https://github.com/fakechris/lumen-asr)，与本仓库无关。
+
+---
+
+## Windows 安装说明
+
+下载 `Lumen-Navi-v*-windows-x64-setup.exe`（Windows 10/11 x64）。
+
+### 首次打开
+
+安装包 **未做代码签名**，SmartScreen 会提示「已保护你的电脑」：点击「更多信息 → 仍要运行」。
+请只从本仓库的 [GitHub Releases](https://github.com/fakechris/lumen-navi/releases) 下载，并校验：
+
+```powershell
+Get-FileHash .\Lumen-Navi-v*-windows-x64-setup.exe -Algorithm SHA256
+```
+
+与 `SHA256SUMS.txt` 中的对应行比对。
+
+安装为 **当前用户** 模式（不需要管理员权限），装到 `%LOCALAPPDATA%\Lumen Navi`。
+缺少 WebView2 运行时时安装器会自动静默下载。
+
+### 权限
+
+| 权限 | 用途 | 说明 |
+|------|------|------|
+| 屏幕截取 | 截图 Observe | Windows 桌面程序无需授权 |
+| 麦克风 | 音频 chunk | 「设置 → 隐私和安全性 → 麦克风」需允许桌面应用 |
+
+OCR 走系统 `Windows.Media.Ocr`，需要在「设置 → 时间和语言 → 语言和区域」为对应语言
+安装可选功能中的 **光学字符识别 (OCR)** 语言包。
+
+### 与 macOS 版的差异
+
+- 无「macOS Speech」引擎：ASR 请选择本地 SenseVoice / Whisper，或配置云端引擎。
+- 划词弹窗（选中取词 + LLM）暂未实现，UI 中会标注为不支持。
+- 数据默认：`%LOCALAPPDATA%\LumenNavi\`，模型共享目录 `%LOCALAPPDATA%\Lumen\models\`。

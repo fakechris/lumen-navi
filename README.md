@@ -91,15 +91,19 @@ The Chrome MV3 extension records a privacy-gated lifecycle stream into its own l
 
 Setup, build, API, and privacy contract: [`docs/BROWSER_CAPTURE.md`](docs/BROWSER_CAPTURE.md).
 
-### Release DMG
+### Release installers
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
-# → GitHub Actions builds arm64 + x64 DMGs and publishes a Release
+# → GitHub Actions builds macOS arm64 + x64 DMGs and a Windows x64 NSIS
+#   installer, then one aggregate job publishes them with SHA256SUMS.txt
 ```
 
-Install notes: [`docs/MACOS_RELEASE_NOTES.md`](docs/MACOS_RELEASE_NOTES.md).
+Install notes: [`docs/DESKTOP_RELEASE_NOTES.md`](docs/DESKTOP_RELEASE_NOTES.md).
+
+Windows support status, architecture and known gaps:
+[`docs/WINDOWS_PORT_STATUS.md`](docs/WINDOWS_PORT_STATUS.md).
 
 ## Related projects
 

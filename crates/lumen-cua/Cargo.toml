@@ -14,7 +14,6 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 lumen-platform = { workspace = true }
-lumen-platform-macos = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -24,6 +23,7 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+lumen-platform-macos = { workspace = true }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSRunningApplication"] }
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSError"] }
