@@ -1,6 +1,6 @@
 //! Tauri commands for the Navi desktop shell.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -114,8 +114,9 @@ pub async fn get_health(state: State<'_, AppState>) -> Result<HealthResponse, St
     let paused = *state.paused.lock().map_err(err)?;
     let cfg = state.load_config().map_err(err)?;
     let observe = state.observe_running();
+    let daemon_socket = state.data_dir.join("daemon.sock");
     let daemon_health = if observe {
-        fetch_daemon_health(&cfg.api.bind).await
+        fetch_daemon_health(&daemon_socket).await
     } else {
         None
     };
@@ -164,19 +165,49 @@ fn health_sources(
     ]
 }
 
-async fn fetch_daemon_health(api_bind: &str) -> Option<HealthResponse> {
-    let url = daemon_health_url(api_bind);
-    let response = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(750))
-        .build()
-        .ok()?
-        .get(url)
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?;
-    response.json::<HealthResponse>().await.ok()
+async fn fetch_daemon_health(socket_path: &Path) -> Option<HealthResponse> {
+    // The shell connects to the daemon over a Unix domain socket (no TCP port
+    // to conflict over). reqwest 0.12 doesn't speak Unix sockets, so this is
+    // a minimal HTTP/1.1 GET: connect, write request, read until body, parse.
+    // Single endpoint, small JSON, 750ms timeout — keeps it dependency-free.
+    #[cfg(unix)]
+    {
+        let path = socket_path.to_path_buf();
+        tokio::task::spawn_blocking(move || fetch_health_via_unix_socket(&path))
+            .await
+            .ok()
+            .flatten()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = socket_path;
+        None
+    }
+}
+
+#[cfg(unix)]
+fn fetch_health_via_unix_socket(socket_path: &Path) -> Option<HealthResponse> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let mut stream = UnixStream::connect(socket_path).ok()?;
+    stream.set_read_timeout(Some(Duration::from_millis(750))).ok()?;
+    stream.set_write_timeout(Some(Duration::from_millis(750))).ok()?;
+    let request = b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    stream.write_all(request).ok()?;
+    // Read the whole response (Connection: close → server closes after body).
+    let mut buf = Vec::with_capacity(8192);
+    stream.read_to_end(&mut buf).ok()?;
+    // Split headers / body at the first blank line.
+    let body_start = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)?;
+    let body = &buf[body_start..];
+    // If the response used chunked encoding this won't decode; axum serves a
+    // plain Content-Length body for small JSON, so a direct parse is fine.
+    serde_json::from_slice::<HealthResponse>(body).ok()
 }
 
 fn daemon_health_url(api_bind: &str) -> String {

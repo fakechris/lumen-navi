@@ -152,12 +152,15 @@ fn load_or_write_config(path: &Path, data_dir: &Path) -> Result<Config> {
         }
         return Ok(cfg);
     }
-    let mut cfg = Config::default();
-    cfg.data_dir = data_dir.to_path_buf();
-    cfg.api.enabled = true;
-    cfg.api.bind = "127.0.0.1:7420".into();
-    cfg.capture.screen_ticks = 0;
-    cfg.audio.ticks = 0;
+        let mut cfg = Config::default();
+        cfg.data_dir = data_dir.to_path_buf();
+        cfg.api.enabled = true;
+        // Note: api.bind (TCP port) is now used only by the optional browser-
+        // extension listener; the shell talks to the daemon over daemon.sock.
+        // Keep the default 7420 (from ApiConfig::default) so existing
+        // extensions keep working.
+        cfg.capture.screen_ticks = 0;
+        cfg.audio.ticks = 0;
     let raw = toml::to_string_pretty(&cfg)?;
     std::fs::write(path, raw)?;
     Ok(cfg)

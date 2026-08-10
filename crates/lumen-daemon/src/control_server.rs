@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -25,7 +26,7 @@ use lumen_store::{
 use lumen_types::SourceKind;
 use serde::Deserialize;
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 #[derive(Clone)]
 pub struct ControlState {
@@ -89,13 +90,107 @@ impl ControlState {
     }
 }
 
-pub async fn serve(bind: SocketAddr, state: ControlState) -> anyhow::Result<()> {
-    let app = router(state);
+/// Primary control channel: a Unix domain socket. The desktop shell connects
+/// here, so there is no TCP port to allocate or conflict over. Mirrors the
+/// `lumen-cua` socket lifecycle: create parent dir, probe-and-unlink stale
+/// socket, bind, chmod 0o600, serve. The socket file is removed on clean exit.
+pub async fn serve(socket_path: &Path, state: ControlState) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::net::UnixListener;
 
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    info!(%bind, "control API listening");
-    axum::serve(listener, app).await?;
-    Ok(())
+        if let Some(parent) = socket_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("create socket dir {}: {e}", parent.display()))?;
+        }
+        // Stale-socket detection: if connect() succeeds, a live daemon owns it.
+        if socket_path.exists() {
+            if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
+                anyhow::bail!(
+                    "control socket already in use by a live daemon: {}",
+                    socket_path.display()
+                );
+            }
+            let _ = std::fs::remove_file(socket_path);
+        }
+        let listener = UnixListener::bind(socket_path)
+            .map_err(|e| anyhow::anyhow!("bind socket {}: {e}", socket_path.display()))?;
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| anyhow::anyhow!("chmod socket {}: {e}", socket_path.display()))?;
+
+        let app = router(state);
+        info!(socket = %socket_path.display(), "control API listening (unix socket)");
+        // Remove the socket file when serve returns (shutdown) so the next
+        // start sees a clean path.
+        let path_for_cleanup = socket_path.to_path_buf();
+        let result = axum::serve(listener, app).await;
+        let _ = std::fs::remove_file(&path_for_cleanup);
+        result.map_err(|e| anyhow::anyhow!("control socket serve: {e}"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (socket_path, state);
+        anyhow::bail!("unix sockets unsupported on this platform")
+    }
+}
+
+/// Secondary control channel for consumers that can only speak HTTP over TCP
+/// (the browser extension — browsers cannot open Unix sockets). Best-effort:
+/// tries the configured `bind`, then increments the port up to `max_attempts`
+/// times; on success writes the actual port (with PID) to `port_file` so a
+/// future extension discovery path can read it. Bind failure is logged at WARN
+/// and returns Ok(()) — the extension is optional; the shell uses the socket.
+pub async fn serve_tcp(
+    bind: &str,
+    max_attempts: u32,
+    port_file: &Path,
+    state: ControlState,
+) -> anyhow::Result<()> {
+    let app = router(state.clone());
+    let addr: SocketAddr = match bind.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            warn!(bind, error = %e, "invalid api.bind for TCP listener; browser extension disabled");
+            return Ok(());
+        }
+    };
+    let mut bound_addr = addr;
+    let listener = {
+        let mut last_err = None;
+        let mut ok = None;
+        for i in 0..max_attempts {
+            let candidate = SocketAddr::new(addr.ip(), addr.port().saturating_add(i as u16));
+            match tokio::net::TcpListener::bind(candidate).await {
+                Ok(l) => {
+                    bound_addr = candidate;
+                    ok = Some(l);
+                    break;
+                }
+                Err(e) => last_err = Some((candidate, e)),
+            }
+        }
+        match ok {
+            Some(l) => l,
+            None => {
+                if let Some((c, e)) = last_err {
+                    warn!(attempted = %c, error = %e, "TCP control API disabled (port range exhausted); browser extension will not connect");
+                }
+                return Ok(());
+            }
+        }
+    };
+    // Publish the actual port (+ pid) so the shell/extension can discover it.
+    // Stale-file detection on read: caller should verify the pid is alive.
+    if let Some(parent) = port_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let pid = std::process::id();
+    let port_line = format!("{}\n{}\n", bound_addr.port(), pid);
+    let _ = std::fs::write(port_file, port_line);
+
+    info!(addr = %bound_addr, "control API listening (tcp, for browser extension)");
+    axum::serve(listener, app).await.map_err(|e| anyhow::anyhow!("control tcp serve: {e}"))
 }
 
 pub fn router(state: ControlState) -> Router {
@@ -694,18 +789,35 @@ fn search_ocr(
     })
 }
 
-/// Spawn the control server; logs and exits the task on bind/serve failure.
-pub fn spawn(bind: &str, state: ControlState) -> Option<tokio::task::JoinHandle<()>> {
-    let addr: SocketAddr = match bind.parse() {
-        Ok(a) => a,
-        Err(e) => {
-            warn!(bind, error = %e, "invalid api.bind; control API disabled");
-            return None;
+/// Spawn the primary Unix-socket control server. Bind failure is FATAL: the
+/// shell depends on this socket, so if it can't come up we'd rather exit and
+/// let the supervisor (lib.rs) alert + restart than run a daemon the shell
+/// can't talk to. Stale-socket detection happens inside `serve`.
+pub fn spawn(socket_path: &Path, state: ControlState) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    let path = socket_path.to_path_buf();
+    Ok(tokio::spawn(async move {
+        if let Err(e) = serve(&path, state).await {
+            error!(error = %e, socket = %path.display(), "control socket stopped (fatal)");
+            // Propagate to process exit so the supervisor sees a crash.
+            std::process::exit(1);
         }
-    };
+    }))
+}
+
+/// Spawn the secondary TCP listener for the browser extension. Best-effort:
+/// any failure (bad bind string, port exhaustion) is logged and swallowed —
+/// the shell uses the socket, the extension is optional.
+pub fn spawn_tcp(
+    bind: &str,
+    max_attempts: u32,
+    port_file: &Path,
+    state: ControlState,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let bind = bind.to_string();
+    let port_file = port_file.to_path_buf();
     Some(tokio::spawn(async move {
-        if let Err(e) = serve(addr, state).await {
-            warn!(error = %e, "control API stopped");
+        if let Err(e) = serve_tcp(&bind, max_attempts, &port_file, state).await {
+            warn!(error = %e, "control TCP listener stopped (non-fatal; browser extension affected)");
         }
     }))
 }
