@@ -33,7 +33,8 @@ pub use permissions::{
     accessibility_permission_state, microphone_permission_state, request_microphone_access,
     request_screen_recording, screen_recording_access_granted, MacPermissions,
 };
+pub use lumen_platform::normalize_selection;
 pub use selection::{
     accessibility_trusted, focused_element_pid, focused_selection, maybe_selection, mouse_location,
-    normalize_selection, start_mouse_up_monitor, MouseUp, SelectionInfo,
+    start_mouse_up_monitor, MouseUp, SelectionInfo,
 };
