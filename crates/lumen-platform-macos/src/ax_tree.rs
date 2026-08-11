@@ -132,27 +132,12 @@ unsafe fn walk_focused_window_inner(
     AXUIElementSetMessagingTimeout(app, element_timeout);
     let _app_guard = ReleaseGuard(app as *const c_void);
 
-    // Resolve the focused window (AXFocusedWindow).
-    let window = {
-        let attr = CFString::new("AXFocusedWindow");
-        let mut value: core_foundation::base::CFTypeRef = std::ptr::null();
-        if AXUIElementCopyAttributeValue(app, attr.as_concrete_TypeRef(), &mut value) != K_AX_SUCCESS
-            || value.is_null()
-        {
-            return Ok(AxTreeSnapshot {
-                text_content: String::new(),
-                node_count: 0,
-                content_hash: String::new(),
-                walk_duration_ms: start.elapsed().as_millis() as u64,
-                truncated: false,
-                app_name: None,
-                window_title: ax_string_attr(app, "AXTitle"),
-                document_path: None,
-                browser_url: None,
-            });
-        }
-        value as AxUIElementRef
-    };
+    // Resolve the focused window with a 4-tier fallback (mirrors screenpipe's
+    // resolve_focused_window). AXFocusedWindow can return a stale/ghost window
+    // with only AXMenuBar as child (the real content window is a different
+    // AXUIElement). If a candidate has ≤2 children, it's likely the wrong
+    // window — try the next candidate.
+    let window = resolve_window(app, element_timeout)?;
     let _win_guard = ReleaseGuard(window as *const c_void);
 
     // Also set the messaging timeout on the window (timeout is per-element).
@@ -280,6 +265,90 @@ fn should_extract_text(role: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+/// Resolve the best window element for tree walking. Tries AXFocusedWindow
+/// first, then AXMainWindow, then AXWindows[0], then the first AXWindow in
+/// the app's AXChildren. If a candidate has ≤2 children (likely just
+/// AXMenuBar — the "ghost window" problem on Safari), it falls through to
+/// the next candidate. This mirrors screenpipe's `resolve_focused_window`.
+#[cfg(target_os = "macos")]
+unsafe fn resolve_window(app: AxUIElementRef, timeout: f64) -> Result<AxUIElementRef, PlatformError> {
+    use core_foundation::base::{CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+
+    // Collect candidates in priority order.
+    let mut candidates: Vec<AxUIElementRef> = Vec::new();
+
+    for attr_name in &["AXFocusedWindow", "AXMainWindow"] {
+        let attr = CFString::new(attr_name);
+        let mut value: CFTypeRef = std::ptr::null();
+        if AXUIElementCopyAttributeValue(app, attr.as_concrete_TypeRef(), &mut value) == K_AX_SUCCESS
+            && !value.is_null()
+        {
+            candidates.push(value as AxUIElementRef);
+        }
+    }
+
+    // AXWindows array — take first element.
+    {
+        let attr = CFString::new("AXWindows");
+        let mut value: CFTypeRef = std::ptr::null();
+        if AXUIElementCopyAttributeValue(app, attr.as_concrete_TypeRef(), &mut value) == K_AX_SUCCESS
+            && !value.is_null()
+        {
+            if let Some(wins) = cf_array_to_vec(value as core_foundation_sys::array::CFArrayRef) {
+                if let Some(first) = wins.into_iter().next() {
+                    candidates.push(first);
+                }
+            }
+            core_foundation_sys::base::CFRelease(value);
+        }
+    }
+
+    // App's AXChildren — find first AXWindow.
+    if let Some(app_children) = read_children(app) {
+        for child in app_children {
+            let role = ax_string_attr(child, "AXRole").unwrap_or_default();
+            if role == "AXWindow" {
+                candidates.push(child);
+                break;
+            }
+        }
+    }
+
+    // Pick the first candidate with >2 children (the "ghost window" has only
+    // AXMenuBar). Fall back to the first candidate if none qualify.
+    let mut best = candidates.first().copied();
+    for &cand in &candidates {
+        AXUIElementSetMessagingTimeout(cand, timeout);
+        if let Some(kids) = read_children(cand) {
+            if kids.len() > 2 {
+                best = Some(cand);
+                break;
+            }
+        }
+    }
+
+    best.ok_or_else(|| PlatformError::Message("no resolvable window".into()))
+}
+
+/// Convert a CFArrayRef of AXUIElementRefs into a Vec. Does NOT release the
+/// array (caller manages the array's lifetime).
+#[cfg(target_os = "macos")]
+unsafe fn cf_array_to_vec(arr: core_foundation_sys::array::CFArrayRef) -> Option<Vec<AxUIElementRef>> {
+    if arr.is_null() {
+        return None;
+    }
+    let count = core_foundation_sys::array::CFArrayGetCount(arr) as usize;
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let v = core_foundation_sys::array::CFArrayGetValueAtIndex(arr, i as isize);
+        if !v.is_null() {
+            out.push(v as AxUIElementRef);
+        }
+    }
+    Some(out)
+}
+
 /// Read the `AXChildren` attribute as a vector of AXUIElementRefs. Each child
 /// is a retained reference the caller must release — but since we hold the
 /// autorelease pool from `walk_focused_window`, the pool drains them.
@@ -290,10 +359,9 @@ unsafe fn read_children(element: AxUIElementRef) -> Option<Vec<AxUIElementRef>> 
 
     let attr = CFString::new("AXChildren");
     let mut value: CFTypeRef = std::ptr::null();
-    if AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value) != K_AX_SUCCESS
-        || value.is_null()
-    {
-        // CFRelease not needed on error / null.
+    let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
+    if err != K_AX_SUCCESS || value.is_null() {
+        tracing::trace!(err, "read_children: AXChildren copy failed or null");
         return None;
     }
 
@@ -313,8 +381,10 @@ unsafe fn read_children(element: AxUIElementRef) -> Option<Vec<AxUIElementRef>> 
     CFRelease(value);
 
     if children.is_empty() {
+        tracing::trace!("read_children: AXChildren array was empty");
         None
     } else {
+        tracing::trace!(count = children.len(), "read_children: got children");
         Some(children)
     }
 }
