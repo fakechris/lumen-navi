@@ -254,7 +254,7 @@ pub fn run() {
 /// primary "is the daemon serving" signal — more reliable than checking the
 /// child slot, since it recognizes daemons the supervisor didn't spawn (e.g.
 /// an orphan from a prior app run still holding the socket).
-fn daemon_socket_alive(socket_path: &std::path::Path) -> bool {
+pub(crate) fn daemon_socket_alive(socket_path: &std::path::Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::net::UnixStream;
