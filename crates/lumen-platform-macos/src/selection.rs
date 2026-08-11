@@ -9,8 +9,8 @@
 use crate::ax::{
     ax_string_attr, AxUIElementRef, AxValueRef, CFRange, K_AX_VALUE_TYPE_CF_RANGE,
     K_AX_VALUE_TYPE_CGRECT, ReleaseGuard, AXUIElementCopyAttributeValue,
-    AXUIElementCopyParameterizedAttributeValue, AXUIElementCreateApplication,
-    AXUIElementCreateSystemWide, AXUIElementGetPid, AXUIElementSetAttributeValue, AXValueCreate,
+    AXUIElementCopyParameterizedAttributeValue,
+    AXUIElementCreateSystemWide, AXUIElementGetPid, AXValueCreate,
     AXValueGetValue, AXValueGetType, AXIsProcessTrustedWithOptions,
 };
 #[cfg(target_os = "macos")]
@@ -259,33 +259,12 @@ unsafe fn selected_text_via_markers(element: AXUIElementRef) -> Option<String> {
 /// Chromium/Electron build their accessibility tree lazily; nudge the app to
 /// create it up front (same trick PopClip-style tools use). Once per pid.
 #[cfg(target_os = "macos")]
+/// Delegate to the shared process-global TTL cache so the popup and the AX
+/// tree walker never double-poke the same app. Kept as a thin wrapper for the
+/// existing `unsafe fn` call sites in this module.
 unsafe fn activate_ax_for_pid(pid: i32) {
-    use core_foundation::boolean::CFBoolean;
-    use std::sync::atomic::{AtomicI32, Ordering};
-
-    static ACTIVATED_PID: AtomicI32 = AtomicI32::new(-1);
-    if ACTIVATED_PID.swap(pid, Ordering::SeqCst) == pid {
-        return;
-    }
-    let app = AXUIElementCreateApplication(pid);
-    if app.is_null() {
-        return;
-    }
-    let _guard = ReleaseGuard(app as *const c_void);
-    let on = CFBoolean::from(true);
-    let manual = CFString::new("AXManualAccessibility");
-    let e1 = AXUIElementSetAttributeValue(
-        app,
-        manual.as_concrete_TypeRef(),
-        on.as_concrete_TypeRef() as CFTypeRef,
-    );
-    let enhanced = CFString::new("AXEnhancedUserInterface");
-    let e2 = AXUIElementSetAttributeValue(
-        app,
-        enhanced.as_concrete_TypeRef(),
-        on.as_concrete_TypeRef() as CFTypeRef,
-    );
-    tracing::debug!(pid, err_manual = e1, err_enhanced = e2, "AX activation nudge");
+    // The shared function handles the TTL cache + the actual attribute writes.
+    let _ = crate::ax::ensure_enhanced_ax_for_pid(pid);
 }
 
 #[cfg(target_os = "macos")]

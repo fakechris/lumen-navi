@@ -2314,6 +2314,7 @@ name = "lumen-platform-macos"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "cc",
  "core-foundation",
  "core-foundation-sys",

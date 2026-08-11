@@ -31,6 +31,8 @@ pub struct Config {
     #[serde(default)]
     pub asr: AsrConfig,
     #[serde(default)]
+    pub ax: AxConfig,
+    #[serde(default)]
     pub assistant: AssistantConfig,
 }
 
@@ -468,6 +470,46 @@ impl Default for OcrConfig {
     }
 }
 
+/// AX (Accessibility) tree capture — deep text extraction from app UI for
+/// recall/search. Runs alongside OCR as an async worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AxConfig {
+    pub enabled: bool,
+    pub max_depth: u32,
+    pub max_nodes: u32,
+    pub walk_timeout_ms: u64,
+    pub element_timeout_ms: u64,
+    pub max_text_chars: u64,
+    pub poll_interval_ms: u64,
+    pub batch_size: usize,
+    pub max_attempts: u32,
+    pub retry_base_ms: u64,
+    pub retry_max_ms: u64,
+    pub stale_running_ms: u64,
+    pub shutdown_drain_ms: u64,
+}
+
+impl Default for AxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_depth: 30,
+            max_nodes: 3000,
+            walk_timeout_ms: 200,
+            element_timeout_ms: 150,
+            max_text_chars: 50_000,
+            poll_interval_ms: 1_500,
+            batch_size: 2,
+            max_attempts: 3,
+            retry_base_ms: 2_000,
+            retry_max_ms: 60_000,
+            stale_running_ms: 300_000,
+            shutdown_drain_ms: 30_000,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -490,6 +532,7 @@ impl Default for Config {
             audio: AudioConfig::default(),
             asr: AsrConfig::default(),
             assistant: AssistantConfig::default(),
+            ax: AxConfig::default(),
         }
     }
 }
