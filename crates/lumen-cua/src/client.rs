@@ -139,6 +139,40 @@ impl CuaClient {
         }
     }
 
+    /// Walk the AX tree of the focused window of `pid`'s app. Returns the
+    /// flattened text + metadata. Runs inside cua (Accessibility TCC holder).
+    pub fn walk_ax_tree(
+        &self,
+        pid: i32,
+        config: &lumen_platform::AxTreeWalkConfig,
+    ) -> Result<lumen_platform::AxTreeSnapshot, CuaError> {
+        let (result, payload) = self.call(Command::AxWalk {
+            pid,
+            max_depth: config.max_depth,
+            max_nodes: config.max_nodes,
+            walk_timeout_ms: config.walk_timeout_ms,
+            element_timeout_ms: config.element_timeout_ms,
+            max_text_length: config.max_text_length,
+        })?;
+        match result {
+            ResponseResult::AxSnapshot { meta } => {
+                let text_content = String::from_utf8_lossy(&payload).into_owned();
+                Ok(lumen_platform::AxTreeSnapshot {
+                    text_content,
+                    node_count: meta.node_count,
+                    content_hash: meta.content_hash,
+                    walk_duration_ms: meta.walk_duration_ms,
+                    truncated: meta.truncated,
+                    app_name: meta.app_name,
+                    window_title: meta.window_title,
+                    document_path: meta.document_path,
+                    browser_url: meta.browser_url,
+                })
+            }
+            other => Err(unexpected(other)),
+        }
+    }
+
     pub fn shutdown(&self) -> Result<(), CuaError> {
         let current = self.call_with_protocol(Command::Shutdown, PROTOCOL_VERSION);
         match current {
@@ -323,9 +357,9 @@ mod tests {
                 .read_line(&mut legacy_line)
                 .unwrap();
             let legacy: RequestEnvelope = serde_json::from_str(&legacy_line).unwrap();
-            assert_eq!(legacy.protocol_version, 1);
+            assert_eq!(legacy.protocol_version, PROTOCOL_VERSION - 1);
             let legacy_response = ResponseEnvelope {
-                protocol_version: 1,
+                protocol_version: PROTOCOL_VERSION - 1,
                 request_id: legacy.request_id,
                 ok: true,
                 error: None,

@@ -1,7 +1,7 @@
 use lumen_platform::{DisplayInfo, PermissionState};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const MAX_HEADER_BYTES: usize = 64 * 1024;
 pub const MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
@@ -30,6 +30,17 @@ pub(crate) enum Command {
         scale_div: u32,
     },
     Shutdown,
+    /// Walk the AX tree of the focused window of `pid`'s app. Returns a flat
+    /// text blob (in the response payload as UTF-8 bytes) + metadata in the
+    /// result header. This runs inside cua (which holds the Accessibility TCC).
+    AxWalk {
+        pid: i32,
+        max_depth: u32,
+        max_nodes: u32,
+        walk_timeout_ms: u64,
+        element_timeout_ms: u64,
+        max_text_length: usize,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +62,7 @@ pub(crate) enum ResponseResult {
     Displays { displays: Vec<DisplayInfo> },
     EncodedFrame { frame: EncodedFrameMeta },
     RawFrame { frame: RawFrameMeta },
+    AxSnapshot { meta: AxSnapshotMeta },
     Ack,
 }
 
@@ -102,6 +114,20 @@ pub(crate) struct RawFrameMeta {
     pub height: u32,
     pub bytes_per_row: usize,
     pub display_id: u32,
+}
+
+/// Metadata for an AX tree walk result. The actual flattened text is sent as
+/// the binary payload (UTF-8); these fields carry the structured metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AxSnapshotMeta {
+    pub node_count: usize,
+    pub content_hash: String,
+    pub walk_duration_ms: u64,
+    pub truncated: bool,
+    pub app_name: Option<String>,
+    pub window_title: Option<String>,
+    pub document_path: Option<String>,
+    pub browser_url: Option<String>,
 }
 
 impl ResponseEnvelope {

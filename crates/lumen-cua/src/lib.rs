@@ -13,7 +13,7 @@ mod protocol;
 mod runtime;
 mod server;
 
-pub use adapter::CuaCaptureAdapter;
+pub use adapter::{CuaAxTreeAdapter, CuaCaptureAdapter};
 pub use client::{CuaClient, CuaError};
 pub use permission_host::{
     is_permission_host_request, run as run_permission_host, PERMISSION_HOST_ARG,

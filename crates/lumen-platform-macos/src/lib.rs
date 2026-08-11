@@ -11,7 +11,7 @@
 
 mod asr;
 pub mod ax;
-mod ax_tree;
+pub mod ax_tree;
 mod capture;
 mod clipboard;
 mod frontmost;

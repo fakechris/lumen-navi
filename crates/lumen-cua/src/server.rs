@@ -4,12 +4,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{bail, Context, Result};
 use lumen_platform::{DisplayEnumerator, DisplayId, ScreenCapturer};
 #[cfg(target_os = "macos")]
-use lumen_platform_macos::{MacDisplays, MacScreenCapturer};
+use lumen_platform_macos::{ax_tree::walk_focused_window, MacDisplays, MacScreenCapturer};
+#[cfg(target_os = "macos")]
+use lumen_platform::AxTreeWalkConfig;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::protocol::{
-    Command, EncodedFrameMeta, RawFrameMeta, RequestEnvelope, ResponseEnvelope, ResponseResult,
-    MAX_HEADER_BYTES, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION,
+    AxSnapshotMeta, Command, EncodedFrameMeta, RawFrameMeta, RequestEnvelope, ResponseEnvelope,
+    ResponseResult, MAX_HEADER_BYTES, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION,
 };
 use crate::CuaStatus;
 
@@ -179,6 +181,35 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
             Ok((ResponseResult::RawFrame { frame: meta }, frame.bgra))
         }
         Command::Shutdown => Ok((ResponseResult::Ack, Vec::new())),
+        Command::AxWalk {
+            pid,
+            max_depth,
+            max_nodes,
+            walk_timeout_ms,
+            element_timeout_ms,
+            max_text_length,
+        } => {
+            let config = AxTreeWalkConfig {
+                max_depth,
+                max_nodes,
+                walk_timeout_ms,
+                element_timeout_ms,
+                max_text_length,
+            };
+            let snapshot = walk_focused_window(pid, &config)?;
+            let text_bytes = snapshot.text_content.into_bytes();
+            let meta = AxSnapshotMeta {
+                node_count: snapshot.node_count,
+                content_hash: snapshot.content_hash,
+                walk_duration_ms: snapshot.walk_duration_ms,
+                truncated: snapshot.truncated,
+                app_name: snapshot.app_name,
+                window_title: snapshot.window_title,
+                document_path: snapshot.document_path,
+                browser_url: snapshot.browser_url,
+            };
+            Ok((ResponseResult::AxSnapshot { meta }, text_bytes))
+        }
     }
 }
 
