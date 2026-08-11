@@ -18,6 +18,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+blake3 = { workspace = true }
 core-foundation = "0.10"
 core-foundation-sys = "0.8"
 core-graphics = "0.24"

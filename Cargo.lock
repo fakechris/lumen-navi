@@ -2231,6 +2231,7 @@ dependencies = [
  "lumen-models",
  "lumen-platform",
  "lumen-platform-host",
+ "lumen-platform-macos",
  "lumen-process",
  "lumen-sources-browser",
  "lumen-sources-media",
@@ -2333,6 +2334,7 @@ name = "lumen-platform-macos"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "cc",
  "core-foundation",
  "core-foundation-sys",

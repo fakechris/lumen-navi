@@ -56,6 +56,11 @@ pub struct FrontmostApp {
     /// column + `MatchField::Domain` rules — no browser extension needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_url: Option<String>,
+    /// Process id of the frontmost app. Needed by the AX tree walker to call
+    /// `AXUIElementCreateApplication(pid)`. None when the probe couldn't
+    /// resolve a pid (rare; falls back to window-list owner name only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -124,6 +129,65 @@ pub trait ScreenLockProbe: Send + Sync {
 #[async_trait]
 pub trait DisplaySleepProbe: Send + Sync {
     async fn display_sleep_prevented(&self) -> Result<bool, PlatformError>;
+}
+
+/// Configuration for an AX tree walk — controls cost vs. completeness.
+#[derive(Debug, Clone)]
+pub struct AxTreeWalkConfig {
+    pub max_depth: u32,
+    pub max_nodes: u32,
+    pub walk_timeout_ms: u64,
+    pub element_timeout_ms: u64,
+    pub max_text_length: usize,
+}
+
+impl Default for AxTreeWalkConfig {
+    fn default() -> Self {
+        Self {
+            max_depth: 30,
+            max_nodes: 3000,
+            walk_timeout_ms: 200,
+            element_timeout_ms: 150,
+            max_text_length: 50_000,
+        }
+    }
+}
+
+/// The output of an AX tree walk: a flat text blob (for FTS search) plus
+/// metadata. Structured node storage is iteration 2.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AxTreeSnapshot {
+    /// All extractable text from the tree, flattened (space-joined).
+    pub text_content: String,
+    /// Number of AX nodes visited.
+    pub node_count: usize,
+    /// blake3 hash of `text_content` — for dedup.
+    pub content_hash: String,
+    /// Wall-clock walk duration.
+    pub walk_duration_ms: u64,
+    /// True if the walk hit max_nodes or walk_timeout before finishing.
+    pub truncated: bool,
+    /// App-level metadata (window title, document path, etc.).
+    pub app_name: Option<String>,
+    pub window_title: Option<String>,
+    /// File path when the app exposes `AXDocument` (Cocoa editors).
+    pub document_path: Option<String>,
+    /// Browser URL via AXWebArea→AXURL (iteration 2; None in MVP).
+    pub browser_url: Option<String>,
+}
+
+/// Platform trait for walking the Accessibility tree of the focused window.
+#[async_trait]
+pub trait AxTreeWalker: Send + Sync {
+    /// Walk the focused window of the app owning `pid`. Returns the flattened
+    /// text + metadata. Errors are non-fatal (AX permission not granted, app
+    /// unresponsive) — the caller should mark the job done, not retry forever.
+    async fn walk(&self, pid: i32, config: AxTreeWalkConfig) -> Result<AxTreeSnapshot, PlatformError>;
+
+    /// Whether this walker is usable on the current platform.
+    fn is_supported(&self) -> bool {
+        true
+    }
 }
 
 #[async_trait]

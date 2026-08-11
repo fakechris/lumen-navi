@@ -19,9 +19,12 @@ use lumen_cua::{CuaCaptureAdapter, CuaClient};
 use lumen_platform::{
     DisplayEnumerator, MicOpenConfig, PlatformError, ScreenCapturer,
 };
+#[cfg(target_os = "macos")]
+use lumen_platform_macos::MacAxTreeWalker;
 use lumen_platform_host as host;
 use lumen_process::{
-    OcrWorker, OcrWorkerConfig, TranscribeWorker, TranscribeWorkerConfig, JOB_KIND_TRANSCRIBE_AUDIO,
+    AxWorker, AxWorkerConfig, OcrWorker, OcrWorkerConfig, TranscribeWorker,
+    TranscribeWorkerConfig, JOB_KIND_TRANSCRIBE_AUDIO,
 };
 use lumen_sources_browser::BrowserIngestPolicy;
 use lumen_sources_media::{AudioOrchestrator, CaptureOrchestrator, CapturedBatch};
@@ -201,6 +204,50 @@ async fn main() -> Result<()> {
         }
     } else {
         info!("OCR disabled in config");
+        None
+    };
+
+    // --- AX tree worker (deep accessibility text for recall/search) ---
+    let (ax_cancel_tx, ax_cancel_rx) = watch::channel(false);
+    let ax_handle = if config.ax.enabled {
+        let walker: Arc<dyn lumen_platform::AxTreeWalker> = Arc::new(lumen_platform_macos::MacAxTreeWalker);
+        if walker.is_supported() {
+            let worker = Arc::new(AxWorker::new(
+                Arc::clone(&store),
+                walker,
+                AxWorkerConfig {
+                    poll_interval: Duration::from_millis(config.ax.poll_interval_ms),
+                    batch_size: config.ax.batch_size.max(1),
+                    max_attempts: config.ax.max_attempts as i64,
+                    retry_base: Duration::from_millis(config.ax.retry_base_ms),
+                    retry_max: Duration::from_millis(config.ax.retry_max_ms),
+                    stale_running: Duration::from_millis(config.ax.stale_running_ms),
+                    max_text_chars: config.ax.max_text_chars as usize,
+                    shutdown_drain: Duration::from_millis(config.ax.shutdown_drain_ms),
+                    walk: lumen_platform::AxTreeWalkConfig {
+                        max_depth: config.ax.max_depth,
+                        max_nodes: config.ax.max_nodes,
+                        walk_timeout_ms: config.ax.walk_timeout_ms,
+                        element_timeout_ms: config.ax.element_timeout_ms,
+                        max_text_length: config.ax.max_text_chars as usize,
+                    },
+                },
+            ));
+            let _ = worker.reclaim_stale();
+            let w = Arc::clone(&worker);
+            info!("AX tree worker started");
+            Some((
+                worker,
+                tokio::spawn(async move {
+                    w.run_until_cancelled(ax_cancel_rx).await;
+                }),
+            ))
+        } else {
+            warn!("AX tree walker not supported on this OS");
+            None
+        }
+    } else {
+        info!("AX tree capture disabled in config");
         None
     };
 
@@ -447,6 +494,7 @@ async fn main() -> Result<()> {
         let (tx, mut rx) = mpsc::channel::<CapturedBatch>(config.capture.queue_capacity);
         let store_w = Arc::clone(&store);
         let ocr_on = config.ocr.enabled;
+        let ax_on = config.ax.enabled;
         let persist = tokio::spawn(async move {
             while let Some(batch) = rx.recv().await {
                 if let Some(ref closed) = batch.closed_session {
@@ -467,6 +515,11 @@ async fn main() -> Result<()> {
                                     Ok(Some(_)) => {}
                                     Ok(None) => debug_skip_dup_ocr(),
                                     Err(e) => warn!(error = %e, "enqueue ocr_screen failed"),
+                                }
+                            }
+                            if ax_on {
+                                if let Err(e) = store_w.enqueue_job(stored.id, "ax_screen") {
+                                    warn!(error = %e, "enqueue ax_screen failed");
                                 }
                             }
                             info!(
@@ -649,6 +702,14 @@ async fn main() -> Result<()> {
         }
         if let Ok(counts) = store.job_counts_by_status("ocr_screen") {
             info!(?counts, "ocr job counts");
+        }
+    }
+
+    if let Some((_worker, handle)) = ax_handle {
+        let _ = ax_cancel_tx.send(true);
+        let _ = handle.await;
+        if let Ok(counts) = store.job_counts_by_status("ax_screen") {
+            info!(?counts, "ax job counts");
         }
     }
 

@@ -661,7 +661,7 @@ impl SqliteStore {
         };
 
         // Index OCR + ASR + rule summaries into the same FTS surface.
-        if kind == "ocr.v1" || kind == "transcript.v1" || kind == "summary.v1" {
+        if kind == "ocr.v1" || kind == "transcript.v1" || kind == "summary.v1" || kind == "ax.v1" {
             upsert_ocr_doc_tx(&tx, event_id, &body)?;
         }
         tx.commit().map_err(StoreError::db)?;
@@ -2239,6 +2239,29 @@ impl SqliteStore {
         drop(conn);
         let bytes = self.blobs.read_relative(&rel)?;
         Ok(Some((media, bytes)))
+    }
+
+    /// Load an event's payload JSON by event id. Used by the AX worker to
+    /// extract the `pid` field from a screenshot event.
+    pub fn get_event_payload(&self, event_id: Uuid) -> Result<Option<serde_json::Value>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let payload_str: Option<String> = conn
+            .query_row(
+                r#"SELECT payload FROM events WHERE id = ?1"#,
+                params![event_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::db)?;
+        match payload_str {
+            Some(s) => {
+                let v: serde_json::Value = serde_json::from_str(&s).map_err(|e| {
+                    StoreError::Other(format!("parse event payload: {e}"))
+                })?;
+                Ok(Some(v))
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn list_jobs(&self, limit: usize) -> Result<Vec<JobRecord>, StoreError> {

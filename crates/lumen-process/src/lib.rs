@@ -3,6 +3,7 @@
 //! Capture must not wait on this layer. Jobs read raw events and write derived
 //! records without mutating originals.
 
+mod ax_worker;
 mod ocr_worker;
 mod transcribe_worker;
 mod transcript_export;
@@ -11,6 +12,7 @@ use async_trait::async_trait;
 use lumen_types::SourceEvent;
 use thiserror::Error;
 
+pub use ax_worker::{AxWorker, AxWorkerConfig, AxWorkerStats, DERIVED_AX_V1, JOB_KIND_AX_SCREEN};
 pub use ocr_worker::{OcrWorker, OcrWorkerConfig, OcrWorkerStats};
 pub use transcribe_worker::{
     TranscribeWorker, TranscribeWorkerConfig, TranscribeWorkerStats, DERIVED_TRANSCRIPT_V1,

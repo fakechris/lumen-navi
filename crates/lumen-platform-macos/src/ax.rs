@@ -68,6 +68,10 @@ extern "C" {
     pub fn AXValueCreate(the_type: AxValueType, value_ptr: *const c_void) -> AxValueRef;
     pub fn AXValueGetType(value: AxValueRef) -> AxValueType;
     pub fn AXValueGetValue(value: AxValueRef, the_type: AxValueType, value_ptr: *mut c_void) -> bool;
+    /// Set the messaging timeout for an AXUIElement. Bounds how long a single
+    /// AX IPC call can block — without this, a hung app stalls the caller
+    /// indefinitely. screenpipe applies 0.2s on every walk root.
+    pub fn AXUIElementSetMessagingTimeout(element: AxUIElementRef, timeout: f64) -> AxError;
 }
 
 /// Read a CFString attribute of an AX element (e.g. `kAXTitleAttribute`,
@@ -144,5 +148,80 @@ pub fn focused_window_title(pid: i32) -> Option<String> {
         let _win_guard = ReleaseGuard(focused_window);
 
         ax_string_attr(focused_window as AxUIElementRef, "AXTitle").filter(|s| !s.is_empty())
+    }
+}
+
+/// Force-enable AX tree materialization for a Chromium/Electron app. Writes
+/// `AXEnhancedUserInterface=true` + `AXManualAccessibility=true` on the app's
+/// root AXUIElement. Without this poke, Electron apps (Slack/VS Code/Notion/
+/// Discord) return an opaque single-node tree.
+///
+/// **Process-global TTL cache** (60s): re-poking forces Chromium to
+/// synchronously rebuild its AX tree, which can commit a pending
+/// composition/autocomplete buffer into the focused field ("phantom text"
+/// bug, screenpipe issue). The cache ensures we poke at most once per 60s per
+/// pid across the whole process (walker + popup share it).
+///
+/// Returns `true` when the poke actually fired (caller should sleep ~150ms for
+/// the tree to materialize); `false` when cached (no sleep needed).
+pub fn ensure_enhanced_ax_for_pid(pid: i32) -> bool {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        false
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::collections::HashMap;
+        use std::sync::{LazyLock, Mutex};
+        use std::time::{Duration, Instant};
+
+        /// 60s — long enough that the tree stays materialized across typical
+        /// poll intervals, short enough to re-poke after a background→foreground
+        /// cycle. Matches screenpipe's `DEFAULT_TTL`.
+        const TTL: Duration = Duration::from_secs(60);
+        static CACHE: LazyLock<Mutex<HashMap<i32, Instant>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
+
+        // Check + update the cache under the lock.
+        let needs_poke = {
+            let mut cache = CACHE.lock().unwrap();
+            let now = Instant::now();
+            match cache.get(&pid) {
+                Some(t) if now.duration_since(*t) < TTL => false,
+                _ => {
+                    cache.insert(pid, now);
+                    // Evict stale entries to bound memory.
+                    cache.retain(|_, t| now.duration_since(*t) < TTL * 5);
+                    true
+                }
+            }
+        };
+        if !needs_poke {
+            return false;
+        }
+
+        unsafe {
+            let app = AXUIElementCreateApplication(pid);
+            if app.is_null() {
+                return false;
+            }
+            let _guard = ReleaseGuard(app as *const c_void);
+            let on = core_foundation::boolean::CFBoolean::from(true);
+            let manual = CFString::new("AXManualAccessibility");
+            let e1 = AXUIElementSetAttributeValue(
+                app,
+                manual.as_concrete_TypeRef(),
+                on.as_concrete_TypeRef() as CFTypeRef,
+            );
+            let enhanced = CFString::new("AXEnhancedUserInterface");
+            let e2 = AXUIElementSetAttributeValue(
+                app,
+                enhanced.as_concrete_TypeRef(),
+                on.as_concrete_TypeRef() as CFTypeRef,
+            );
+            tracing::debug!(pid, err_manual = e1, err_enhanced = e2, "AX enhanced-mode poke");
+        }
+        true
     }
 }
