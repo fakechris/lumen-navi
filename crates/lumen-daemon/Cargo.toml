@@ -36,6 +36,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+lumen-platform-macos = { workspace = true }
+
 [dev-dependencies]
 http-body-util = "0.1"
 tempfile = "3"

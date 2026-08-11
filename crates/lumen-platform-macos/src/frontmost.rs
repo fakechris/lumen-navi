@@ -241,6 +241,7 @@ fn frontmost_native() -> Option<FrontmostApp> {
             window_title,
             ls_category_type: meta.ls_category_type,
             tab_url: None,
+            pid: Some(pid),
         });
     }
 
@@ -279,6 +280,7 @@ fn frontmost_native() -> Option<FrontmostApp> {
         window_title,
         ls_category_type,
         tab_url: None,
+        pid: if pid > 0 { Some(pid) } else { None },
     })
 }
 
@@ -393,6 +395,7 @@ end tell
             window_title: None,
             ls_category_type,
             tab_url: None,
+            pid: None,
         })
     }
     #[cfg(not(target_os = "macos"))]
