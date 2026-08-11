@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use lumen_platform::{
-    DisplayEnumerator, DisplayId, DisplayInfo, PlatformError, RawFrame, ScreenCapturer,
-    ScreenshotFrame,
+    AxTreeSnapshot, AxTreeWalkConfig, AxTreeWalker, DisplayEnumerator, DisplayId, DisplayInfo,
+    PlatformError, RawFrame, ScreenCapturer, ScreenshotFrame,
 };
 
 use crate::CuaClient;
@@ -58,5 +58,38 @@ impl ScreenCapturer for CuaCaptureAdapter {
             .await
             .map_err(|e| PlatformError::Message(format!("Lumen Cua task: {e}")))?
             .map_err(|e| PlatformError::Message(e.to_string()))
+    }
+}
+
+/// Implements `AxTreeWalker` by forwarding to cua over the Unix socket.
+/// The daemon holds NO Accessibility TCC — cua does, so the AX tree walk
+/// must execute inside the cua process.
+#[derive(Clone)]
+pub struct CuaAxTreeAdapter {
+    client: CuaClient,
+}
+
+impl CuaAxTreeAdapter {
+    pub fn new(client: CuaClient) -> Self {
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl AxTreeWalker for CuaAxTreeAdapter {
+    async fn walk(
+        &self,
+        pid: i32,
+        config: AxTreeWalkConfig,
+    ) -> Result<AxTreeSnapshot, PlatformError> {
+        let client = self.client.clone();
+        tokio::task::spawn_blocking(move || client.walk_ax_tree(pid, &config))
+            .await
+            .map_err(|e| PlatformError::Message(format!("Lumen Cua AX task: {e}")))?
+            .map_err(|e| PlatformError::Message(e.to_string()))
+    }
+
+    fn is_supported(&self) -> bool {
+        cfg!(target_os = "macos")
     }
 }

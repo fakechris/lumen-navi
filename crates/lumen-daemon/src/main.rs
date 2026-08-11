@@ -20,7 +20,8 @@ use lumen_platform::{
     DisplayEnumerator, MicOpenConfig, PlatformError, ScreenCapturer,
 };
 #[cfg(target_os = "macos")]
-use lumen_platform_macos::MacAxTreeWalker;
+#[allow(unused_imports)]
+use lumen_platform_macos;
 use lumen_platform_host as host;
 use lumen_process::{
     AxWorker, AxWorkerConfig, OcrWorker, OcrWorkerConfig, TranscribeWorker,
@@ -208,9 +209,13 @@ async fn main() -> Result<()> {
     };
 
     // --- AX tree worker (deep accessibility text for recall/search) ---
+    // The daemon has NO Accessibility TCC — AX tree walks go through Lumen Cua
+    // (which holds the permission), over the Unix socket. If cua is not
+    // available (dev mode without screen_ready), the AX worker stays idle.
     let (ax_cancel_tx, ax_cancel_rx) = watch::channel(false);
-    let ax_handle = if config.ax.enabled {
-        let walker: Arc<dyn lumen_platform::AxTreeWalker> = Arc::new(lumen_platform_macos::MacAxTreeWalker);
+    let ax_handle = if config.ax.enabled && cua_client.is_some() {
+        let walker: Arc<dyn lumen_platform::AxTreeWalker> =
+            Arc::new(lumen_cua::CuaAxTreeAdapter::new(cua_client.clone().unwrap()));
         if walker.is_supported() {
             let worker = Arc::new(AxWorker::new(
                 Arc::clone(&store),
