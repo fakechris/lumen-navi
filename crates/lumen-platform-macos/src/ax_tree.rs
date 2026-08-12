@@ -158,13 +158,17 @@ unsafe fn walk_focused_window_inner(
     AXUIElementSetMessagingTimeout(app, 0.5);
     let _app_guard = ReleaseGuard(app as *const c_void);
 
+<<<<<<< HEAD
     tracing::debug!(pid, "walk_focused_window_inner: starting");
 
+=======
+>>>>>>> origin/main
     // Resolve the focused window with a 4-tier fallback (mirrors screenpipe's
     // resolve_focused_window). AXFocusedWindow can return a stale/ghost window
     // with only AXMenuBar as child (the real content window is a different
     // AXUIElement). If a candidate has ≤2 children, it's likely the wrong
     // window — try the next candidate.
+<<<<<<< HEAD
     tracing::debug!(pid, "walk_inner: resolving window");
     // Use AXFocusedWindow directly — the 4-tier resolve_window with child-count
     // probing calls read_children on each candidate, and some apps' AX
@@ -205,6 +209,9 @@ unsafe fn walk_focused_window_inner(
             value as AxUIElementRef
         }
     };
+=======
+    let window = resolve_window(app, element_timeout)?;
+>>>>>>> origin/main
     let _win_guard = ReleaseGuard(window as *const c_void);
     tracing::debug!(pid, "walk_inner: window resolved");
 
