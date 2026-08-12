@@ -97,7 +97,7 @@ pub fn walk_focused_window(pid: i32, config: &AxTreeWalkConfig) -> Result<AxTree
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (pid, config);
-        return Err(PlatformError::Other("AX tree walk requires macOS".into()));
+        return Err(PlatformError::Message("AX tree walk requires macOS".into()));
     }
     #[cfg(target_os = "macos")]
     {
@@ -107,7 +107,34 @@ pub fn walk_focused_window(pid: i32, config: &AxTreeWalkConfig) -> Result<AxTree
             std::thread::sleep(Duration::from_millis(150));
         }
 
-        objc2::rc::autoreleasepool(|_pool| unsafe { walk_focused_window_inner(pid, config) })
+        // Wakeup retry: AX trees materialize lazily (especially web content).
+        // If the first walk yields few nodes, retry up to 3 times with short
+        // sleeps — mirrors yansu's poll-retry approach. Most of the cost is
+        // the first walk (AX IPC); subsequent walks on the same materialized
+        // tree are very fast.
+        let mut best = objc2::rc::autoreleasepool(|_pool| unsafe {
+            walk_focused_window_inner(pid, config)
+        });
+        const MIN_NODES: usize = 15;
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_SLEEP: Duration = Duration::from_millis(50);
+
+        for _ in 0..MAX_RETRIES {
+            let nodes = best.as_ref().map(|s| s.node_count).unwrap_or(0);
+            if nodes >= MIN_NODES {
+                break;
+            }
+            std::thread::sleep(RETRY_SLEEP);
+            let attempt = objc2::rc::autoreleasepool(|_pool| unsafe {
+                walk_focused_window_inner(pid, config)
+            });
+            if let Ok(snap) = &attempt {
+                if snap.node_count > nodes {
+                    best = attempt;
+                }
+            }
+        }
+        best
     }
 }
 
@@ -128,24 +155,70 @@ unsafe fn walk_focused_window_inner(
             "AXUIElementCreateApplication({pid}) returned null"
         )));
     }
-    // Set per-element timeout so a hung app can't stall us indefinitely.
-    AXUIElementSetMessagingTimeout(app, element_timeout);
+    AXUIElementSetMessagingTimeout(app, 0.5);
     let _app_guard = ReleaseGuard(app as *const c_void);
 
+<<<<<<< HEAD
+    tracing::debug!(pid, "walk_focused_window_inner: starting");
+
+=======
+>>>>>>> origin/main
     // Resolve the focused window with a 4-tier fallback (mirrors screenpipe's
     // resolve_focused_window). AXFocusedWindow can return a stale/ghost window
     // with only AXMenuBar as child (the real content window is a different
     // AXUIElement). If a candidate has ≤2 children, it's likely the wrong
     // window — try the next candidate.
+<<<<<<< HEAD
+    tracing::debug!(pid, "walk_inner: resolving window");
+    // Use AXFocusedWindow directly — the 4-tier resolve_window with child-count
+    // probing calls read_children on each candidate, and some apps' AX
+    // providers hang on that call even with messaging timeout. If
+    // AXFocusedWindow is null, fall back to a simple AXWindows[0].
+    let window = {
+        let attr = CFString::new("AXFocusedWindow");
+        let mut value: core_foundation::base::CFTypeRef = std::ptr::null();
+        if AXUIElementCopyAttributeValue(app, attr.as_concrete_TypeRef(), &mut value) != K_AX_SUCCESS || value.is_null() {
+            // Fallback: AXWindows[0]
+            let wins_attr = CFString::new("AXWindows");
+            let mut wins: core_foundation::base::CFTypeRef = std::ptr::null();
+            if AXUIElementCopyAttributeValue(app, wins_attr.as_concrete_TypeRef(), &mut wins) == K_AX_SUCCESS && !wins.is_null() {
+                let arr = wins as core_foundation_sys::array::CFArrayRef;
+                let count = core_foundation_sys::array::CFArrayGetCount(arr);
+                if count > 0 {
+                    let v = core_foundation_sys::array::CFArrayGetValueAtIndex(arr, 0);
+                    core_foundation_sys::base::CFRelease(wins);
+                    v as AxUIElementRef
+                } else {
+                    core_foundation_sys::base::CFRelease(wins);
+                    return Ok(AxTreeSnapshot {
+                        text_content: String::new(), node_count: 0,
+                        content_hash: String::new(), walk_duration_ms: start.elapsed().as_millis() as u64,
+                        truncated: false, app_name: None, window_title: None,
+                        document_path: None, browser_url: None,
+                    });
+                }
+            } else {
+                return Ok(AxTreeSnapshot {
+                    text_content: String::new(), node_count: 0,
+                    content_hash: String::new(), walk_duration_ms: start.elapsed().as_millis() as u64,
+                    truncated: false, app_name: None, window_title: None,
+                    document_path: None, browser_url: None,
+                });
+            }
+        } else {
+            value as AxUIElementRef
+        }
+    };
+=======
     let window = resolve_window(app, element_timeout)?;
+>>>>>>> origin/main
     let _win_guard = ReleaseGuard(window as *const c_void);
-
-    // Also set the messaging timeout on the window (timeout is per-element).
-    AXUIElementSetMessagingTimeout(window, element_timeout);
+    tracing::debug!(pid, "walk_inner: window resolved");
 
     // Read window-level metadata (cheap, no recursion).
     let window_title = ax_string_attr(window, "AXTitle");
     let app_name = ax_string_attr(app, "AXTitle");
+    tracing::debug!(pid, title = ?window_title, "walk_inner: got metadata");
     let document_path = ax_string_attr(window, "AXDocument")
         .filter(|s| !s.is_empty())
         .map(decode_file_url);
@@ -158,7 +231,9 @@ unsafe fn walk_focused_window_inner(
         text: String::with_capacity(8192),
     };
 
+    tracing::debug!(pid, "walk_inner: starting walk_element");
     walker.walk_element(window, 0);
+    tracing::debug!(pid, nodes = walker.node_count, text_len = walker.text.len(), "walk_inner: walk_element done");
 
     let walk_duration = start.elapsed();
     let content_hash = blake3_hash(&walker.text);

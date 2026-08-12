@@ -80,7 +80,7 @@ extern "C" {
 /// # Safety
 /// `element` must be a valid `AXUIElementRef`.
 pub unsafe fn ax_string_attr(element: AxUIElementRef, name: &str) -> Option<String> {
-    use core_foundation_sys::base::{CFGetTypeID, CFRelease};
+    use core_foundation_sys::base::CFGetTypeID;
     use core_foundation_sys::string::CFStringGetTypeID;
 
     let attr = CFString::new(name);
@@ -90,13 +90,16 @@ pub unsafe fn ax_string_attr(element: AxUIElementRef, name: &str) -> Option<Stri
     {
         return None;
     }
+    // AXUIElementCopyAttributeValue follows Create rule (+1 retain).
+    // Use wrap_under_create_rule so Drop releases exactly once.
+    // After extracting the String, the CFString (and its backing CFTypeRef)
+    // is released by Drop — no manual CFRelease needed.
     if CFGetTypeID(value) != CFStringGetTypeID() {
-        CFRelease(value);
+        core_foundation_sys::base::CFRelease(value);
         return None;
     }
-    let s = CFString::wrap_under_get_rule(value as CFStringRef).to_string();
-    CFRelease(value);
-    Some(s)
+    let cf_str = core_foundation::string::CFString::wrap_under_create_rule(value as core_foundation::string::CFStringRef);
+    Some(cf_str.to_string())
 }
 
 /// Read a non-string CFType attribute as a retained `CFTypeRef` (caller must
