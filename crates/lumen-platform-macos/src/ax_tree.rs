@@ -372,13 +372,14 @@ unsafe fn read_children(element: AxUIElementRef) -> Option<Vec<AxUIElementRef>> 
         return None;
     }
 
-    let array = CFArray::<*const c_void>::wrap_under_get_rule(value as CFArrayRef);
+    let array = CFArray::<*const c_void>::wrap_under_create_rule(value as CFArrayRef);
     let children: Vec<AxUIElementRef> = array
         .iter()
         .map(|p| *p as AxUIElementRef)
         .filter(|p| !p.is_null())
         .collect();
-    CFRelease(value);
+    // array dropped here (create-rule Drop releases the CFArray — no manual
+    // CFRelease needed, and a manual one would be a double-free).
 
     if children.is_empty() {
         tracing::trace!("read_children: AXChildren array was empty");
