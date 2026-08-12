@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{bail, Context, Result};
@@ -105,7 +106,13 @@ async fn handle_connection(stream: tokio::net::UnixStream, token: &str) -> Resul
             Vec::new(),
         )
     } else {
-        match execute(request.command).await {
+        tracing::info!(command = ?request.command, "cua executing command");
+        let exec_result = execute(request.command).await;
+        match &exec_result {
+            Ok((result, payload)) => tracing::info!(result = ?result, payload_len = payload.len(), "cua execute ok"),
+            Err(e) => tracing::warn!(error = %e, "cua execute failed"),
+        }
+        match exec_result {
             Ok((result, payload)) if payload.len() <= MAX_PAYLOAD_BYTES => (
                 ResponseEnvelope::success(request_id, result, payload.len()),
                 payload,
@@ -196,7 +203,39 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
                 element_timeout_ms,
                 max_text_length,
             };
-            let snapshot = walk_focused_window(pid, &config)?;
+            tracing::info!(pid, max_depth, max_nodes, "AxWalk starting");
+            // Run the walk in a blocking task with a hard timeout — AX calls
+            // can hang indefinitely on some apps (Safari's deep web content).
+            let walk_timeout = Duration::from_millis(walk_timeout_ms.max(500) as u64 * 3);
+            let pid_for_walk = pid;
+            let walk_result = tokio::task::spawn_blocking(move || {
+                walk_focused_window(pid_for_walk, &config)
+            });
+            let snapshot = match tokio::time::timeout(walk_timeout, walk_result).await {
+                Ok(Ok(Ok(snap))) => {
+                    tracing::info!(
+                        pid,
+                        node_count = snap.node_count,
+                        walk_ms = snap.walk_duration_ms,
+                        text_len = snap.text_content.len(),
+                        window = ?snap.window_title,
+                        "AxWalk done"
+                    );
+                    snap
+                }
+                Ok(Ok(Err(e))) => {
+                    tracing::warn!(pid, error = %e, "AxWalk returned error");
+                    bail!("AX walk error: {e}");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(pid, error = %e, "AxWalk spawn_blocking join failed");
+                    bail!("AX walk join: {e}");
+                }
+                Err(_) => {
+                    tracing::warn!(pid, timeout_ms = walk_timeout.as_millis() as u64, "AxWalk TIMED OUT");
+                    bail!("AX walk timed out after {}ms", walk_timeout.as_millis());
+                }
+            };
             let text_bytes = snapshot.text_content.into_bytes();
             let meta = AxSnapshotMeta {
                 node_count: snapshot.node_count,
@@ -233,7 +272,6 @@ fn status_with_capture_observation(mut status: CuaStatus, capture_ready: bool) -
 mod tests {
     use super::*;
     use crate::{ensure_token_file, CuaClient, CuaPaths};
-    use std::time::Duration;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_and_server_round_trip_status_and_shutdown() {
