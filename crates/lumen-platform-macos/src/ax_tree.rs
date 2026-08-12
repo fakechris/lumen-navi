@@ -167,6 +167,7 @@ unsafe fn walk_focused_window_inner(
         let attr = CFString::new("AXFocusedWindow");
         let mut value: core_foundation::base::CFTypeRef = std::ptr::null();
         if AXUIElementCopyAttributeValue(app, attr.as_concrete_TypeRef(), &mut value) != K_AX_SUCCESS || value.is_null() {
+            // Fallback: AXWindows[0]
             let wins_attr = CFString::new("AXWindows");
             let mut wins: core_foundation::base::CFTypeRef = std::ptr::null();
             if AXUIElementCopyAttributeValue(app, wins_attr.as_concrete_TypeRef(), &mut wins) == K_AX_SUCCESS && !wins.is_null() {
