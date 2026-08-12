@@ -164,6 +164,17 @@ impl AxWorker {
             .filter(|n| *n > 0)
             .ok_or_else(|| AxJobError::permanent("screenshot event has no valid pid".into()))?;
 
+        // Skip browsers/Electron apps — their AX providers hang on deep tree
+        // traversal. These apps already get URL + title via AppleScript.
+        let bundle_id = payload
+            .get("bundle_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if is_ax_problematic_bundle(bundle_id) {
+            tracing::debug!(event = %job.event_id, bundle = bundle_id, "skipping AX walk for browser/electron app");
+            return Ok(false);
+        }
+
         let snapshot = self
             .walker
             .walk(pid, self.config.walk.clone())
@@ -247,6 +258,31 @@ fn ax_body_json(snapshot: &AxTreeSnapshot, event_id: &str) -> String {
         "event_id": event_id,
     })
     .to_string()
+}
+
+/// Bundle-id prefixes for apps whose AX providers hang on deep tree traversal.
+/// Browsers get URL + title via AppleScript; Electron apps have unpredictable
+/// AX tree depth. Skip these to keep cua stable.
+fn is_ax_problematic_bundle(bundle_id: &str) -> bool {
+    const SKIP_PREFIXES: &[&str] = &[
+        "com.apple.Safari",
+        "com.google.Chrome",
+        "org.chromium.Chromium",
+        "com.microsoft.edgemac",
+        "com.brave.Browser",
+        "company.thebrowser.Browser", // Arc
+        "ai.perplexity.comet",
+        "com.vivaldi.Vivaldi",
+        "com.operasoftware.Opera",
+        "org.mozilla.firefox",
+        "com.tinyspeck.slackmacgap",  // Slack
+        "com.microsoft.VSCode",       // VS Code
+        "com.microsoft.VSCodeInsiders",
+        "md.obsidian",                // Obsidian
+        "com.hnc.Discord",            // Discord
+        "notion.id",                  // Notion
+    ];
+    SKIP_PREFIXES.iter().any(|p| bundle_id.starts_with(p))
 }
 
 #[derive(Debug)]

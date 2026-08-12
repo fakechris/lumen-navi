@@ -203,6 +203,13 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
                 element_timeout_ms,
                 max_text_length,
             };
+            let config = AxTreeWalkConfig {
+                max_depth,
+                max_nodes,
+                walk_timeout_ms,
+                element_timeout_ms,
+                max_text_length,
+            };
             tracing::info!(pid, max_depth, max_nodes, "AxWalk starting");
 
             // AX API calls can block for seconds on some apps. Using

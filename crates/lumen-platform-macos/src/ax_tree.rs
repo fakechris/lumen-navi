@@ -267,6 +267,12 @@ impl<'a> Walker<'a> {
         }
         self.node_count += 1;
 
+        // Set messaging timeout on EVERY element — AXUIElementSetMessagingTimeout
+        // is per-element and does NOT inherit to children. Without this, deep
+        // nodes (Safari's AXSplitGroup → AXWebArea chain) can hang indefinitely
+        // waiting for the target app's main thread to respond.
+        AXUIElementSetMessagingTimeout(element, 0.3);
+
         let role = ax_string_attr(element, "AXRole").unwrap_or_default();
 
         // Prune decorative subtrees entirely.
