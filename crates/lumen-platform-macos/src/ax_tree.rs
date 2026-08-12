@@ -161,6 +161,13 @@ unsafe fn walk_focused_window_inner(
 <<<<<<< HEAD
     tracing::debug!(pid, "walk_focused_window_inner: starting");
 
+    // Use AXFocusedWindow directly (screenpipe's approach). Fall back to
+    // AXWindows[0] if null. No child-count probing — some AX providers hang
+    // on read_children.
+=======
+<<<<<<< HEAD
+    tracing::debug!(pid, "walk_focused_window_inner: starting");
+
 =======
 >>>>>>> origin/main
     // Resolve the focused window with a 4-tier fallback (mirrors screenpipe's
@@ -174,11 +181,15 @@ unsafe fn walk_focused_window_inner(
     // probing calls read_children on each candidate, and some apps' AX
     // providers hang on that call even with messaging timeout. If
     // AXFocusedWindow is null, fall back to a simple AXWindows[0].
+>>>>>>> origin/main
     let window = {
         let attr = CFString::new("AXFocusedWindow");
         let mut value: core_foundation::base::CFTypeRef = std::ptr::null();
         if AXUIElementCopyAttributeValue(app, attr.as_concrete_TypeRef(), &mut value) != K_AX_SUCCESS || value.is_null() {
+<<<<<<< HEAD
+=======
             // Fallback: AXWindows[0]
+>>>>>>> origin/main
             let wins_attr = CFString::new("AXWindows");
             let mut wins: core_foundation::base::CFTypeRef = std::ptr::null();
             if AXUIElementCopyAttributeValue(app, wins_attr.as_concrete_TypeRef(), &mut wins) == K_AX_SUCCESS && !wins.is_null() {
@@ -209,11 +220,15 @@ unsafe fn walk_focused_window_inner(
             value as AxUIElementRef
         }
     };
+<<<<<<< HEAD
+    let _win_guard = ReleaseGuard(window as *const c_void);
+=======
 =======
     let window = resolve_window(app, element_timeout)?;
 >>>>>>> origin/main
     let _win_guard = ReleaseGuard(window as *const c_void);
     tracing::debug!(pid, "walk_inner: window resolved");
+>>>>>>> origin/main
 
     // Read window-level metadata (cheap, no recursion).
     let window_title = ax_string_attr(window, "AXTitle");

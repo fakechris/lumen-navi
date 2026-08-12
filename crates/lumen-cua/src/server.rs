@@ -204,6 +204,32 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
                 max_text_length,
             };
             tracing::info!(pid, max_depth, max_nodes, "AxWalk starting");
+<<<<<<< HEAD
+
+            // AX API calls can block for seconds on some apps. Using
+            // tokio::spawn_blocking would consume a tokio blocking-pool thread
+            // that can't be cancelled on timeout — starving the pool and
+            // freezing cua's other work (screen capture, status).
+            //
+            // Instead, dispatch to a dedicated OS thread via a channel. The
+            // timeout cancels the *receiver*, not the thread — the thread
+            // continues to completion in the background and self-terminates.
+            // This is safe because:
+            //   - AX walks are read-only (no mutation, no lock held)
+            //   - At most one walk per screenshot; overlap is fine
+            //   - The thread exits when walk_focused_window returns
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::thread::Builder::new()
+                .name("ax-walk".into())
+                .spawn(move || {
+                    let result = walk_focused_window(pid, &config);
+                    let _ = tx.send(result);
+                })
+                .map_err(|e| anyhow::anyhow!("spawn ax-walk thread: {e}"))?;
+
+            let walk_timeout = Duration::from_millis(walk_timeout_ms.max(500) as u64 * 3);
+            let snapshot = match tokio::time::timeout(walk_timeout, rx).await {
+=======
             // Run the walk in a blocking task with a hard timeout — AX calls
             // can hang indefinitely on some apps (Safari's deep web content).
             let walk_timeout = Duration::from_millis(walk_timeout_ms.max(500) as u64 * 3);
@@ -212,6 +238,7 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
                 walk_focused_window(pid_for_walk, &config)
             });
             let snapshot = match tokio::time::timeout(walk_timeout, walk_result).await {
+>>>>>>> origin/main
                 Ok(Ok(Ok(snap))) => {
                     tracing::info!(
                         pid,
@@ -227,12 +254,21 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
                     tracing::warn!(pid, error = %e, "AxWalk returned error");
                     bail!("AX walk error: {e}");
                 }
+<<<<<<< HEAD
+                Ok(Err(_)) => {
+                    tracing::warn!(pid, "AxWalk channel dropped");
+                    bail!("AX walk channel closed unexpectedly");
+                }
+                Err(_) => {
+                    tracing::warn!(pid, timeout_ms = walk_timeout.as_millis() as u64, "AxWalk TIMED OUT (thread continues in background)");
+=======
                 Ok(Err(e)) => {
                     tracing::warn!(pid, error = %e, "AxWalk spawn_blocking join failed");
                     bail!("AX walk join: {e}");
                 }
                 Err(_) => {
                     tracing::warn!(pid, timeout_ms = walk_timeout.as_millis() as u64, "AxWalk TIMED OUT");
+>>>>>>> origin/main
                     bail!("AX walk timed out after {}ms", walk_timeout.as_millis());
                 }
             };
