@@ -158,11 +158,11 @@ unsafe fn walk_focused_window_inner(
     AXUIElementSetMessagingTimeout(app, 0.5);
     let _app_guard = ReleaseGuard(app as *const c_void);
 
-    tracing::debug!(pid, "walk_focused_window_inner: starting");
-
-    // Use AXFocusedWindow directly (screenpipe's approach). Fall back to
-    // AXWindows[0] if null. No child-count probing — some AX providers hang
-    // on read_children.
+    // Resolve the focused window with a 4-tier fallback (mirrors screenpipe's
+    // resolve_focused_window). AXFocusedWindow can return a stale/ghost window
+    // with only AXMenuBar as child (the real content window is a different
+    // AXUIElement). If a candidate has ≤2 children, it's likely the wrong
+    // window — try the next candidate.
     let window = {
         let attr = CFString::new("AXFocusedWindow");
         let mut value: core_foundation::base::CFTypeRef = std::ptr::null();
