@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./api";
 import { Onboarding } from "./Onboarding";
 import { DashboardView } from "./views/Dashboard";
@@ -178,6 +179,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [statusNote, setStatusNote] = useState<string | null>(null);
+  const [healthAlert, setHealthAlert] = useState<{ reason: string } | null>(null);
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const [summaryText, setSummaryText] = useState<string | null>(null);
   const [asrModels, setAsrModels] = useState<AsrModelStatus | null>(null);
@@ -551,6 +553,34 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
+  // Capture health alert: emitted by the health monitor when the capture
+  // pipeline has been stagnant for >60s and self-healing failed.
+  useEffect(() => {
+    let unlistenAlert: (() => void) | undefined;
+    let unlistenRecover: (() => void) | undefined;
+    void listen<{ reason: string }>("health://alert", (event) => {
+      setHealthAlert(event.payload);
+      // Set dock badge so the user notices even if the window is hidden.
+      getCurrentWindow()
+        .setBadgeCount(1)
+        .catch(() => {});
+    }).then((fn) => {
+      unlistenAlert = fn;
+    });
+    void listen("health://recovered", () => {
+      setHealthAlert(null);
+      getCurrentWindow()
+        .setBadgeCount(0)
+        .catch(() => {});
+    }).then((fn) => {
+      unlistenRecover = fn;
+    });
+    return () => {
+      unlistenAlert?.();
+      unlistenRecover?.();
+    };
+  }, []);
+
   async function onSearch() {
     setBusy(true);
     try {
@@ -631,6 +661,13 @@ export default function App() {
         {statusNote && !error && (
           <div className="banner">
             <Notice tone="success">{statusNote}</Notice>
+          </div>
+        )}
+        {healthAlert && (
+          <div className="banner">
+            <Notice tone="warn">
+              ⚠️ 采集可能已停滞：{healthAlert.reason}。系统已尝试自动恢复。如果持续出现，请检查系统设置中的权限或重启 App。
+            </Notice>
           </div>
         )}
 

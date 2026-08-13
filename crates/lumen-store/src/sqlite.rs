@@ -2423,6 +2423,12 @@ impl SqliteStore {
             .map_err(StoreError::db)?;
         Ok(n as usize)
     }
+
+    /// Total event count (sync). Used by the health monitor to detect
+    /// capture stagnation.
+    pub fn total_event_count(&self) -> Result<i64, StoreError> {
+        Ok(self.len_sync()? as i64)
+    }
 }
 
 #[async_trait]

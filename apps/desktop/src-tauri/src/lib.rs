@@ -240,6 +240,123 @@ pub fn run() {
                     }
                 });
             }
+            // --- Capture health monitor ---
+            // Every 30s, checks whether the capture pipeline is producing
+            // events. If stagnant for >60s with screen enabled, attempts
+            // self-healing (restart daemon/cua). If healing fails, emits
+            // "health://alert" to the frontend (banner + dock badge).
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // Delay first check so startup has time to produce events.
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(30));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+                    let mut last_event_count: i64 = -1;
+                    let mut stagnant_ticks: u32 = 0;
+                    let mut alert_active = false;
+
+                    loop {
+                        interval.tick().await;
+                        let Some(state) = handle.try_state::<AppState>() else {
+                            continue;
+                        };
+
+                        // Check if daemon socket is alive.
+                        let socket = state.data_dir.join("daemon.sock");
+                        let daemon_ok = daemon_socket_alive(&socket);
+
+                        // If daemon is down, the existing supervisor handles
+                        // restart. We just track the state.
+                        if !daemon_ok {
+                            stagnant_ticks = stagnant_ticks.saturating_add(1);
+                        } else {
+                            // Daemon alive — query event count to detect
+                            // stagnation (events flowing but not increasing).
+                            let count = tauri::async_runtime::spawn_blocking({
+                                let dir = state.data_dir.clone();
+                                move || -> i64 {
+                                    let store = match lumen_store::SqliteStore::open(&dir) {
+                                        Ok(s) => s,
+                                        Err(_) => return -1,
+                                    };
+                                    store.total_event_count().unwrap_or(-1)
+                                }
+                            })
+                            .await
+                            .unwrap_or(-1);
+
+                            if count > last_event_count && last_event_count >= 0 {
+                                // Events are flowing — reset.
+                                stagnant_ticks = 0;
+                            } else if count == last_event_count {
+                                stagnant_ticks = stagnant_ticks.saturating_add(1);
+                            }
+                            last_event_count = count;
+                        }
+
+                        // After 2 stagnant ticks (~60s), try self-healing.
+                        let needs_heal = stagnant_ticks >= 2;
+
+                        if needs_heal && !alert_active {
+                            // Attempt self-heal.
+                            let mut healed = false;
+                            if !daemon_ok {
+                                match commands::observe_start_inner(&state) {
+                                    Ok(_) => {
+                                        tracing::info!("health monitor: restarted daemon");
+                                        healed = true;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "health monitor: daemon restart failed");
+                                    }
+                                }
+                            }
+                            // Check cua if screen is enabled.
+                            let cfg = state.load_config().ok();
+                            if cfg.as_ref().is_some_and(|c| c.sources.screen) {
+                                match state.cua.ensure_running() {
+                                    Ok(_) => {
+                                        tracing::info!("health monitor: cua ensured running");
+                                        healed = true;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "health monitor: cua restart failed");
+                                    }
+                                }
+                            }
+
+                            if !healed {
+                                // Self-heal failed — alert the user.
+                                let reason = if !daemon_ok {
+                                    "本地服务无响应"
+                                } else {
+                                    "采集停滞（长时间无新数据）"
+                                };
+                                tracing::warn!(reason, "health monitor: alerting user");
+                                let _ = handle.emit(
+                                    "health://alert",
+                                    serde_json::json!({ "reason": reason }),
+                                );
+                                alert_active = true;
+                            } else {
+                                // Healed — reset and give it time.
+                                stagnant_ticks = 0;
+                            }
+                        }
+
+                        // If we were in alert but now events are flowing,
+                        // emit recovery.
+                        if alert_active && stagnant_ticks == 0 {
+                            tracing::info!("health monitor: recovered");
+                            let _ = handle.emit("health://recovered", ());
+                            alert_active = false;
+                        }
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
