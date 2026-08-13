@@ -2387,6 +2387,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lumen-scene"
+version = "0.1.0"
+dependencies = [
+ "url",
+]
+
+[[package]]
 name = "lumen-sources-browser"
 version = "0.1.0"
 dependencies = [
@@ -2424,6 +2431,7 @@ dependencies = [
  "chrono",
  "lumen-api",
  "lumen-intake",
+ "lumen-scene",
  "lumen-types",
  "rusqlite",
  "serde",

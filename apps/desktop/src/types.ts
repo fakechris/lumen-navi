@@ -1,5 +1,36 @@
 export type TabId = "overview" | "dashboard" | "search" | "activity" | "settings";
 
+export interface SceneEpisode {
+  day: string;
+  kind: string;
+  app_name: string;
+  bundle_id: string | null;
+  shell: string | null;
+  leaf: string;
+  label: string;
+  started_at: string;
+  ended_at: string | null;
+  duration_ms: number;
+  segment_count: number;
+}
+
+export interface SceneRollup {
+  kind: string;
+  app_name: string;
+  bundle_id: string | null;
+  shell: string | null;
+  leaf: string;
+  label: string;
+  ms: number;
+  episode_count: number;
+}
+
+export interface SceneDay {
+  day: string;
+  episodes: SceneEpisode[];
+  rollups: SceneRollup[];
+}
+
 export interface ActivitySegment {
   seg_id: string;
   day: string;
@@ -17,6 +48,7 @@ export interface ActivitySegment {
   productivity_level: string | null;
   event_count: number;
   source?: string;
+  scene_label?: string | null;
 }
 
 export interface CategoryTotal {

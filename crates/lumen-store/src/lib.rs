@@ -7,6 +7,7 @@ mod blob;
 mod categorization;
 mod enrichment;
 mod rule_engine;
+mod scene;
 mod schema;
 mod sqlite;
 
@@ -29,6 +30,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub use blob::BlobStore;
+pub use scene::fold_scene_day;
 pub use schema::SCHEMA_VERSION;
 pub use sqlite::{
     ArtifactInput, BlobLimitedAppendOutcome, BrowserVisitProjection, CursorEvent,

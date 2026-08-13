@@ -21,6 +21,7 @@ use lumen_platform::{AxTreeSnapshot, AxTreeWalkConfig, PlatformError};
 use crate::ax::{
     ensure_enhanced_ax_for_pid, ax_string_attr, AxError, AxUIElementRef, ReleaseGuard,
     AXUIElementCopyAttributeValue, AXUIElementCreateApplication, AXUIElementSetMessagingTimeout,
+    _AXUIElementGetWindow,
 };
 
 /// kAXErrorSuccess
@@ -78,9 +79,14 @@ pub struct MacAxTreeWalker;
 
 #[async_trait::async_trait]
 impl lumen_platform::AxTreeWalker for MacAxTreeWalker {
-    async fn walk(&self, pid: i32, config: AxTreeWalkConfig) -> Result<AxTreeSnapshot, PlatformError> {
+    async fn walk(
+        &self,
+        pid: i32,
+        window_id: Option<u64>,
+        config: AxTreeWalkConfig,
+    ) -> Result<AxTreeSnapshot, PlatformError> {
         let config = config.clone();
-        let result = tokio::task::spawn_blocking(move || walk_focused_window(pid, &config))
+        let result = tokio::task::spawn_blocking(move || walk_window(pid, window_id, &config))
             .await
             .map_err(|e| PlatformError::Message(format!("AX walk join: {e}")))?;
         result
@@ -91,42 +97,54 @@ impl lumen_platform::AxTreeWalker for MacAxTreeWalker {
     }
 }
 
-/// Walk the focused window of `pid`'s application. Returns a flat text blob
-/// of all extractable text in the tree, plus metadata.
+/// Walk the focused window of `pid`. Prefer [`walk_window`] when a capture-time
+/// `window_id` is available.
 pub fn walk_focused_window(pid: i32, config: &AxTreeWalkConfig) -> Result<AxTreeSnapshot, PlatformError> {
+    walk_window(pid, None, config)
+}
+
+/// Walk `pid`'s AX tree. If `window_id` is `Some` and that CG window is gone,
+/// returns [`PlatformError::WindowGone`]. Title mismatch is not a failure.
+pub fn walk_window(
+    pid: i32,
+    window_id: Option<u64>,
+    config: &AxTreeWalkConfig,
+) -> Result<AxTreeSnapshot, PlatformError> {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (pid, config);
+        let _ = (pid, window_id, config);
         return Err(PlatformError::Message("AX tree walk requires macOS".into()));
     }
     #[cfg(target_os = "macos")]
     {
+        if let Some(id) = window_id {
+            if !crate::frontmost::cg_window_exists(id) {
+                return Err(PlatformError::WindowGone(id));
+            }
+        }
         // Force-enable Electron/Chromium AX (cached; only pokes once per 60s).
         if ensure_enhanced_ax_for_pid(pid) {
-            // First poke for this pid — the tree materializes asynchronously.
             std::thread::sleep(Duration::from_millis(150));
         }
 
-        // Wakeup retry: AX trees materialize lazily (especially web content).
-        // If the first walk yields few nodes, retry up to 3 times with short
-        // sleeps — mirrors yansu's poll-retry approach. Most of the cost is
-        // the first walk (AX IPC); subsequent walks on the same materialized
-        // tree are very fast.
         let mut best = objc2::rc::autoreleasepool(|_pool| unsafe {
-            walk_focused_window_inner(pid, config)
+            walk_window_inner(pid, window_id, config)
         });
         const MIN_NODES: usize = 15;
         const MAX_RETRIES: u32 = 3;
         const RETRY_SLEEP: Duration = Duration::from_millis(50);
 
         for _ in 0..MAX_RETRIES {
+            if matches!(&best, Err(PlatformError::WindowGone(_))) {
+                break;
+            }
             let nodes = best.as_ref().map(|s| s.node_count).unwrap_or(0);
             if nodes >= MIN_NODES {
                 break;
             }
             std::thread::sleep(RETRY_SLEEP);
             let attempt = objc2::rc::autoreleasepool(|_pool| unsafe {
-                walk_focused_window_inner(pid, config)
+                walk_window_inner(pid, window_id, config)
             });
             if let Ok(snap) = &attempt {
                 if snap.node_count > nodes {
@@ -139,13 +157,76 @@ pub fn walk_focused_window(pid: i32, config: &AxTreeWalkConfig) -> Result<AxTree
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn walk_focused_window_inner(
-    pid: i32,
-    config: &AxTreeWalkConfig,
-) -> Result<AxTreeSnapshot, PlatformError> {
+unsafe fn find_window_by_cg_id(app: AxUIElementRef, want: u32) -> Option<AxUIElementRef> {
     use core_foundation::base::TCFType;
     use core_foundation::string::CFString;
 
+    let wins_attr = CFString::new("AXWindows");
+    let mut wins: core_foundation::base::CFTypeRef = std::ptr::null();
+    if AXUIElementCopyAttributeValue(app, wins_attr.as_concrete_TypeRef(), &mut wins) != K_AX_SUCCESS
+        || wins.is_null()
+    {
+        return None;
+    }
+    let arr = wins as core_foundation_sys::array::CFArrayRef;
+    let count = core_foundation_sys::array::CFArrayGetCount(arr);
+    for i in 0..count {
+        let v = core_foundation_sys::array::CFArrayGetValueAtIndex(arr, i);
+        if v.is_null() {
+            continue;
+        }
+        let mut cgid: u32 = 0;
+        if _AXUIElementGetWindow(v as AxUIElementRef, &mut cgid) == K_AX_SUCCESS && cgid == want {
+            core_foundation_sys::base::CFRetain(v);
+            core_foundation_sys::base::CFRelease(wins);
+            return Some(v as AxUIElementRef);
+        }
+    }
+    core_foundation_sys::base::CFRelease(wins);
+    None
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn resolve_focused_window(app: AxUIElementRef) -> Option<AxUIElementRef> {
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+
+    let attr = CFString::new("AXFocusedWindow");
+    let mut value: core_foundation::base::CFTypeRef = std::ptr::null();
+    if AXUIElementCopyAttributeValue(app, attr.as_concrete_TypeRef(), &mut value) == K_AX_SUCCESS
+        && !value.is_null()
+    {
+        return Some(value as AxUIElementRef);
+    }
+    let wins_attr = CFString::new("AXWindows");
+    let mut wins: core_foundation::base::CFTypeRef = std::ptr::null();
+    if AXUIElementCopyAttributeValue(app, wins_attr.as_concrete_TypeRef(), &mut wins) != K_AX_SUCCESS
+        || wins.is_null()
+    {
+        return None;
+    }
+    let arr = wins as core_foundation_sys::array::CFArrayRef;
+    let count = core_foundation_sys::array::CFArrayGetCount(arr);
+    if count == 0 {
+        core_foundation_sys::base::CFRelease(wins);
+        return None;
+    }
+    let v = core_foundation_sys::array::CFArrayGetValueAtIndex(arr, 0);
+    if v.is_null() {
+        core_foundation_sys::base::CFRelease(wins);
+        return None;
+    }
+    core_foundation_sys::base::CFRetain(v);
+    core_foundation_sys::base::CFRelease(wins);
+    Some(v as AxUIElementRef)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn walk_window_inner(
+    pid: i32,
+    window_id: Option<u64>,
+    config: &AxTreeWalkConfig,
+) -> Result<AxTreeSnapshot, PlatformError> {
     let start = Instant::now();
 
     let app = AXUIElementCreateApplication(pid);
@@ -157,50 +238,30 @@ unsafe fn walk_focused_window_inner(
     AXUIElementSetMessagingTimeout(app, 0.5);
     let _app_guard = ReleaseGuard(app as *const c_void);
 
-    // Resolve the focused window with a 4-tier fallback (mirrors screenpipe's
-    // resolve_focused_window). AXFocusedWindow can return a stale/ghost window
-    // with only AXMenuBar as child (the real content window is a different
-    // AXUIElement). If a candidate has ≤2 children, it's likely the wrong
-    // window — try the next candidate.
-    let window = {
-        let attr = CFString::new("AXFocusedWindow");
-        let mut value: core_foundation::base::CFTypeRef = std::ptr::null();
-        if AXUIElementCopyAttributeValue(app, attr.as_concrete_TypeRef(), &mut value) != K_AX_SUCCESS || value.is_null() {
-            // Fallback: AXWindows[0]
-            let wins_attr = CFString::new("AXWindows");
-            let mut wins: core_foundation::base::CFTypeRef = std::ptr::null();
-            if AXUIElementCopyAttributeValue(app, wins_attr.as_concrete_TypeRef(), &mut wins) == K_AX_SUCCESS && !wins.is_null() {
-                let arr = wins as core_foundation_sys::array::CFArrayRef;
-                let count = core_foundation_sys::array::CFArrayGetCount(arr);
-                if count > 0 {
-                    let v = core_foundation_sys::array::CFArrayGetValueAtIndex(arr, 0);
-                    // CFArrayGetValueAtIndex is a Get-rule borrow owned by the
-                    // array: retain BEFORE releasing the array, otherwise
-                    // `window` dangles (same UAF class as read_children).
-                    core_foundation_sys::base::CFRetain(v);
-                    core_foundation_sys::base::CFRelease(wins);
-                    v as AxUIElementRef
-                } else {
-                    core_foundation_sys::base::CFRelease(wins);
-                    return Ok(AxTreeSnapshot {
-                        text_content: String::new(), node_count: 0,
-                        content_hash: String::new(), walk_duration_ms: start.elapsed().as_millis() as u64,
-                        truncated: false, app_name: None, window_title: None,
-                        document_path: None, browser_url: None,
-                    });
-                }
-            } else {
-                return Ok(AxTreeSnapshot {
-                    text_content: String::new(), node_count: 0,
-                    content_hash: String::new(), walk_duration_ms: start.elapsed().as_millis() as u64,
-                    truncated: false, app_name: None, window_title: None,
-                    document_path: None, browser_url: None,
-                });
-            }
+    // Prefer the capture-time CG window. If AX can't map it but the window
+    // still exists, fall back to focused — do not treat title drift as gone.
+    let window = if let Some(id) = window_id {
+        if let Some(w) = find_window_by_cg_id(app, id as u32) {
+            w
         } else {
-            value as AxUIElementRef
+            resolve_focused_window(app).unwrap_or(std::ptr::null())
         }
+    } else {
+        resolve_focused_window(app).unwrap_or(std::ptr::null())
     };
+    if window.is_null() {
+        return Ok(AxTreeSnapshot {
+            text_content: String::new(),
+            node_count: 0,
+            content_hash: String::new(),
+            walk_duration_ms: start.elapsed().as_millis() as u64,
+            truncated: false,
+            app_name: None,
+            window_title: None,
+            document_path: None,
+            browser_url: None,
+        });
+    }
     let _win_guard = ReleaseGuard(window as *const c_void);
 
     // Read window-level metadata (cheap, no recursion).

@@ -1,0 +1,11 @@
+[package]
+name = "lumen-scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scene-stack fuse: capture-time leaf + optional shell. Title mismatch is not desync."
+
+[dependencies]
+url = { workspace = true }
+
+[dev-dependencies]

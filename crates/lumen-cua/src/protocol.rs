@@ -35,6 +35,9 @@ pub(crate) enum Command {
     /// result header. This runs inside cua (which holds the Accessibility TCC).
     AxWalk {
         pid: i32,
+        /// Capture-time `kCGWindowNumber`. Absent on old clients → focused window.
+        #[serde(default)]
+        window_id: Option<u64>,
         max_depth: u32,
         max_nodes: u32,
         walk_timeout_ms: u64,
@@ -63,6 +66,9 @@ pub(crate) enum ResponseResult {
     EncodedFrame { frame: EncodedFrameMeta },
     RawFrame { frame: RawFrameMeta },
     AxSnapshot { meta: AxSnapshotMeta },
+    /// Capture-time window is gone. Not a protocol failure — caller should
+    /// persist a desynced marker, not retry.
+    AxWindowGone { window_id: u64 },
     Ack,
 }
 

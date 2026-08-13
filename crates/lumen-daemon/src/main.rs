@@ -1238,6 +1238,7 @@ fn platform_err_to_asr(e: PlatformError) -> AsrError {
             AsrError::Inference(format!("permission denied: {m}"))
         }
         PlatformError::Message(m) => AsrError::Inference(m),
+        PlatformError::WindowGone(id) => AsrError::Inference(format!("ax window {id} is gone")),
     }
 }
 

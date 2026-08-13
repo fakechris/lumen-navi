@@ -107,13 +107,43 @@ fn browser_tab_url(bundle_id: &str) -> Option<String> {
     }
 }
 
+/// Whether `window_id` (`kCGWindowNumber`) is still in the window list.
+/// Uses the all-windows list so minimized / other-space windows count as alive.
+/// Title change does not affect this.
+pub fn cg_window_exists(window_id: u64) -> bool {
+    use core_foundation_sys::base::CFRelease;
+    const OPTION_ALL: u32 = 0;
+    unsafe {
+        let raw = CGWindowListCopyWindowInfo(OPTION_ALL, 0);
+        if raw.is_null() {
+            return false;
+        }
+        let array = raw as core_foundation_sys::array::CFArrayRef;
+        let count = core_foundation_sys::array::CFArrayGetCount(array);
+        let mut found = false;
+        for i in 0..count {
+            let dict = core_foundation_sys::array::CFArrayGetValueAtIndex(array, i)
+                as core_foundation_sys::dictionary::CFDictionaryRef;
+            if dict.is_null() {
+                continue;
+            }
+            if cf_dict_number(dict, "kCGWindowNumber").map(|n| n as u64) == Some(window_id) {
+                found = true;
+                break;
+            }
+        }
+        CFRelease(raw as *const _);
+        found
+    }
+}
+
 /// Resolve the true frontmost app via `CGWindowListCopyWindowInfo` (layer-0
 /// windows sorted by z-order). This is the correct API for background
 /// processes — `NSWorkspace.frontmostApplication()` reports the caller's own
 /// bundle from a daemon, not the user's actual focused window. Returns the
 /// owner app name + pid so we can scope the AX title query.
 #[cfg(target_os = "macos")]
-fn frontmost_via_windowlist() -> Option<(String, i32)> {
+fn frontmost_via_windowlist() -> Option<(String, i32, Option<u64>)> {
     use core_foundation_sys::base::CFRelease;
 
     // CGWindowListOption: onScreenOnly (1<<0) | excludeDesktopElements (1<<4) = 0x11
@@ -158,8 +188,9 @@ fn frontmost_via_windowlist() -> Option<(String, i32)> {
             if !has_bounds {
                 continue;
             }
+            let window_id = cf_dict_number(dict, "kCGWindowNumber").map(|n| n as u64);
             CFRelease(raw as *const _);
-            return Some((name, pid));
+            return Some((name, pid, window_id));
         }
         CFRelease(raw as *const _);
         None
@@ -228,7 +259,7 @@ fn frontmost_native() -> Option<FrontmostApp> {
     // NSWorkspace.frontmostApplication() returns the caller's own bundle from a
     // child process, not the user's actual focused window. Try the window list
     // first; resolve bundle id from the pid via NSRunningApplication.
-    if let Some((owner_name, pid)) = frontmost_via_windowlist() {
+    if let Some((owner_name, pid, window_id)) = frontmost_via_windowlist() {
         let meta = running_app_meta(pid);
         let app_name = meta
             .localized_name
@@ -242,6 +273,7 @@ fn frontmost_native() -> Option<FrontmostApp> {
             ls_category_type: meta.ls_category_type,
             tab_url: None,
             pid: Some(pid),
+            window_id,
         });
     }
 
@@ -281,6 +313,7 @@ fn frontmost_native() -> Option<FrontmostApp> {
         ls_category_type,
         tab_url: None,
         pid: if pid > 0 { Some(pid) } else { None },
+        window_id: None,
     })
 }
 
@@ -396,6 +429,7 @@ end tell
             ls_category_type,
             tab_url: None,
             pid: None,
+            window_id: None,
         })
     }
     #[cfg(not(target_os = "macos"))]

@@ -6,7 +6,10 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use lumen_api::{ActivitySegmentDto, AppTotal, CategoryTotal, DayRollupDto, DayStatsDto, RangeStatsDto};
+use lumen_api::{
+    ActivitySegmentDto, AppTotal, CategoryTotal, DayRollupDto, DayStatsDto, RangeStatsDto,
+    SceneDayDto,
+};
 use lumen_types::{event_kind, ActivitySession, ArtifactRef, SourceEvent, SourceKind};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
@@ -1250,14 +1253,30 @@ impl SqliteStore {
                     productivity_level: row.get(12)?,
                     event_count: row.get(13)?,
                     source: row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "auto".into()),
+                    scene_label: None,
                 })
             })
             .map_err(StoreError::db)?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(r.map_err(StoreError::db)?);
+            let mut dto = r.map_err(StoreError::db)?;
+            if !dto.is_idle {
+                let app = dto.app_name.as_deref().unwrap_or("unknown");
+                let bundle = dto.bundle_id.as_deref().unwrap_or("");
+                let title = dto.window_title.as_deref().unwrap_or("");
+                dto.scene_label = Some(
+                    lumen_scene::stack_for(app, bundle, title, "", dto.url.as_deref()).label(),
+                );
+            }
+            out.push(dto);
         }
         Ok(out)
+    }
+
+    /// Fold today's activity segments into scene episodes / rollups.
+    pub fn list_scene_day(&self, day: &str) -> Result<SceneDayDto, StoreError> {
+        let segs = self.list_activity_segments(day)?;
+        Ok(crate::scene::fold_scene_day(day, &segs))
     }
 
     /// Aggregated stats for one day — feeds the dashboard's stat cards, hour

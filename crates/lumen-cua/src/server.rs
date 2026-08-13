@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{bail, Context, Result};
 use lumen_platform::{DisplayEnumerator, DisplayId, ScreenCapturer};
 #[cfg(target_os = "macos")]
-use lumen_platform_macos::{ax_tree::walk_focused_window, MacDisplays, MacScreenCapturer};
+use lumen_platform_macos::{ax_tree::walk_window, MacDisplays, MacScreenCapturer};
 #[cfg(target_os = "macos")]
 use lumen_platform::AxTreeWalkConfig;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -190,6 +190,7 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
         Command::Shutdown => Ok((ResponseResult::Ack, Vec::new())),
         Command::AxWalk {
             pid,
+            window_id,
             max_depth,
             max_nodes,
             walk_timeout_ms,
@@ -203,14 +204,7 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
                 element_timeout_ms,
                 max_text_length,
             };
-            let config = AxTreeWalkConfig {
-                max_depth,
-                max_nodes,
-                walk_timeout_ms,
-                element_timeout_ms,
-                max_text_length,
-            };
-            tracing::info!(pid, max_depth, max_nodes, "AxWalk starting");
+            tracing::info!(pid, window_id, max_depth, max_nodes, "AxWalk starting");
 
             // AX API calls can block for seconds on some apps. Using
             // tokio::spawn_blocking would consume a tokio blocking-pool thread
@@ -228,7 +222,7 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
             std::thread::Builder::new()
                 .name("ax-walk".into())
                 .spawn(move || {
-                    let result = walk_focused_window(pid, &config);
+                    let result = walk_window(pid, window_id, &config);
                     let _ = tx.send(result);
                 })
                 .map_err(|e| anyhow::anyhow!("spawn ax-walk thread: {e}"))?;
@@ -245,6 +239,10 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
                         "AxWalk done"
                     );
                     snap
+                }
+                Ok(Ok(Err(lumen_platform::PlatformError::WindowGone(id)))) => {
+                    tracing::info!(pid, window_id = id, "AxWalk window gone");
+                    return Ok((ResponseResult::AxWindowGone { window_id: id }, Vec::new()));
                 }
                 Ok(Ok(Err(e))) => {
                     tracing::warn!(pid, error = %e, "AxWalk returned error");

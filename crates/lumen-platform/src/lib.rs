@@ -12,6 +12,10 @@ pub enum PlatformError {
     PermissionDenied(String),
     #[error("unsupported on this platform: {0}")]
     Unsupported(String),
+    /// Capture-time `window_id` is no longer in the window list. Title
+    /// mismatch is not this — only a gone window is desync.
+    #[error("ax window {0} is gone")]
+    WindowGone(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +65,11 @@ pub struct FrontmostApp {
     /// resolve a pid (rare; falls back to window-list owner name only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<i32>,
+    /// Stable window identity at probe time (`kCGWindowNumber` on macOS,
+    /// HWND on Windows). Scene-engine bind key — title strings are layers,
+    /// not this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -179,10 +188,16 @@ pub struct AxTreeSnapshot {
 /// Platform trait for walking the Accessibility tree of the focused window.
 #[async_trait]
 pub trait AxTreeWalker: Send + Sync {
-    /// Walk the focused window of the app owning `pid`. Returns the flattened
-    /// text + metadata. Errors are non-fatal (AX permission not granted, app
-    /// unresponsive) — the caller should mark the job done, not retry forever.
-    async fn walk(&self, pid: i32, config: AxTreeWalkConfig) -> Result<AxTreeSnapshot, PlatformError>;
+    /// Walk the accessibility tree of `pid`. When `window_id` is `Some`,
+    /// walk that CG window (or return [`PlatformError::WindowGone`] if it
+    /// no longer exists). `None` walks the current focused window.
+    /// Title mismatch is not a bind failure.
+    async fn walk(
+        &self,
+        pid: i32,
+        window_id: Option<u64>,
+        config: AxTreeWalkConfig,
+    ) -> Result<AxTreeSnapshot, PlatformError>;
 
     /// Whether this walker is usable on the current platform.
     fn is_supported(&self) -> bool {

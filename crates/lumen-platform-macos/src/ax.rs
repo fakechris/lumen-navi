@@ -72,6 +72,9 @@ extern "C" {
     /// AX IPC call can block — without this, a hung app stalls the caller
     /// indefinitely. screenpipe applies 0.2s on every walk root.
     pub fn AXUIElementSetMessagingTimeout(element: AxUIElementRef, timeout: f64) -> AxError;
+    /// Private: map an AX window to `kCGWindowNumber`. Used to bind an AX
+    /// walk to the capture-time window. Not a public header; widely used.
+    pub fn _AXUIElementGetWindow(element: AxUIElementRef, identifier: *mut u32) -> AxError;
 }
 
 /// Read a CFString attribute of an AX element (e.g. `kAXTitleAttribute`,
