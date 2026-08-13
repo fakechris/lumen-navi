@@ -351,7 +351,7 @@ fn should_extract_text(role: &str) -> bool {
 /// they are +1 owned by the array.)
 unsafe fn read_children(element: AxUIElementRef) -> Option<Vec<AxUIElementRef>> {
     use core_foundation::array::{CFArray, CFArrayRef};
-    use core_foundation::base::{CFGetTypeID, CFRelease, CFTypeRef, TCFType};
+    use core_foundation::base::{CFGetTypeID, CFRelease, CFRetain, CFTypeRef, TCFType};
     use core_foundation::string::CFString;
 
     let attr = CFString::new("AXChildren");
@@ -374,15 +374,23 @@ unsafe fn read_children(element: AxUIElementRef) -> Option<Vec<AxUIElementRef>> 
     // then only balances our retains, leaving every returned pointer valid.
     let children: Vec<AxUIElementRef> = array
         .iter()
-        .map(|p| *p as AxUIElementRef)
+        .map(|p| {
+            let elem = *p as AxUIElementRef;
+            if !elem.is_null() {
+                // Retain each child BEFORE the array is dropped. The CFArray
+                // holds the only reference; without this retain, CFRelease(array)
+                // would free the children → dangling pointers → SIGSEGV.
+                CFRetain(elem as *const c_void);
+            }
+            elem
+        })
         .filter(|p| !p.is_null())
         .map(|p| {
             core_foundation_sys::base::CFRetain(p);
             p
         })
         .collect();
-    // array dropped here (create-rule Drop releases the CFArray — no manual
-    // CFRelease needed, and a manual one would be a double-free).
+    // array dropped here — CFRelease(array) is safe because each child has +1.
 
     if children.is_empty() {
         tracing::trace!("read_children: AXChildren array was empty");
