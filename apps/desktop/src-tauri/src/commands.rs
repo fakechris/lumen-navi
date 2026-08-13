@@ -810,6 +810,9 @@ pub fn observe_start_inner(state: &AppState) -> Result<ObserveStatus, String> {
     daemon_command
         .current_dir(&state.data_dir)
         .env("LUMEN_NAVI_CONFIG", state.config_path.display().to_string())
+        // Lets the daemon self-terminate if this app dies without reaping it
+        // (SIGTERM/pkill skips RunEvent::Exit, which used to orphan daemons).
+        .env("LUMEN_NAVI_PARENT_PID", std::process::id().to_string())
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr);

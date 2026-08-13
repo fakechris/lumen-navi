@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use lumen_platform::{
     AxTreeSnapshot, AxTreeWalkConfig, AxTreeWalker, DisplayEnumerator, DisplayId, DisplayInfo,
@@ -5,6 +7,12 @@ use lumen_platform::{
 };
 
 use crate::CuaClient;
+
+/// Bound on awaiting the blocking Cua IPC task. The Cua client has its own
+/// 15s socket timeout; this outer bound exists so that an exhausted tokio
+/// blocking pool (or a blocking thread wedged in an OS call) can never park
+/// the capture pipeline forever — we surface an error instead.
+const CUA_TASK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Implements Navi's existing capture ports without moving policy or storage
 /// into the Lumen Cua process.
@@ -23,10 +31,20 @@ impl CuaCaptureAdapter {
 impl DisplayEnumerator for CuaCaptureAdapter {
     async fn list_displays(&self) -> Result<Vec<DisplayInfo>, PlatformError> {
         let client = self.client.clone();
-        tokio::task::spawn_blocking(move || client.list_displays())
-            .await
-            .map_err(|e| PlatformError::Message(format!("Lumen Cua task: {e}")))?
-            .map_err(|e| PlatformError::Message(e.to_string()))
+        match tokio::time::timeout(
+            CUA_TASK_TIMEOUT,
+            tokio::task::spawn_blocking(move || client.list_displays()),
+        )
+        .await
+        {
+            Ok(join) => join
+                .map_err(|e| PlatformError::Message(format!("Lumen Cua task: {e}")))?
+                .map_err(|e| PlatformError::Message(e.to_string())),
+            Err(_) => Err(PlatformError::Message(format!(
+                "Lumen Cua list_displays timed out after {}s",
+                CUA_TASK_TIMEOUT.as_secs()
+            ))),
+        }
     }
 }
 
@@ -40,12 +58,22 @@ impl ScreenCapturer for CuaCaptureAdapter {
         jpeg_quality: u8,
     ) -> Result<ScreenshotFrame, PlatformError> {
         let client = self.client.clone();
-        tokio::task::spawn_blocking(move || {
-            client.capture_encoded(id, max_edge, jpeg, jpeg_quality)
-        })
+        match tokio::time::timeout(
+            CUA_TASK_TIMEOUT,
+            tokio::task::spawn_blocking(move || {
+                client.capture_encoded(id, max_edge, jpeg, jpeg_quality)
+            }),
+        )
         .await
-        .map_err(|e| PlatformError::Message(format!("Lumen Cua task: {e}")))?
-        .map_err(|e| PlatformError::Message(e.to_string()))
+        {
+            Ok(join) => join
+                .map_err(|e| PlatformError::Message(format!("Lumen Cua task: {e}")))?
+                .map_err(|e| PlatformError::Message(e.to_string())),
+            Err(_) => Err(PlatformError::Message(format!(
+                "Lumen Cua capture_display timed out after {}s",
+                CUA_TASK_TIMEOUT.as_secs()
+            ))),
+        }
     }
 
     async fn capture_display_raw(
@@ -54,10 +82,20 @@ impl ScreenCapturer for CuaCaptureAdapter {
         scale_div: u32,
     ) -> Result<RawFrame, PlatformError> {
         let client = self.client.clone();
-        tokio::task::spawn_blocking(move || client.capture_raw(id, scale_div))
-            .await
-            .map_err(|e| PlatformError::Message(format!("Lumen Cua task: {e}")))?
-            .map_err(|e| PlatformError::Message(e.to_string()))
+        match tokio::time::timeout(
+            CUA_TASK_TIMEOUT,
+            tokio::task::spawn_blocking(move || client.capture_raw(id, scale_div)),
+        )
+        .await
+        {
+            Ok(join) => join
+                .map_err(|e| PlatformError::Message(format!("Lumen Cua task: {e}")))?
+                .map_err(|e| PlatformError::Message(e.to_string())),
+            Err(_) => Err(PlatformError::Message(format!(
+                "Lumen Cua capture_display_raw timed out after {}s",
+                CUA_TASK_TIMEOUT.as_secs()
+            ))),
+        }
     }
 }
 

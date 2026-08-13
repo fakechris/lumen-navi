@@ -4,7 +4,7 @@
 
 mod control_server;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,6 +39,49 @@ use tracing_subscriber::FmtSubscriber;
 
 const CUA_SOCKET_ENV: &str = "LUMEN_CUA_SOCKET";
 const CUA_TOKEN_FILE_ENV: &str = "LUMEN_CUA_TOKEN_FILE";
+const PARENT_PID_ENV: &str = "LUMEN_NAVI_PARENT_PID";
+
+/// Unix time (secs) of the last successful event write, read by the write
+/// watchdog below. Static so every write path (screen loop, standalone
+/// activity loop, persist task, audio loop) can report without plumbing.
+static LAST_WRITE_UNIX: AtomicU64 = AtomicU64::new(0);
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn note_write() {
+    LAST_WRITE_UNIX.store(unix_now(), Ordering::Relaxed);
+}
+
+/// Platform default data dir, mirroring the desktop shell's
+/// `state.rs::default_data_dir` (`~/Library/Application Support/LumenNavi`
+/// on macOS). Used only when the daemon runs without any explicit config.
+fn default_data_dir() -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        std::path::PathBuf::from(home).join("Library/Application Support/LumenNavi")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Local (not Roaming) AppData: the store is a SQLite database plus
+        // screenshot blobs — machine-local, frequently written, and far too
+        // large to sync with a roaming profile.
+        match std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
+            Some(local) => std::path::PathBuf::from(local).join("LumenNavi"),
+            None => std::env::temp_dir().join("LumenNavi"),
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        std::path::PathBuf::from(home).join(".lumen-navi")
+    }
+}
 
 fn cua_client_from_env() -> Option<CuaClient> {
     let socket = std::env::var_os(CUA_SOCKET_ENV)?;
@@ -65,10 +108,48 @@ async fn main() -> Result<()> {
         "daemon starting"
     );
 
+    // Parent watchdog: when spawned by the desktop app (which passes its pid
+    // via env), exit once the parent is gone. The app cannot always reap us —
+    // SIGTERM/pkill skips Tauri's RunEvent::Exit — which used to leave daemons
+    // orphaned to launchd (PPID=1) forever. Manual runs without this env var
+    // (tests, dogfood shells) skip the watchdog entirely.
+    #[cfg(unix)]
+    if let Some(ppid) = std::env::var(PARENT_PID_ENV)
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+    {
+        info!(ppid, "parent watchdog armed");
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(Duration::from_secs(5));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                every.tick().await;
+                // kill(pid, 0): 0 = alive; ESRCH = gone; EPERM still means alive.
+                let alive = unsafe { libc::kill(ppid, 0) } == 0
+                    || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+                if !alive {
+                    error!(ppid, "parent process gone; exiting (orphaned daemon)");
+                    std::process::exit(1);
+                }
+            }
+        });
+    }
+
     // The desktop app passes the config path via env; fall back to cwd-relative
     // `navi.toml` for standalone runs (tests, dogfood from a shell).
     let config_path = std::env::var("LUMEN_NAVI_CONFIG").unwrap_or_else(|_| "navi.toml".into());
-    let config = Config::load_or_default(&config_path).unwrap_or_default();
+    let mut config = Config::load_or_default(&config_path).unwrap_or_default();
+    // A bare default config has data_dir="data" (cwd-relative). When no
+    // explicit config was provided (env unset and no cwd navi.toml), anchor
+    // the data dir to the platform default so a daemon started from an
+    // arbitrary cwd doesn't scatter `<cwd>/data/meta/navi.db` orphans across
+    // the filesystem. An existing cwd navi.toml is still honored as-is.
+    if std::env::var_os("LUMEN_NAVI_CONFIG").is_none()
+        && !std::path::Path::new(&config_path).exists()
+        && config.data_dir == std::path::Path::new("data")
+    {
+        config.data_dir = default_data_dir();
+    }
     info!(
         data_dir = %config.data_dir.display(),
         screen = config.sources.screen,
@@ -92,6 +173,31 @@ async fn main() -> Result<()> {
 
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
+
+    // Single-instance guard: an exclusive, non-blocking flock on
+    // <data_dir>/daemon.lock. The desktop app can't reliably reap the daemon
+    // (SIGTERM skips RunEvent::Exit), so orphaned daemons used to pile up —
+    // 7 were observed double-writing the same store. The handle must stay
+    // alive for the process lifetime; the lock is released on fd close.
+    // The control-socket placeholder below stays as a second line of defense.
+    let _daemon_lock = {
+        use fs2::FileExt;
+        let lock_path = config.data_dir.join("daemon.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("open lock file {}", lock_path.display()))?;
+        if let Err(e) = file.try_lock_exclusive() {
+            error!(
+                path = %lock_path.display(),
+                error = %e,
+                "another lumen-daemon already holds the data-dir lock; exiting"
+            );
+            std::process::exit(1);
+        }
+        file
+    };
 
     let store = Arc::new(
         SqliteStore::open(&config.data_dir)
@@ -468,6 +574,33 @@ async fn main() -> Result<()> {
     let expect_long = ((screen_ready || cua_retry) && config.capture.screen_ticks == 0)
         || (config.sources.audio && config.audio.ticks == 0);
 
+    // Write watchdog: in long-running observe mode the activity heartbeat
+    // lands a row every few seconds, so 5 minutes without any event write
+    // while collection is supposed to be running means the pipeline is
+    // wedged (production incident: the tokio blocking pool exhausted by OS
+    // calls stuck on a SkyLight mutex — daemon alive, health "fine", zero
+    // writes). Exit non-zero so the app's supervisor restarts us.
+    // Not armed when paused/closed-eyes, where no writes are expected.
+    if expect_long && !config.privacy.paused && !config.privacy.closed_eyes {
+        note_write();
+        tokio::spawn(async {
+            let mut every = tokio::time::interval(Duration::from_secs(60));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                every.tick().await;
+                let last = LAST_WRITE_UNIX.load(Ordering::Relaxed);
+                let silent_for = unix_now().saturating_sub(last);
+                if last > 0 && silent_for > 300 {
+                    error!(
+                        silent_for_secs = silent_for,
+                        "no events written for over 5 minutes while observing; exiting for supervisor restart"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        });
+    }
+
     // Activity tracking runs independently of screen capture. When screen is
     // ready, the capture loop's focus_tick already drives poll_activity(). But
     // when screen capture is unavailable (no Cua / no permission) — and won't
@@ -502,8 +635,9 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 if let Some(ev) = orch.poll_activity().await {
-                    if let Err(e) = store_act.append_event(ev) {
-                        warn!(error = %e, "append activity event failed");
+                    match store_act.append_event(ev) {
+                        Ok(()) => note_write(),
+                        Err(e) => warn!(error = %e, "append activity event failed"),
                     }
                 }
                 if let Some(closed) = orch.close_idle_session() {
@@ -554,6 +688,7 @@ async fn main() -> Result<()> {
                         &frame.png_or_jpeg_bytes,
                     ) {
                         Ok(stored) => {
+                            note_write();
                             if ocr_on {
                                 match store_w.enqueue_job(stored.id, "ocr_screen") {
                                     Ok(Some(_)) => {}
@@ -617,8 +752,9 @@ async fn main() -> Result<()> {
                     // data source for the time-tracking projection — survives
                     // even when screenshots are visually-debounced away.
                     if let Some(ev) = orch.poll_activity().await {
-                        if let Err(e) = store.append_event(ev) {
-                            warn!(error = %e, "append activity event failed");
+                        match store.append_event(ev) {
+                            Ok(()) => note_write(),
+                            Err(e) => warn!(error = %e, "append activity event failed"),
                         }
                     }
 
@@ -903,6 +1039,7 @@ async fn run_audio_loop(
                     let voiced = stored_voice_flag(&cap.event);
                     match store.put_and_append(cap.event, cap.media_type, &cap.wav) {
                         Ok(stored) => {
+                            note_write();
                             if enqueue_asr && voiced {
                                 match store.enqueue_job(stored.id, JOB_KIND_TRANSCRIBE_AUDIO) {
                                     Ok(Some(_)) => {}
