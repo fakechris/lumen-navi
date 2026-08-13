@@ -287,6 +287,16 @@ export function DashboardView() {
               <TopApps stats={stats!} groupBy={groupBy} />
             )}
           </Card>
+
+          {groupBy !== "scene" && scenes && scenes.rollups.length > 0 && (
+            <Card pad={16}>
+              <SectionHeader
+                title="场景"
+                subtitle="同一栈合并时长：Ghostty → herdr → writing，Safari → kimi.com"
+              />
+              <SceneRanking scenes={scenes} />
+            </Card>
+          )}
         </>
       )}
 
