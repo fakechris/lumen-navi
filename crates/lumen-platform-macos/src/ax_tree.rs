@@ -175,6 +175,9 @@ unsafe fn walk_focused_window_inner(
                 let count = core_foundation_sys::array::CFArrayGetCount(arr);
                 if count > 0 {
                     let v = core_foundation_sys::array::CFArrayGetValueAtIndex(arr, 0);
+                    // CFRetain the window element BEFORE releasing the array,
+                    // otherwise the array's CFRelease frees it → dangling ptr.
+                    core_foundation_sys::base::CFRetain(v);
                     core_foundation_sys::base::CFRelease(wins);
                     v as AxUIElementRef
                 } else {
@@ -303,6 +306,10 @@ impl<'a> Walker<'a> {
             for child in &children {
                 self.walk_element(*child, child_depth);
             }
+            // Release the extra retain we added in read_children.
+            for child in &children {
+                core_foundation_sys::base::CFRelease(*child as *const c_void);
+            }
         }
     }
 
@@ -416,11 +423,13 @@ unsafe fn cf_array_to_vec(arr: core_foundation_sys::array::CFArrayRef) -> Option
 }
 
 /// Read the `AXChildren` attribute as a vector of AXUIElementRefs. Each child
-/// is a retained reference the caller must release — but since we hold the
-/// autorelease pool from `walk_focused_window`, the pool drains them.
+/// is CFRetain'd before the CFArray is released, because the array holds the
+/// only reference to its contained AXUIElements — releasing the array frees
+/// them, leaving dangling pointers. Without these retains, walk_element on a
+/// freed element → SIGSEGV in HIServices.
 unsafe fn read_children(element: AxUIElementRef) -> Option<Vec<AxUIElementRef>> {
     use core_foundation::array::{CFArray, CFArrayRef};
-    use core_foundation::base::{CFGetTypeID, CFRelease, CFTypeRef, TCFType};
+    use core_foundation::base::{CFGetTypeID, CFRelease, CFRetain, CFTypeRef, TCFType};
     use core_foundation::string::CFString;
 
     let attr = CFString::new("AXChildren");
@@ -441,11 +450,19 @@ unsafe fn read_children(element: AxUIElementRef) -> Option<Vec<AxUIElementRef>> 
     let array = CFArray::<*const c_void>::wrap_under_create_rule(value as CFArrayRef);
     let children: Vec<AxUIElementRef> = array
         .iter()
-        .map(|p| *p as AxUIElementRef)
+        .map(|p| {
+            let elem = *p as AxUIElementRef;
+            if !elem.is_null() {
+                // Retain each child BEFORE the array is dropped. The CFArray
+                // holds the only reference; without this retain, CFRelease(array)
+                // would free the children → dangling pointers → SIGSEGV.
+                CFRetain(elem as *const c_void);
+            }
+            elem
+        })
         .filter(|p| !p.is_null())
         .collect();
-    // array dropped here (create-rule Drop releases the CFArray — no manual
-    // CFRelease needed, and a manual one would be a double-free).
+    // array dropped here — CFRelease(array) is safe because each child has +1.
 
     if children.is_empty() {
         tracing::trace!("read_children: AXChildren array was empty");
