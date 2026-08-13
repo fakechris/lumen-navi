@@ -4,6 +4,7 @@
 
 mod control_server;
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,6 +39,49 @@ use tracing_subscriber::FmtSubscriber;
 
 const CUA_SOCKET_ENV: &str = "LUMEN_CUA_SOCKET";
 const CUA_TOKEN_FILE_ENV: &str = "LUMEN_CUA_TOKEN_FILE";
+const PARENT_PID_ENV: &str = "LUMEN_NAVI_PARENT_PID";
+
+/// Unix time (secs) of the last successful event write, read by the write
+/// watchdog below. Static so every write path (screen loop, standalone
+/// activity loop, persist task, audio loop) can report without plumbing.
+static LAST_WRITE_UNIX: AtomicU64 = AtomicU64::new(0);
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn note_write() {
+    LAST_WRITE_UNIX.store(unix_now(), Ordering::Relaxed);
+}
+
+/// Platform default data dir, mirroring the desktop shell's
+/// `state.rs::default_data_dir` (`~/Library/Application Support/LumenNavi`
+/// on macOS). Used only when the daemon runs without any explicit config.
+fn default_data_dir() -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        std::path::PathBuf::from(home).join("Library/Application Support/LumenNavi")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Local (not Roaming) AppData: the store is a SQLite database plus
+        // screenshot blobs — machine-local, frequently written, and far too
+        // large to sync with a roaming profile.
+        match std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
+            Some(local) => std::path::PathBuf::from(local).join("LumenNavi"),
+            None => std::env::temp_dir().join("LumenNavi"),
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        std::path::PathBuf::from(home).join(".lumen-navi")
+    }
+}
 
 fn cua_client_from_env() -> Option<CuaClient> {
     let socket = std::env::var_os(CUA_SOCKET_ENV)?;
@@ -64,10 +108,48 @@ async fn main() -> Result<()> {
         "daemon starting"
     );
 
+    // Parent watchdog: when spawned by the desktop app (which passes its pid
+    // via env), exit once the parent is gone. The app cannot always reap us —
+    // SIGTERM/pkill skips Tauri's RunEvent::Exit — which used to leave daemons
+    // orphaned to launchd (PPID=1) forever. Manual runs without this env var
+    // (tests, dogfood shells) skip the watchdog entirely.
+    #[cfg(unix)]
+    if let Some(ppid) = std::env::var(PARENT_PID_ENV)
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+    {
+        info!(ppid, "parent watchdog armed");
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(Duration::from_secs(5));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                every.tick().await;
+                // kill(pid, 0): 0 = alive; ESRCH = gone; EPERM still means alive.
+                let alive = unsafe { libc::kill(ppid, 0) } == 0
+                    || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+                if !alive {
+                    error!(ppid, "parent process gone; exiting (orphaned daemon)");
+                    std::process::exit(1);
+                }
+            }
+        });
+    }
+
     // The desktop app passes the config path via env; fall back to cwd-relative
     // `navi.toml` for standalone runs (tests, dogfood from a shell).
     let config_path = std::env::var("LUMEN_NAVI_CONFIG").unwrap_or_else(|_| "navi.toml".into());
-    let config = Config::load_or_default(&config_path).unwrap_or_default();
+    let mut config = Config::load_or_default(&config_path).unwrap_or_default();
+    // A bare default config has data_dir="data" (cwd-relative). When no
+    // explicit config was provided (env unset and no cwd navi.toml), anchor
+    // the data dir to the platform default so a daemon started from an
+    // arbitrary cwd doesn't scatter `<cwd>/data/meta/navi.db` orphans across
+    // the filesystem. An existing cwd navi.toml is still honored as-is.
+    if std::env::var_os("LUMEN_NAVI_CONFIG").is_none()
+        && !std::path::Path::new(&config_path).exists()
+        && config.data_dir == std::path::Path::new("data")
+    {
+        config.data_dir = default_data_dir();
+    }
     info!(
         data_dir = %config.data_dir.display(),
         screen = config.sources.screen,
@@ -91,6 +173,31 @@ async fn main() -> Result<()> {
 
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
+
+    // Single-instance guard: an exclusive, non-blocking flock on
+    // <data_dir>/daemon.lock. The desktop app can't reliably reap the daemon
+    // (SIGTERM skips RunEvent::Exit), so orphaned daemons used to pile up —
+    // 7 were observed double-writing the same store. The handle must stay
+    // alive for the process lifetime; the lock is released on fd close.
+    // The control-socket placeholder below stays as a second line of defense.
+    let _daemon_lock = {
+        use fs2::FileExt;
+        let lock_path = config.data_dir.join("daemon.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("open lock file {}", lock_path.display()))?;
+        if let Err(e) = file.try_lock_exclusive() {
+            error!(
+                path = %lock_path.display(),
+                error = %e,
+                "another lumen-daemon already holds the data-dir lock; exiting"
+            );
+            std::process::exit(1);
+        }
+        file
+    };
 
     let store = Arc::new(
         SqliteStore::open(&config.data_dir)
@@ -162,6 +269,41 @@ async fn main() -> Result<()> {
     } else {
         (false, None)
     };
+
+    // Cua readiness retry: screen capture may be enabled while Cua is not
+    // ready at boot (Cua crashed, or was launched after the daemon).
+    // Previously screen_ready froze to false for the daemon's whole lifetime
+    // and capture stayed dead until restart (observed: a 4h outage). The
+    // screen loop below gates its capture ticks on this shared flag; this
+    // task flips it once Cua answers with Screen Recording granted.
+    // CuaClient opens a fresh connection per call, so a relaunched Cua is
+    // picked up without any client-side reset.
+    let cua_ready = Arc::new(AtomicBool::new(screen_ready));
+    let cua_retry = !screen_ready
+        && config.sources.screen
+        && config.capture.screen_ticks == 0
+        && host::capabilities().os == "macos"
+        && cua_client.is_some();
+    if cua_retry {
+        let client = cua_client.clone().expect("cua_retry implies a Cua client");
+        let flag = Arc::clone(&cua_ready);
+        info!("Lumen Cua not ready at boot; retrying every 60s, capture starts when ready");
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(Duration::from_secs(60));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                every.tick().await;
+                let c = client.clone();
+                if let Ok(Ok(status)) = tokio::task::spawn_blocking(move || c.status()).await {
+                    if status.screen_recording == lumen_platform::PermissionState::Granted {
+                        info!("Lumen Cua became ready; enabling screen capture");
+                        flag.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+        });
+    }
 
     // --- OCR worker ---
     let (ocr_cancel_tx, ocr_cancel_rx) = watch::channel(false);
@@ -429,14 +571,44 @@ async fn main() -> Result<()> {
     };
 
     let mut ran_long_loop = false;
-    let expect_long = (screen_ready && config.capture.screen_ticks == 0)
+    let expect_long = ((screen_ready || cua_retry) && config.capture.screen_ticks == 0)
         || (config.sources.audio && config.audio.ticks == 0);
+
+    // Write watchdog: in long-running observe mode the activity heartbeat
+    // lands a row every few seconds, so 5 minutes without any event write
+    // while collection is supposed to be running means the pipeline is
+    // wedged (production incident: the tokio blocking pool exhausted by OS
+    // calls stuck on a SkyLight mutex — daemon alive, health "fine", zero
+    // writes). Exit non-zero so the app's supervisor restarts us.
+    // Not armed when paused/closed-eyes, where no writes are expected.
+    if expect_long && !config.privacy.paused && !config.privacy.closed_eyes {
+        note_write();
+        tokio::spawn(async {
+            let mut every = tokio::time::interval(Duration::from_secs(60));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                every.tick().await;
+                let last = LAST_WRITE_UNIX.load(Ordering::Relaxed);
+                let silent_for = unix_now().saturating_sub(last);
+                if last > 0 && silent_for > 300 {
+                    error!(
+                        silent_for_secs = silent_for,
+                        "no events written for over 5 minutes while observing; exiting for supervisor restart"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        });
+    }
 
     // Activity tracking runs independently of screen capture. When screen is
     // ready, the capture loop's focus_tick already drives poll_activity(). But
-    // when screen capture is unavailable (no Cua / no permission), we still
-    // want time tracking — so spin up a standalone activity loop here.
-    if !screen_ready {
+    // when screen capture is unavailable (no Cua / no permission) — and won't
+    // become available this run — we still want time tracking, so spin up a
+    // standalone activity loop here. (When cua_retry is set, the screen loop
+    // below runs in activity-only mode until Cua is ready and already covers
+    // activity tracking.)
+    if !screen_ready && !cua_retry {
         let store_act = Arc::clone(&store);
         let mut orch = CaptureOrchestrator::new(
             Arc::new(lumen_platform::NullDisplays),
@@ -463,8 +635,9 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 if let Some(ev) = orch.poll_activity().await {
-                    if let Err(e) = store_act.append_event(ev) {
-                        warn!(error = %e, "append activity event failed");
+                    match store_act.append_event(ev) {
+                        Ok(()) => note_write(),
+                        Err(e) => warn!(error = %e, "append activity event failed"),
                     }
                 }
                 if let Some(closed) = orch.close_idle_session() {
@@ -475,11 +648,11 @@ async fn main() -> Result<()> {
         ran_long_loop = true;
     }
 
-    if screen_ready {
+    if screen_ready || cua_retry {
         let (displays, capturer): (Arc<dyn DisplayEnumerator>, Arc<dyn ScreenCapturer>) =
             if host::capabilities().os == "macos" {
                 let capture = Arc::new(CuaCaptureAdapter::new(
-                    cua_client.expect("macOS screen_ready requires an initialized Lumen Cua client"),
+                    cua_client.expect("macOS screen loop requires an initialized Lumen Cua client"),
                 ));
                 (capture.clone(), capture)
             } else {
@@ -515,6 +688,7 @@ async fn main() -> Result<()> {
                         &frame.png_or_jpeg_bytes,
                     ) {
                         Ok(stored) => {
+                            note_write();
                             if ocr_on {
                                 match store_w.enqueue_job(stored.id, "ocr_screen") {
                                     Ok(Some(_)) => {}
@@ -555,6 +729,9 @@ async fn main() -> Result<()> {
         capture_tick.tick().await;
 
         info!("observe screen loop running (Ctrl+C to stop if ticks=0)");
+        if !cua_ready.load(Ordering::Relaxed) {
+            info!("Lumen Cua not ready; loop is activity-only until the retry task enables capture");
+        }
         if max_ticks == 0 {
             ran_long_loop = true;
         }
@@ -575,13 +752,41 @@ async fn main() -> Result<()> {
                     // data source for the time-tracking projection — survives
                     // even when screenshots are visually-debounced away.
                     if let Some(ev) = orch.poll_activity().await {
-                        if let Err(e) = store.append_event(ev) {
-                            warn!(error = %e, "append activity event failed");
+                        match store.append_event(ev) {
+                            Ok(()) => note_write(),
+                            Err(e) => warn!(error = %e, "append activity event failed"),
                         }
                     }
 
-                    if let Some(reason) = orch.poll_focus_trigger().await {
-                        match orch.capture_tick(reason).await {
+                    // Capture is gated on Cua readiness: while Cua is down the
+                    // loop keeps tracking activity only, and starts capturing
+                    // the first tick after the retry task flips the flag.
+                    if cua_ready.load(Ordering::Relaxed) {
+                        if let Some(reason) = orch.poll_focus_trigger().await {
+                            match orch.capture_tick(reason).await {
+                                Ok(Some(batch)) => {
+                                    full_ticks += 1;
+                                    if tx.try_send(batch).is_err() {
+                                        orch.note_backpressure_drop();
+                                        warn!("backpressure: drop capture batch");
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    warn!(error = %e, "focus capture failed");
+                                    screen_status.last_error = Some(e);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(closed) = orch.close_idle_session() {
+                        let _ = store.upsert_session(&closed);
+                    }
+                }
+                _ = capture_tick.tick() => {
+                    if cua_ready.load(Ordering::Relaxed) {
+                        interval_ticks += 1;
+                        match orch.capture_tick(TriggerReason::Interval).await {
                             Ok(Some(batch)) => {
                                 full_ticks += 1;
                                 if tx.try_send(batch).is_err() {
@@ -591,29 +796,9 @@ async fn main() -> Result<()> {
                             }
                             Ok(None) => {}
                             Err(e) => {
-                                warn!(error = %e, "focus capture failed");
+                                warn!(error = %e, "interval capture failed");
                                 screen_status.last_error = Some(e);
                             }
-                        }
-                    }
-                    if let Some(closed) = orch.close_idle_session() {
-                        let _ = store.upsert_session(&closed);
-                    }
-                }
-                _ = capture_tick.tick() => {
-                    interval_ticks += 1;
-                    match orch.capture_tick(TriggerReason::Interval).await {
-                        Ok(Some(batch)) => {
-                            full_ticks += 1;
-                            if tx.try_send(batch).is_err() {
-                                orch.note_backpressure_drop();
-                                warn!("backpressure: drop capture batch");
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            warn!(error = %e, "interval capture failed");
-                            screen_status.last_error = Some(e);
                         }
                     }
                 }
@@ -854,6 +1039,7 @@ async fn run_audio_loop(
                     let voiced = stored_voice_flag(&cap.event);
                     match store.put_and_append(cap.event, cap.media_type, &cap.wav) {
                         Ok(stored) => {
+                            note_write();
                             if enqueue_asr && voiced {
                                 match store.enqueue_job(stored.id, JOB_KIND_TRANSCRIBE_AUDIO) {
                                     Ok(Some(_)) => {}
