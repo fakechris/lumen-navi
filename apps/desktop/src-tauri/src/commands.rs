@@ -767,6 +767,19 @@ pub fn observe_start_inner(state: &AppState) -> Result<ObserveStatus, String> {
             .and_then(|g| g.as_ref().map(|c| c.id()));
         return Ok(ObserveStatus { running, pid });
     }
+    // No child in our slot — but an orphan daemon from a previous app run may
+    // still be serving on the Unix socket. Probe it before spawning a new one;
+    // spawning when the socket is occupied causes the new daemon to fatal-exit
+    // and the supervisor loops trying to restart it. If the socket answers,
+    // treat the orphan as "already running" and return success without spawning.
+    let daemon_socket = state.data_dir.join("daemon.sock");
+    if crate::daemon_socket_alive(&daemon_socket) {
+        tracing::info!(
+            socket = %daemon_socket.display(),
+            "observe daemon already serving (orphan from prior app run); adopting, not spawning"
+        );
+        return Ok(ObserveStatus { running: true, pid: None });
+    }
     let cfg = state.load_config().map_err(err)?;
     state.save_config(&cfg).map_err(err)?;
 

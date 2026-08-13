@@ -144,6 +144,64 @@ pub fn run() {
                     }
                 });
             }
+            // Cua supervisor: the capture helper (Lumen Cua) has no parent
+            // watching it — when it crashed (production: SIGSEGV inside an AX
+            // walk), nothing relaunched it and screen capture stayed dead for
+            // hours until the app restarted. While Observe is active with
+            // screen capture enabled, probe Cua every 30s; CuaController's
+            // status path self-heals (relaunch via `open -n -g`) under the
+            // same lifecycle lock the UI's status polling uses, so this never
+            // races the UI. Consecutive failures are capped, mirroring the
+            // daemon supervisor's crash cap.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(30));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    let mut consecutive_failures = 0u32;
+                    loop {
+                        interval.tick().await;
+                        let Some(state) = handle.try_state::<AppState>() else {
+                            continue;
+                        };
+                        // Only heal under the same condition that makes
+                        // observe_start_inner ensure Cua: Observe active and
+                        // screen capture enabled (macOS-only feature).
+                        #[cfg(target_os = "macos")]
+                        let should_heal = state.observe_running()
+                            && state
+                                .load_config()
+                                .map(|c| c.sources.screen)
+                                .unwrap_or(false);
+                        #[cfg(not(target_os = "macos"))]
+                        let should_heal = false;
+                        if !should_heal {
+                            consecutive_failures = 0;
+                            continue;
+                        }
+                        if consecutive_failures > 5 {
+                            continue;
+                        }
+                        // status() probes Cua and, on failure, relaunches it —
+                        // the same code path as UI status polling. Blocking
+                        // (lifecycle lock + launch wait), so spawn_blocking.
+                        let cua = state.cua.clone();
+                        let ok = tauri::async_runtime::spawn_blocking(move || cua.status().is_ok())
+                            .await
+                            .unwrap_or(false);
+                        if ok {
+                            consecutive_failures = 0;
+                        } else {
+                            consecutive_failures += 1;
+                            tracing::warn!(
+                                failures = consecutive_failures,
+                                "cua supervisor: Lumen Cua unreachable after relaunch attempt"
+                            );
+                        }
+                    }
+                });
+            }
             // Category enrichment when the shell holds the store (covers
             // cases where observe is off but the user is browsing history).
             {
@@ -254,7 +312,7 @@ pub fn run() {
 /// primary "is the daemon serving" signal — more reliable than checking the
 /// child slot, since it recognizes daemons the supervisor didn't spawn (e.g.
 /// an orphan from a prior app run still holding the socket).
-fn daemon_socket_alive(socket_path: &std::path::Path) -> bool {
+pub(crate) fn daemon_socket_alive(socket_path: &std::path::Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::net::UnixStream;

@@ -11,6 +11,7 @@
 
 mod asr;
 pub mod ax;
+pub mod ax_tree;
 mod capture;
 mod clipboard;
 mod frontmost;
@@ -22,6 +23,7 @@ mod permissions;
 mod selection;
 
 pub use asr::MacSpeechAsr;
+pub use ax_tree::MacAxTreeWalker;
 pub use capture::{MacDisplays, MacScreenCapturer};
 pub use clipboard::clipboard_grab_selection;
 pub use frontmost::MacFrontmost;

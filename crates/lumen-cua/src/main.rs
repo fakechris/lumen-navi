@@ -6,8 +6,34 @@ use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
     initialize_macos_application()?;
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "lumen_cua=info,warn".into());
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    // Write logs to a file so they're visible (cua's stdout/stderr go to
+    // /dev/null when launched via `open -n -g`).
+    let log_dir = lumen_cua::CuaPaths::for_current_user()
+        .socket
+        .parent()
+        .map(|p| p.to_path_buf());
+    if let Some(dir) = &log_dir {
+        let _ = std::fs::create_dir_all(dir);
+        let log_path = dir.join("cua.log");
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let filter = EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "lumen_cua=debug,lumen_platform_macos=debug,warn".into());
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(file)
+                .try_init();
+        } else {
+            let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "lumen_cua=info,warn".into());
+            let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+        }
+    } else {
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "lumen_cua=info,warn".into());
+        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    }
 
     let args = launch_arguments();
     if lumen_cua::is_permission_host_request(&args) {

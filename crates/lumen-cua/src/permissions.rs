@@ -33,8 +33,19 @@ pub(crate) fn read_only_status() -> CuaStatus {
 /// Request the base Screen Recording grant on the caller's main thread, then
 /// perform an explicit ScreenCaptureKit capability probe. This function is
 /// only called by the short-lived LaunchServices permission host.
+///
+/// Also requests the Accessibility TCC grant — needed for AX tree walking.
 pub(crate) fn request_and_probe_screen_capture() -> CuaStatus {
     promote_for_permission_prompt();
+
+    // Request Accessibility TCC (for AX tree walking). This surfaces the
+    // "Lumen Cua wants to control [App]" prompt or registers cua in the
+    // Accessibility list for manual enable.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = lumen_platform_macos::accessibility_trusted(true);
+        pump_main_run_loop(POST_REQUEST_SETTLE);
+    }
 
     // Always call the request API first so macOS has a chance to register this
     // process identity in Screen Recording (even when it refuses to prompt).

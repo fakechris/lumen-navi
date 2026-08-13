@@ -4,7 +4,7 @@
 
 mod control_server;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,9 +20,13 @@ use lumen_cua::{CuaCaptureAdapter, CuaClient};
 use lumen_platform::{
     DisplayEnumerator, MicOpenConfig, PlatformError, ScreenCapturer,
 };
+#[cfg(target_os = "macos")]
+#[allow(unused_imports)]
+use lumen_platform_macos;
 use lumen_platform_host as host;
 use lumen_process::{
-    OcrWorker, OcrWorkerConfig, TranscribeWorker, TranscribeWorkerConfig, JOB_KIND_TRANSCRIBE_AUDIO,
+    AxWorker, AxWorkerConfig, OcrWorker, OcrWorkerConfig, TranscribeWorker,
+    TranscribeWorkerConfig, JOB_KIND_TRANSCRIBE_AUDIO,
 };
 use lumen_sources_browser::BrowserIngestPolicy;
 use lumen_sources_media::{AudioOrchestrator, CaptureOrchestrator, CapturedBatch};
@@ -266,6 +270,41 @@ async fn main() -> Result<()> {
         (false, None)
     };
 
+    // Cua readiness retry: screen capture may be enabled while Cua is not
+    // ready at boot (Cua crashed, or was launched after the daemon).
+    // Previously screen_ready froze to false for the daemon's whole lifetime
+    // and capture stayed dead until restart (observed: a 4h outage). The
+    // screen loop below gates its capture ticks on this shared flag; this
+    // task flips it once Cua answers with Screen Recording granted.
+    // CuaClient opens a fresh connection per call, so a relaunched Cua is
+    // picked up without any client-side reset.
+    let cua_ready = Arc::new(AtomicBool::new(screen_ready));
+    let cua_retry = !screen_ready
+        && config.sources.screen
+        && config.capture.screen_ticks == 0
+        && host::capabilities().os == "macos"
+        && cua_client.is_some();
+    if cua_retry {
+        let client = cua_client.clone().expect("cua_retry implies a Cua client");
+        let flag = Arc::clone(&cua_ready);
+        info!("Lumen Cua not ready at boot; retrying every 60s, capture starts when ready");
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(Duration::from_secs(60));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                every.tick().await;
+                let c = client.clone();
+                if let Ok(Ok(status)) = tokio::task::spawn_blocking(move || c.status()).await {
+                    if status.screen_recording == lumen_platform::PermissionState::Granted {
+                        info!("Lumen Cua became ready; enabling screen capture");
+                        flag.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     // --- OCR worker ---
     let (ocr_cancel_tx, ocr_cancel_rx) = watch::channel(false);
     let ocr_handle = if config.ocr.enabled {
@@ -308,6 +347,54 @@ async fn main() -> Result<()> {
         }
     } else {
         info!("OCR disabled in config");
+        None
+    };
+
+    // --- AX tree worker (deep accessibility text for recall/search) ---
+    // The daemon has NO Accessibility TCC — AX tree walks go through Lumen Cua
+    // (which holds the permission), over the Unix socket. If cua is not
+    // available (dev mode without screen_ready), the AX worker stays idle.
+    let (ax_cancel_tx, ax_cancel_rx) = watch::channel(false);
+    let ax_handle = if config.ax.enabled && cua_client.is_some() {
+        let walker: Arc<dyn lumen_platform::AxTreeWalker> =
+            Arc::new(lumen_cua::CuaAxTreeAdapter::new(cua_client.clone().unwrap()));
+        if walker.is_supported() {
+            let worker = Arc::new(AxWorker::new(
+                Arc::clone(&store),
+                walker,
+                AxWorkerConfig {
+                    poll_interval: Duration::from_millis(config.ax.poll_interval_ms),
+                    batch_size: config.ax.batch_size.max(1),
+                    max_attempts: config.ax.max_attempts as i64,
+                    retry_base: Duration::from_millis(config.ax.retry_base_ms),
+                    retry_max: Duration::from_millis(config.ax.retry_max_ms),
+                    stale_running: Duration::from_millis(config.ax.stale_running_ms),
+                    max_text_chars: config.ax.max_text_chars as usize,
+                    shutdown_drain: Duration::from_millis(config.ax.shutdown_drain_ms),
+                    walk: lumen_platform::AxTreeWalkConfig {
+                        max_depth: config.ax.max_depth,
+                        max_nodes: config.ax.max_nodes,
+                        walk_timeout_ms: config.ax.walk_timeout_ms,
+                        element_timeout_ms: config.ax.element_timeout_ms,
+                        max_text_length: config.ax.max_text_chars as usize,
+                    },
+                },
+            ));
+            let _ = worker.reclaim_stale();
+            let w = Arc::clone(&worker);
+            info!("AX tree worker started");
+            Some((
+                worker,
+                tokio::spawn(async move {
+                    w.run_until_cancelled(ax_cancel_rx).await;
+                }),
+            ))
+        } else {
+            warn!("AX tree walker not supported on this OS");
+            None
+        }
+    } else {
+        info!("AX tree capture disabled in config");
         None
     };
 
@@ -484,7 +571,7 @@ async fn main() -> Result<()> {
     };
 
     let mut ran_long_loop = false;
-    let expect_long = (screen_ready && config.capture.screen_ticks == 0)
+    let expect_long = ((screen_ready || cua_retry) && config.capture.screen_ticks == 0)
         || (config.sources.audio && config.audio.ticks == 0);
 
     // Write watchdog: in long-running observe mode the activity heartbeat
@@ -516,9 +603,12 @@ async fn main() -> Result<()> {
 
     // Activity tracking runs independently of screen capture. When screen is
     // ready, the capture loop's focus_tick already drives poll_activity(). But
-    // when screen capture is unavailable (no Cua / no permission), we still
-    // want time tracking — so spin up a standalone activity loop here.
-    if !screen_ready {
+    // when screen capture is unavailable (no Cua / no permission) — and won't
+    // become available this run — we still want time tracking, so spin up a
+    // standalone activity loop here. (When cua_retry is set, the screen loop
+    // below runs in activity-only mode until Cua is ready and already covers
+    // activity tracking.)
+    if !screen_ready && !cua_retry {
         let store_act = Arc::clone(&store);
         let mut orch = CaptureOrchestrator::new(
             Arc::new(lumen_platform::NullDisplays),
@@ -558,11 +648,11 @@ async fn main() -> Result<()> {
         ran_long_loop = true;
     }
 
-    if screen_ready {
+    if screen_ready || cua_retry {
         let (displays, capturer): (Arc<dyn DisplayEnumerator>, Arc<dyn ScreenCapturer>) =
             if host::capabilities().os == "macos" {
                 let capture = Arc::new(CuaCaptureAdapter::new(
-                    cua_client.expect("macOS screen_ready requires an initialized Lumen Cua client"),
+                    cua_client.expect("macOS screen loop requires an initialized Lumen Cua client"),
                 ));
                 (capture.clone(), capture)
             } else {
@@ -582,6 +672,7 @@ async fn main() -> Result<()> {
         let (tx, mut rx) = mpsc::channel::<CapturedBatch>(config.capture.queue_capacity);
         let store_w = Arc::clone(&store);
         let ocr_on = config.ocr.enabled;
+        let ax_on = config.ax.enabled;
         let persist = tokio::spawn(async move {
             while let Some(batch) = rx.recv().await {
                 if let Some(ref closed) = batch.closed_session {
@@ -603,6 +694,11 @@ async fn main() -> Result<()> {
                                     Ok(Some(_)) => {}
                                     Ok(None) => debug_skip_dup_ocr(),
                                     Err(e) => warn!(error = %e, "enqueue ocr_screen failed"),
+                                }
+                            }
+                            if ax_on {
+                                if let Err(e) = store_w.enqueue_job(stored.id, "ax_screen") {
+                                    warn!(error = %e, "enqueue ax_screen failed");
                                 }
                             }
                             info!(
@@ -633,6 +729,9 @@ async fn main() -> Result<()> {
         capture_tick.tick().await;
 
         info!("observe screen loop running (Ctrl+C to stop if ticks=0)");
+        if !cua_ready.load(Ordering::Relaxed) {
+            info!("Lumen Cua not ready; loop is activity-only until the retry task enables capture");
+        }
         if max_ticks == 0 {
             ran_long_loop = true;
         }
@@ -659,8 +758,35 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    if let Some(reason) = orch.poll_focus_trigger().await {
-                        match orch.capture_tick(reason).await {
+                    // Capture is gated on Cua readiness: while Cua is down the
+                    // loop keeps tracking activity only, and starts capturing
+                    // the first tick after the retry task flips the flag.
+                    if cua_ready.load(Ordering::Relaxed) {
+                        if let Some(reason) = orch.poll_focus_trigger().await {
+                            match orch.capture_tick(reason).await {
+                                Ok(Some(batch)) => {
+                                    full_ticks += 1;
+                                    if tx.try_send(batch).is_err() {
+                                        orch.note_backpressure_drop();
+                                        warn!("backpressure: drop capture batch");
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    warn!(error = %e, "focus capture failed");
+                                    screen_status.last_error = Some(e);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(closed) = orch.close_idle_session() {
+                        let _ = store.upsert_session(&closed);
+                    }
+                }
+                _ = capture_tick.tick() => {
+                    if cua_ready.load(Ordering::Relaxed) {
+                        interval_ticks += 1;
+                        match orch.capture_tick(TriggerReason::Interval).await {
                             Ok(Some(batch)) => {
                                 full_ticks += 1;
                                 if tx.try_send(batch).is_err() {
@@ -670,29 +796,9 @@ async fn main() -> Result<()> {
                             }
                             Ok(None) => {}
                             Err(e) => {
-                                warn!(error = %e, "focus capture failed");
+                                warn!(error = %e, "interval capture failed");
                                 screen_status.last_error = Some(e);
                             }
-                        }
-                    }
-                    if let Some(closed) = orch.close_idle_session() {
-                        let _ = store.upsert_session(&closed);
-                    }
-                }
-                _ = capture_tick.tick() => {
-                    interval_ticks += 1;
-                    match orch.capture_tick(TriggerReason::Interval).await {
-                        Ok(Some(batch)) => {
-                            full_ticks += 1;
-                            if tx.try_send(batch).is_err() {
-                                orch.note_backpressure_drop();
-                                warn!("backpressure: drop capture batch");
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            warn!(error = %e, "interval capture failed");
-                            screen_status.last_error = Some(e);
                         }
                     }
                 }
@@ -786,6 +892,14 @@ async fn main() -> Result<()> {
         }
         if let Ok(counts) = store.job_counts_by_status("ocr_screen") {
             info!(?counts, "ocr job counts");
+        }
+    }
+
+    if let Some((_worker, handle)) = ax_handle {
+        let _ = ax_cancel_tx.send(true);
+        let _ = handle.await;
+        if let Ok(counts) = store.job_counts_by_status("ax_screen") {
+            info!(?counts, "ax job counts");
         }
     }
 
