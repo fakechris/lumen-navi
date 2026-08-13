@@ -147,7 +147,6 @@ unsafe fn walk_focused_window_inner(
     use core_foundation::string::CFString;
 
     let start = Instant::now();
-    let element_timeout = (config.element_timeout_ms as f64) / 1000.0;
 
     let app = AXUIElementCreateApplication(pid);
     if app.is_null() {
@@ -175,6 +174,10 @@ unsafe fn walk_focused_window_inner(
                 let count = core_foundation_sys::array::CFArrayGetCount(arr);
                 if count > 0 {
                     let v = core_foundation_sys::array::CFArrayGetValueAtIndex(arr, 0);
+                    // CFArrayGetValueAtIndex is a Get-rule borrow owned by the
+                    // array: retain BEFORE releasing the array, otherwise
+                    // `window` dangles (same UAF class as read_children).
+                    core_foundation_sys::base::CFRetain(v);
                     core_foundation_sys::base::CFRelease(wins);
                     v as AxUIElementRef
                 } else {
@@ -303,6 +306,11 @@ impl<'a> Walker<'a> {
             for child in &children {
                 self.walk_element(*child, child_depth);
             }
+            // read_children retained each element (+1); release them now that
+            // every subtree has been walked.
+            for child in children {
+                core_foundation_sys::base::CFRelease(child);
+            }
         }
     }
 
@@ -330,94 +338,17 @@ fn should_extract_text(role: &str) -> bool {
     TEXT_ROLES.iter().any(|r| r == &role) || role.is_empty()
 }
 
-#[cfg(target_os = "macos")]
-/// Resolve the best window element for tree walking. Tries AXFocusedWindow
-/// first, then AXMainWindow, then AXWindows[0], then the first AXWindow in
-/// the app's AXChildren. If a candidate has ≤2 children (likely just
-/// AXMenuBar — the "ghost window" problem on Safari), it falls through to
-/// the next candidate. This mirrors screenpipe's `resolve_focused_window`.
-#[cfg(target_os = "macos")]
-unsafe fn resolve_window(app: AxUIElementRef, timeout: f64) -> Result<AxUIElementRef, PlatformError> {
-    use core_foundation::base::{CFTypeRef, TCFType};
-    use core_foundation::string::CFString;
-
-    // Collect candidates in priority order.
-    let mut candidates: Vec<AxUIElementRef> = Vec::new();
-
-    for attr_name in &["AXFocusedWindow", "AXMainWindow"] {
-        let attr = CFString::new(attr_name);
-        let mut value: CFTypeRef = std::ptr::null();
-        if AXUIElementCopyAttributeValue(app, attr.as_concrete_TypeRef(), &mut value) == K_AX_SUCCESS
-            && !value.is_null()
-        {
-            candidates.push(value as AxUIElementRef);
-        }
-    }
-
-    // AXWindows array — take first element.
-    {
-        let attr = CFString::new("AXWindows");
-        let mut value: CFTypeRef = std::ptr::null();
-        if AXUIElementCopyAttributeValue(app, attr.as_concrete_TypeRef(), &mut value) == K_AX_SUCCESS
-            && !value.is_null()
-        {
-            if let Some(wins) = cf_array_to_vec(value as core_foundation_sys::array::CFArrayRef) {
-                if let Some(first) = wins.into_iter().next() {
-                    candidates.push(first);
-                }
-            }
-            core_foundation_sys::base::CFRelease(value);
-        }
-    }
-
-    // App's AXChildren — find first AXWindow.
-    if let Some(app_children) = read_children(app) {
-        for child in app_children {
-            let role = ax_string_attr(child, "AXRole").unwrap_or_default();
-            if role == "AXWindow" {
-                candidates.push(child);
-                break;
-            }
-        }
-    }
-
-    // Pick the first candidate with >2 children (the "ghost window" has only
-    // AXMenuBar). Fall back to the first candidate if none qualify.
-    let mut best = candidates.first().copied();
-    for &cand in &candidates {
-        AXUIElementSetMessagingTimeout(cand, timeout);
-        if let Some(kids) = read_children(cand) {
-            if kids.len() > 2 {
-                best = Some(cand);
-                break;
-            }
-        }
-    }
-
-    best.ok_or_else(|| PlatformError::Message("no resolvable window".into()))
-}
-
-/// Convert a CFArrayRef of AXUIElementRefs into a Vec. Does NOT release the
-/// array (caller manages the array's lifetime).
-#[cfg(target_os = "macos")]
-unsafe fn cf_array_to_vec(arr: core_foundation_sys::array::CFArrayRef) -> Option<Vec<AxUIElementRef>> {
-    if arr.is_null() {
-        return None;
-    }
-    let count = core_foundation_sys::array::CFArrayGetCount(arr) as usize;
-    let mut out = Vec::with_capacity(count);
-    for i in 0..count {
-        let v = core_foundation_sys::array::CFArrayGetValueAtIndex(arr, i as isize);
-        if !v.is_null() {
-            out.push(v as AxUIElementRef);
-        }
-    }
-    Some(out)
-}
-
-/// Read the `AXChildren` attribute as a vector of AXUIElementRefs. Each child
-/// is a retained reference the caller must release — but since we hold the
-/// autorelease pool from `walk_focused_window`, the pool drains them.
+/// Read the `AXChildren` attribute as a vector of AXUIElementRefs. Each
+/// returned element is **retained (+1)** — the caller must `CFRelease` every
+/// element when done with it.
+///
+/// Ownership note: `CFArray::iter()` yields Get-rule borrows. Dropping the
+/// array (create-rule Drop) releases its children, so returning the bare
+/// pointers without retaining them leaves the caller with dangling
+/// AXUIElementRefs — this was the production SIGSEGV in `walk_element`.
+/// (An earlier comment here claimed "the autorelease pool drains them";
+/// AXUIElementRefs from AXUIElementCopyAttributeValue are NOT autoreleased,
+/// they are +1 owned by the array.)
 unsafe fn read_children(element: AxUIElementRef) -> Option<Vec<AxUIElementRef>> {
     use core_foundation::array::{CFArray, CFArrayRef};
     use core_foundation::base::{CFGetTypeID, CFRelease, CFTypeRef, TCFType};
@@ -439,10 +370,16 @@ unsafe fn read_children(element: AxUIElementRef) -> Option<Vec<AxUIElementRef>> 
     }
 
     let array = CFArray::<*const c_void>::wrap_under_create_rule(value as CFArrayRef);
+    // Retain each child while the array is still alive; the array's Drop
+    // then only balances our retains, leaving every returned pointer valid.
     let children: Vec<AxUIElementRef> = array
         .iter()
         .map(|p| *p as AxUIElementRef)
         .filter(|p| !p.is_null())
+        .map(|p| {
+            core_foundation_sys::base::CFRetain(p);
+            p
+        })
         .collect();
     // array dropped here (create-rule Drop releases the CFArray — no manual
     // CFRelease needed, and a manual one would be a double-free).

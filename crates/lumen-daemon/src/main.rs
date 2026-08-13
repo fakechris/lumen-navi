@@ -4,6 +4,7 @@
 
 mod control_server;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -162,6 +163,41 @@ async fn main() -> Result<()> {
     } else {
         (false, None)
     };
+
+    // Cua readiness retry: screen capture may be enabled while Cua is not
+    // ready at boot (Cua crashed, or was launched after the daemon).
+    // Previously screen_ready froze to false for the daemon's whole lifetime
+    // and capture stayed dead until restart (observed: a 4h outage). The
+    // screen loop below gates its capture ticks on this shared flag; this
+    // task flips it once Cua answers with Screen Recording granted.
+    // CuaClient opens a fresh connection per call, so a relaunched Cua is
+    // picked up without any client-side reset.
+    let cua_ready = Arc::new(AtomicBool::new(screen_ready));
+    let cua_retry = !screen_ready
+        && config.sources.screen
+        && config.capture.screen_ticks == 0
+        && host::capabilities().os == "macos"
+        && cua_client.is_some();
+    if cua_retry {
+        let client = cua_client.clone().expect("cua_retry implies a Cua client");
+        let flag = Arc::clone(&cua_ready);
+        info!("Lumen Cua not ready at boot; retrying every 60s, capture starts when ready");
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(Duration::from_secs(60));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                every.tick().await;
+                let c = client.clone();
+                if let Ok(Ok(status)) = tokio::task::spawn_blocking(move || c.status()).await {
+                    if status.screen_recording == lumen_platform::PermissionState::Granted {
+                        info!("Lumen Cua became ready; enabling screen capture");
+                        flag.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+        });
+    }
 
     // --- OCR worker ---
     let (ocr_cancel_tx, ocr_cancel_rx) = watch::channel(false);
@@ -429,14 +465,17 @@ async fn main() -> Result<()> {
     };
 
     let mut ran_long_loop = false;
-    let expect_long = (screen_ready && config.capture.screen_ticks == 0)
+    let expect_long = ((screen_ready || cua_retry) && config.capture.screen_ticks == 0)
         || (config.sources.audio && config.audio.ticks == 0);
 
     // Activity tracking runs independently of screen capture. When screen is
     // ready, the capture loop's focus_tick already drives poll_activity(). But
-    // when screen capture is unavailable (no Cua / no permission), we still
-    // want time tracking — so spin up a standalone activity loop here.
-    if !screen_ready {
+    // when screen capture is unavailable (no Cua / no permission) — and won't
+    // become available this run — we still want time tracking, so spin up a
+    // standalone activity loop here. (When cua_retry is set, the screen loop
+    // below runs in activity-only mode until Cua is ready and already covers
+    // activity tracking.)
+    if !screen_ready && !cua_retry {
         let store_act = Arc::clone(&store);
         let mut orch = CaptureOrchestrator::new(
             Arc::new(lumen_platform::NullDisplays),
@@ -475,11 +514,11 @@ async fn main() -> Result<()> {
         ran_long_loop = true;
     }
 
-    if screen_ready {
+    if screen_ready || cua_retry {
         let (displays, capturer): (Arc<dyn DisplayEnumerator>, Arc<dyn ScreenCapturer>) =
             if host::capabilities().os == "macos" {
                 let capture = Arc::new(CuaCaptureAdapter::new(
-                    cua_client.expect("macOS screen_ready requires an initialized Lumen Cua client"),
+                    cua_client.expect("macOS screen loop requires an initialized Lumen Cua client"),
                 ));
                 (capture.clone(), capture)
             } else {
@@ -555,6 +594,9 @@ async fn main() -> Result<()> {
         capture_tick.tick().await;
 
         info!("observe screen loop running (Ctrl+C to stop if ticks=0)");
+        if !cua_ready.load(Ordering::Relaxed) {
+            info!("Lumen Cua not ready; loop is activity-only until the retry task enables capture");
+        }
         if max_ticks == 0 {
             ran_long_loop = true;
         }
@@ -580,8 +622,35 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    if let Some(reason) = orch.poll_focus_trigger().await {
-                        match orch.capture_tick(reason).await {
+                    // Capture is gated on Cua readiness: while Cua is down the
+                    // loop keeps tracking activity only, and starts capturing
+                    // the first tick after the retry task flips the flag.
+                    if cua_ready.load(Ordering::Relaxed) {
+                        if let Some(reason) = orch.poll_focus_trigger().await {
+                            match orch.capture_tick(reason).await {
+                                Ok(Some(batch)) => {
+                                    full_ticks += 1;
+                                    if tx.try_send(batch).is_err() {
+                                        orch.note_backpressure_drop();
+                                        warn!("backpressure: drop capture batch");
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    warn!(error = %e, "focus capture failed");
+                                    screen_status.last_error = Some(e);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(closed) = orch.close_idle_session() {
+                        let _ = store.upsert_session(&closed);
+                    }
+                }
+                _ = capture_tick.tick() => {
+                    if cua_ready.load(Ordering::Relaxed) {
+                        interval_ticks += 1;
+                        match orch.capture_tick(TriggerReason::Interval).await {
                             Ok(Some(batch)) => {
                                 full_ticks += 1;
                                 if tx.try_send(batch).is_err() {
@@ -591,29 +660,9 @@ async fn main() -> Result<()> {
                             }
                             Ok(None) => {}
                             Err(e) => {
-                                warn!(error = %e, "focus capture failed");
+                                warn!(error = %e, "interval capture failed");
                                 screen_status.last_error = Some(e);
                             }
-                        }
-                    }
-                    if let Some(closed) = orch.close_idle_session() {
-                        let _ = store.upsert_session(&closed);
-                    }
-                }
-                _ = capture_tick.tick() => {
-                    interval_ticks += 1;
-                    match orch.capture_tick(TriggerReason::Interval).await {
-                        Ok(Some(batch)) => {
-                            full_ticks += 1;
-                            if tx.try_send(batch).is_err() {
-                                orch.note_backpressure_drop();
-                                warn!("backpressure: drop capture batch");
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            warn!(error = %e, "interval capture failed");
-                            screen_status.last_error = Some(e);
                         }
                     }
                 }
