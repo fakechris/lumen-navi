@@ -151,6 +151,17 @@ Produces:
 Local DMG smoke (Apple Silicon example):
 
 ```bash
+# One command: rebuilds daemon + Lumen Cua helper from source, then packages.
+scripts/macos/build-desktop-release.sh aarch64-apple-darwin dmg
+```
+
+`tauri build` runs `scripts/macos/check-bundled-helpers-fresh.sh`
+(via `beforeBuildCommand` in `tauri.macos.conf.json`) and **fails if a bundled
+daemon/cua binary is missing or older than its sources** — a stale helper
+shipped this way once caused a daemon↔cua protocol mismatch in production.
+If the check fires, rebuild the sidecars (or just use the script above):
+
+```bash
 scripts/macos/prepare-daemon-binary.sh aarch64-apple-darwin
 scripts/macos/prepare-cua-app.sh aarch64-apple-darwin
 # or for cargo check only: scripts/macos/ensure-daemon-binary-placeholder.sh
