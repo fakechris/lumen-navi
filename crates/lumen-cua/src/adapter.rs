@@ -6,7 +6,7 @@ use lumen_platform::{
     PlatformError, RawFrame, ScreenCapturer, ScreenshotFrame,
 };
 
-use crate::CuaClient;
+use crate::{CuaClient, CuaError};
 
 /// Bound on awaiting the blocking Cua IPC task. The Cua client has its own
 /// 15s socket timeout; this outer bound exists so that an exhausted tokio
@@ -118,13 +118,18 @@ impl AxTreeWalker for CuaAxTreeAdapter {
     async fn walk(
         &self,
         pid: i32,
+        window_id: Option<u64>,
         config: AxTreeWalkConfig,
     ) -> Result<AxTreeSnapshot, PlatformError> {
         let client = self.client.clone();
-        tokio::task::spawn_blocking(move || client.walk_ax_tree(pid, &config))
+        let result = tokio::task::spawn_blocking(move || client.walk_ax_tree(pid, window_id, &config))
             .await
-            .map_err(|e| PlatformError::Message(format!("Lumen Cua AX task: {e}")))?
-            .map_err(|e| PlatformError::Message(e.to_string()))
+            .map_err(|e| PlatformError::Message(format!("Lumen Cua AX task: {e}")))?;
+        match result {
+            Ok(snap) => Ok(snap),
+            Err(CuaError::WindowGone(id)) => Err(PlatformError::WindowGone(id)),
+            Err(e) => Err(PlatformError::Message(e.to_string())),
+        }
     }
 
     fn is_supported(&self) -> bool {

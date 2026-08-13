@@ -22,6 +22,8 @@ pub enum CuaError {
     Request(String),
     #[error("Lumen Cua is unsupported on this platform")]
     Unsupported,
+    #[error("ax window {0} is gone")]
+    WindowGone(u64),
 }
 
 #[derive(Debug, Clone)]
@@ -144,10 +146,12 @@ impl CuaClient {
     pub fn walk_ax_tree(
         &self,
         pid: i32,
+        window_id: Option<u64>,
         config: &lumen_platform::AxTreeWalkConfig,
     ) -> Result<lumen_platform::AxTreeSnapshot, CuaError> {
         let (result, payload) = self.call(Command::AxWalk {
             pid,
+            window_id,
             max_depth: config.max_depth,
             max_nodes: config.max_nodes,
             walk_timeout_ms: config.walk_timeout_ms,
@@ -155,6 +159,7 @@ impl CuaClient {
             max_text_length: config.max_text_length,
         })?;
         match result {
+            ResponseResult::AxWindowGone { window_id } => Err(CuaError::WindowGone(window_id)),
             ResponseResult::AxSnapshot { meta } => {
                 let text_content = String::from_utf8_lossy(&payload).into_owned();
                 Ok(lumen_platform::AxTreeSnapshot {

@@ -465,6 +465,11 @@ pub fn activity_segments(state: State<'_, AppState>, day: String) -> Result<Vec<
 }
 
 #[tauri::command]
+pub fn activity_scenes(state: State<'_, AppState>, day: String) -> Result<lumen_api::SceneDayDto, String> {
+    state.store.list_scene_day(&day).map_err(err)
+}
+
+#[tauri::command]
 pub fn activity_stats(
     state: State<'_, AppState>,
     day: String,

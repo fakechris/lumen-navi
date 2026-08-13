@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ActivitySegment,
+  SceneDay,
   AsrModelCandidate,
   AsrModelStatus,
   AssistantAction,
@@ -59,6 +60,8 @@ export const api = {
     invoke<string>("generate_day_summary", { day: day ?? null }),
   activitySegments: (day: string) =>
     invoke<ActivitySegment[]>("activity_segments", { day }),
+  activityScenes: (day: string) =>
+    invoke<SceneDay>("activity_scenes", { day }),
   activityStats: (day: string, groupBy?: "app" | "site") =>
     invoke<DayStats>("activity_stats", { day, groupBy }),
   activityRange: (from: string, to: string, groupBy?: "app" | "site") =>

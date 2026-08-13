@@ -12,6 +12,7 @@ chrono = { workspace = true }
 lumen-api = { workspace = true }
 lumen-intake = { workspace = true }
 lumen-types = { workspace = true }
+lumen-scene = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

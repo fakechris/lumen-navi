@@ -367,6 +367,7 @@ pub fn run() {
             commands::list_events,
             commands::list_timeline,
             commands::activity_segments,
+            commands::activity_scenes,
             commands::activity_stats,
             commands::activity_range,
             commands::activity_add_manual_segment,

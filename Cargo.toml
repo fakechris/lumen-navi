@@ -14,6 +14,7 @@ members = [
   "crates/lumen-sources-browser",
   "crates/lumen-store",
   "crates/lumen-process",
+  "crates/lumen-scene",
   "crates/lumen-api",
   "crates/lumen-daemon",
   "apps/desktop/src-tauri",
@@ -31,6 +32,7 @@ default-members = [
   "crates/lumen-sources-browser",
   "crates/lumen-store",
   "crates/lumen-process",
+  "crates/lumen-scene",
   "crates/lumen-api",
   "crates/lumen-daemon",
 ]
@@ -81,4 +83,5 @@ lumen-sources-media = { path = "crates/lumen-sources-media" }
 lumen-sources-browser = { path = "crates/lumen-sources-browser" }
 lumen-store = { path = "crates/lumen-store" }
 lumen-process = { path = "crates/lumen-process" }
+lumen-scene = { path = "crates/lumen-scene" }
 lumen-api = { path = "crates/lumen-api" }

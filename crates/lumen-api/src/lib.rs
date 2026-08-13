@@ -178,6 +178,9 @@ pub struct ActivitySegmentDto {
     /// 'auto' (tracked) or 'manual' (user-entered retro-entry).
     #[serde(default)]
     pub source: String,
+    /// Nested scene stack label (`Ghostty → herdr → writing`). Query-time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_label: Option<String>,
 }
 
 /// Aggregated stats for one day (the dashboard's `stats` view payload).
@@ -232,6 +235,43 @@ pub struct AppTotal {
     /// "DeepSeek Platform" instead of just "deepseek.com". None in app mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+}
+
+/// One merged run of the same scene stack (capture-time leaf + optional shell).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneEpisodeDto {
+    pub day: String,
+    pub kind: String,
+    pub app_name: String,
+    pub bundle_id: Option<String>,
+    pub shell: Option<String>,
+    pub leaf: String,
+    pub label: String,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub duration_ms: i64,
+    pub segment_count: i64,
+}
+
+/// Ranked scene identity for one day (dashboard drill-down).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneRollupDto {
+    pub kind: String,
+    pub app_name: String,
+    pub bundle_id: Option<String>,
+    pub shell: Option<String>,
+    pub leaf: String,
+    pub label: String,
+    pub ms: i64,
+    pub episode_count: i64,
+}
+
+/// Scene projection for one local day.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneDayDto {
+    pub day: String,
+    pub episodes: Vec<SceneEpisodeDto>,
+    pub rollups: Vec<SceneRollupDto>,
 }
 
 /// One day's roll-up inside a range query (the weekly view payload).

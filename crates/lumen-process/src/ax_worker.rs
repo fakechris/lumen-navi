@@ -175,14 +175,35 @@ impl AxWorker {
             return Ok(false);
         }
 
-        let snapshot = self
+        let window_id = payload.get("window_id").and_then(|v| v.as_u64());
+
+        let snapshot = match self
             .walker
-            .walk(pid, self.config.walk.clone())
+            .walk(pid, window_id, self.config.walk.clone())
             .await
-            .map_err(|e| AxJobError::transient(e.to_string()))?;
+        {
+            Ok(snap) => snap,
+            Err(PlatformError::WindowGone(id)) => {
+                let body = json!({
+                    "payload_version": 1,
+                    "desynced": true,
+                    "reason": "window_gone",
+                    "window_id": id,
+                    "text": "",
+                    "event_id": job.event_id.to_string(),
+                })
+                .to_string();
+                self.store
+                    .insert_derived(job.event_id, DERIVED_AX_V1, body)
+                    .map_err(|e| AxJobError::transient(e.to_string()))?;
+                info!(event = %job.event_id, window_id = id, "ax.v1 desynced (window gone)");
+                return Ok(false);
+            }
+            Err(e) => return Err(AxJobError::transient(e.to_string())),
+        };
 
         let nonempty = !snapshot.text_content.trim().is_empty();
-        let body = ax_body_json(&snapshot, &job.event_id.to_string());
+        let body = ax_body_json(&snapshot, &job.event_id.to_string(), window_id);
 
         self.store
             .insert_derived(job.event_id, DERIVED_AX_V1, body)
@@ -243,7 +264,7 @@ fn retry_delay(attempts: i64, base: Duration, max: Duration) -> u64 {
 }
 
 /// Build the `ax.v1` derived body JSON envelope.
-fn ax_body_json(snapshot: &AxTreeSnapshot, event_id: &str) -> String {
+fn ax_body_json(snapshot: &AxTreeSnapshot, event_id: &str, window_id: Option<u64>) -> String {
     json!({
         "payload_version": 1,
         "text": snapshot.text_content,
@@ -255,6 +276,8 @@ fn ax_body_json(snapshot: &AxTreeSnapshot, event_id: &str) -> String {
         "window_title": snapshot.window_title,
         "document_path": snapshot.document_path,
         "browser_url": snapshot.browser_url,
+        "window_id": window_id,
+        "desynced": false,
         "event_id": event_id,
     })
     .to_string()

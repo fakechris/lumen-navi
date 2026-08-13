@@ -148,6 +148,7 @@ mod tests {
                 ls_category_type: None,
                 tab_url: None,
                 pid: None,
+                window_id: None,
             }),
             idle_seconds: idle,
             is_locked: false,

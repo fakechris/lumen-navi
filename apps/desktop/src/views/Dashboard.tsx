@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as d3 from "d3";
 import { api } from "../api";
 import { Button, Card, EmptyState, IconButton, Input, Select, StatCard } from "../design";
-import type { CategoryRule, MatchField, ProductivityLevel, ActivitySegment, DayStats } from "../types";
+import type { CategoryRule, MatchField, ProductivityLevel, ActivitySegment, DayStats, SceneDay } from "../types";
 import { WeeklyView } from "./WeeklyView";
 
 // --- helpers --------------------------------------------------------------
@@ -99,18 +99,21 @@ export function DashboardView() {
   const [error, setError] = useState<string | null>(null);
   // Top-apps grouping: "app" (bundle identity, default) or "site" (domain).
   // Only affects the top-apps ranking, not the timeline/categories.
-  const [groupBy, setGroupBy] = useState<"app" | "site">("app");
+  const [groupBy, setGroupBy] = useState<"app" | "site" | "scene">("app");
+  const [scenes, setScenes] = useState<SceneDay | null>(null);
   // Calendar popover open state for the day picker.
   const [calendarOpen, setCalendarOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [segs, st] = await Promise.all([
+      const [segs, st, sc] = await Promise.all([
         api.activitySegments(day),
-        api.activityStats(day, groupBy),
+        api.activityStats(day, groupBy === "scene" ? "app" : groupBy),
+        api.activityScenes(day),
       ]);
       setSegments(segs);
       setStats(st);
+      setScenes(sc);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -248,11 +251,17 @@ export function DashboardView() {
           <Card pad={16}>
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
               <SectionHeader
-                title={groupBy === "site" ? "网站排行" : "应用排行"}
-                subtitle={groupBy === "site" ? "浏览器时长按域名聚合（Safari/Chrome/Comet）" : "按活跃时长排序"}
+                title={groupBy === "site" ? "网站排行" : groupBy === "scene" ? "场景排行" : "应用排行"}
+                subtitle={
+                  groupBy === "site"
+                    ? "浏览器时长按域名聚合（Safari/Chrome/Comet）"
+                    : groupBy === "scene"
+                      ? "同一场景栈合并：Ghostty → herdr → writing，Safari → kimi.com"
+                      : "按活跃时长排序"
+                }
               />
               <div style={{ display: "flex", gap: 0, borderRadius: "var(--radius-md)", overflow: "hidden", border: "1px solid var(--border)", flex: "0 0 auto" }}>
-                {(["app", "site"] as const).map((g) => (
+                {(["app", "site", "scene"] as const).map((g) => (
                   <button
                     key={g}
                     onClick={() => setGroupBy(g)}
@@ -267,12 +276,16 @@ export function DashboardView() {
                       borderBottom: "none",
                     }}
                   >
-                    {g === "app" ? "应用" : "网站"}
+                    {g === "app" ? "应用" : g === "site" ? "网站" : "场景"}
                   </button>
                 ))}
               </div>
             </div>
-            <TopApps stats={stats!} groupBy={groupBy} />
+            {groupBy === "scene" ? (
+              <SceneRanking scenes={scenes} />
+            ) : (
+              <TopApps stats={stats!} groupBy={groupBy} />
+            )}
           </Card>
         </>
       )}
@@ -617,6 +630,15 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
               </div>
             ) : null;
           })()}
+          {tooltip.seg.scene_label && !tooltip.seg.is_idle && (
+            <div style={{
+              color: "var(--text-secondary)", marginBottom: 2, maxWidth: 280,
+              overflow: "hidden", textOverflow: "ellipsis",
+              fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)",
+            }}>
+              {tooltip.seg.scene_label}
+            </div>
+          )}
           {tooltip.seg.window_title && !tooltip.seg.is_idle && (
             <div style={{ color: "var(--text-secondary)", marginBottom: 2, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis" }}>
               {tooltip.seg.window_title}
@@ -788,6 +810,70 @@ function HourDistribution({ stats }: { stats: DayStats }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function SceneRanking({ scenes }: { scenes: SceneDay | null }) {
+  const rollups = scenes?.rollups ?? [];
+  const maxMs = Math.max(1, ...rollups.map((r) => r.ms));
+  if (rollups.length === 0) {
+    return <div style={{ color: "var(--text-tertiary)", fontSize: "var(--text-sm)" }}>暂无场景数据</div>;
+  }
+  const kindLabel: Record<string, string> = {
+    browser: "浏览",
+    development: "开发",
+    communication: "通讯",
+    other: "其他",
+  };
+  return (
+    <div className="stack">
+      {rollups.map((r) => (
+        <div key={r.label} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{
+            width: 8, height: 8, borderRadius: "50%",
+            background: categoryColor(r.kind),
+            flexShrink: 0,
+          }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+              <span style={{
+                fontSize: "var(--text-sm)",
+                fontWeight: 500,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                fontFamily: "var(--font-mono)",
+              }}>{r.label}</span>
+              <span style={{
+                fontSize: "var(--text-xs)",
+                fontFamily: "var(--font-mono)",
+                color: "var(--text-secondary)",
+                flexShrink: 0,
+              }}>{fmtDuration(r.ms)}</span>
+            </div>
+            <div style={{
+              height: 4,
+              borderRadius: 2,
+              background: "var(--graph-grid)",
+              marginTop: 4,
+              overflow: "hidden",
+            }}>
+              <div style={{
+                height: "100%",
+                width: `${(r.ms / maxMs) * 100}%`,
+                background: categoryColor(r.kind),
+                borderRadius: 2,
+              }} />
+            </div>
+            <div style={{
+              fontSize: "var(--text-xs)",
+              color: "var(--text-tertiary)",
+              marginTop: 2,
+            }}>{kindLabel[r.kind] ?? r.kind} · {r.episode_count} 段</div>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

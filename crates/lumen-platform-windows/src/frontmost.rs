@@ -59,6 +59,8 @@ fn frontmost_sync() -> Result<Option<FrontmostApp>, PlatformError> {
                     window_title,
                     ls_category_type: None,
                     tab_url: None,
+                    pid: None,
+                    window_id: None,
                 }));
             }
 
@@ -106,6 +108,8 @@ fn frontmost_sync() -> Result<Option<FrontmostApp>, PlatformError> {
                 window_title,
                 ls_category_type: None,
                 tab_url: None,
+                pid: Some(pid as i32),
+                window_id: Some(hwnd.0 as usize as u64),
             }))
         }
     }
