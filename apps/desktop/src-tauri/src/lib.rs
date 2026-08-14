@@ -13,6 +13,10 @@ use state::AppState;
 use tauri::{Emitter, Manager};
 use tracing_subscriber::EnvFilter;
 
+/// Build version for UI display.
+const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
+const BUILD_SHA: &str = env!("LUMEN_BUILD_SHA");
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let filter =
@@ -363,6 +367,7 @@ pub fn run() {
             commands::get_health,
             commands::get_permissions,
             commands::get_platform_info,
+            commands::get_build_info,
             commands::search_text,
             commands::list_events,
             commands::list_timeline,

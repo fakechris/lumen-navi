@@ -178,6 +178,8 @@ impl SqliteStore {
                 crate::rule_engine::CatalogRuleSet::embedded(),
             ));
         }
+        // Scene rules (same pattern: external JSON, hot-reloadable).
+        lumen_scene::install_and_load_scene_rules(&data_dir);
         Ok(Self {
             data_dir,
             conn: Mutex::new(conn),

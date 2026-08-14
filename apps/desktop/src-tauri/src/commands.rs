@@ -298,6 +298,20 @@ pub fn get_platform_info() -> Result<PlatformInfoDto, String> {
     })
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BuildInfoDto {
+    pub version: String,
+    pub sha: String,
+}
+
+#[tauri::command]
+pub fn get_build_info() -> Result<BuildInfoDto, String> {
+    Ok(BuildInfoDto {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        sha: env!("LUMEN_BUILD_SHA").to_string(),
+    })
+}
+
 #[tauri::command]
 pub fn search_text(
     state: State<'_, AppState>,
