@@ -33,6 +33,8 @@ pub struct Config {
     #[serde(default)]
     pub ax: AxConfig,
     #[serde(default)]
+    pub input: InputConfig,
+    #[serde(default)]
     pub assistant: AssistantConfig,
 }
 
@@ -546,6 +548,27 @@ impl Default for Config {
             asr: AsrConfig::default(),
             assistant: AssistantConfig::default(),
             ax: AxConfig::default(),
+            input: InputConfig::default(),
+        }
+    }
+}
+
+/// Input event counting for the roast feature. Records only behavioral keys
+/// (Delete/Tab/Esc/arrows) + shortcut combos (Cmd+C/V/X/Z) + click counts —
+/// never keystroke content. Requires Input Monitoring TCC (opt-in).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InputConfig {
+    pub enabled: bool,
+    /// How often to flush counters as an `input.stats.v1` event (seconds).
+    pub flush_interval_s: u64,
+}
+
+impl Default for InputConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            flush_interval_s: 300, // 5 minutes
         }
     }
 }

@@ -31,7 +31,7 @@ use lumen_process::{
 use lumen_sources_browser::BrowserIngestPolicy;
 use lumen_sources_media::{AudioOrchestrator, CaptureOrchestrator, CapturedBatch};
 use lumen_store::{EventStore, SCHEMA_VERSION, SqliteStore};
-use lumen_types::{SourceEvent, SourceKind, TriggerReason};
+use lumen_types::{event_kind, SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn, Level};
@@ -398,7 +398,49 @@ async fn main() -> Result<()> {
         None
     };
 
-    // --- ASR worker (async; independent of capture) ---
+    // --- Input counter (roast feature: behavioral keys + clicks, opt-in) ---
+    // A single static state: the CGEventTap callback holds a &'static ref.
+    static INPUT_STATE: std::sync::OnceLock<lumen_platform_macos::InputCounterState> =
+        std::sync::OnceLock::new();
+    let input_handle = if config.input.enabled {
+        let state = INPUT_STATE.get_or_init(lumen_platform_macos::InputCounterState::default);
+        match lumen_platform_macos::start_input_counter(state) {
+            Ok(()) => {
+                info!(
+                    flush_s = config.input.flush_interval_s,
+                    "input counter started (behavioral keys + clicks only)"
+                );
+                let store_in = Arc::clone(&store);
+                let flush_every =
+                    Duration::from_secs(config.input.flush_interval_s.max(30));
+                Some(tokio::spawn(async move {
+                    let mut tick = tokio::time::interval(flush_every);
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    tick.tick().await; // initial
+                    loop {
+                        tick.tick().await;
+                        let counts = lumen_platform_macos::input_snapshot(state);
+                        lumen_platform_macos::input_reset(state);
+                        let event = SourceEvent::new(
+                            SourceKind::Screen,
+                            event_kind::INPUT_STATS_V1,
+                            serde_json::to_value(&counts).unwrap_or_default(),
+                        );
+                        if let Err(e) = store_in.append_event(event) {
+                            warn!(error = %e, "append input.stats.v1 failed");
+                        }
+                    }
+                }))
+            }
+            Err(e) => {
+                warn!(error = %e, "input counter failed to start (needs Input Monitoring permission)");
+                None
+            }
+        }
+    } else {
+        info!("input counter disabled in config");
+        None
+    };
     // Continuous mic → audio_chunk → transcribe_audio jobs → engine (SenseVoice default).
     let (asr_cancel_tx, asr_cancel_rx) = watch::channel(false);
     let asr_handle = if config.asr.enabled {

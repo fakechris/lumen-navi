@@ -484,6 +484,72 @@ pub fn activity_scenes(state: State<'_, AppState>, day: String) -> Result<lumen_
 }
 
 #[tauri::command]
+pub fn day_roast_summary(
+    state: State<'_, AppState>,
+    day: String,
+) -> Result<lumen_api::DayRoastSummaryDto, String> {
+    state.store.day_roast_summary(&day).map_err(err)
+}
+
+#[tauri::command]
+pub async fn roast_day(
+    state: State<'_, AppState>,
+    day: String,
+) -> Result<String, String> {
+    let summary = state.store.day_roast_summary(&day).map_err(err)?;
+    let cfg = state.load_config().map_err(err)?.assistant;
+    if cfg.base_url.trim().is_empty() || cfg.model.trim().is_empty() {
+        return Err("请先在设置中配置 Assistant LLM（base_url + model）".into());
+    }
+    let data = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
+    let prompt = format!(
+        "你是一个毒舌但洞察深刻的数字生活评论员。基于下面的 JSON 数据（用户 {day} 一天的真实行为统计），写一份 6-10 条的中文 roast。要求：\n\
+         - 每条吐槽指向一个具体数字（百分比/次数/时长/标题）\n\
+         - 语气幽默但不是人身攻击，吐槽行为模式而不是人格\n\
+         - 可以玩梗，可以夸张，但数字必须来自数据\n\
+         - 最后一条给一个真诚的建议\n\
+         - 直接输出 roast 内容，不要前言后语\n\n\
+         数据：\n{data}"
+    );
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let api_key = std::env::var("LUMEN_NAVI_LLM_API_KEY")
+        .or_else(|_| std::env::var("OPENAI_API_KEY"))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            let k = cfg.api_key.trim().to_string();
+            if k.is_empty() { None } else { Some(k) }
+        });
+    let body = serde_json::json!({
+        "model": cfg.model,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.8,
+        "stream": false,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(cfg.timeout_ms.max(30_000)))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let mut req = client.post(&url).json(&body);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+    let resp = req.send().await.map_err(|e| format!("LLM 请求失败: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("LLM 返回 {status}: {text}"));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应: {e}"))?;
+    json.pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "LLM 响应缺少 content".to_string())
+}
+
+#[tauri::command]
 pub fn activity_stats(
     state: State<'_, AppState>,
     day: String,
