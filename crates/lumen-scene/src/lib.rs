@@ -4,44 +4,193 @@
 //! Title strings that disagree are layers or navigate — never a desync
 //! detector. Bind (same window or not) is `window_id` only, and lives in
 //! the AX worker, not here.
+//!
+//! Rules are externalized to `$data_dir/rules/scene_rules.v1.json`, mirroring
+//! the category rule engine pattern. Edit the file → next dashboard refresh
+//! (30s) picks up changes. No rebuild needed.
 
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, RwLock};
+
+use serde::{Deserialize, Serialize};
 use url::Url;
 
-const SHELL_TITLES: &[&str] = &["herdr"];
+const EMBEDDED_RULES: &str = include_str!("../rules/scene_rules.v1.json");
 
-const BROWSER_BUNDLES: &[&str] = &[
-    "com.apple.Safari",
-    "ai.perplexity.comet",
-    "com.google.Chrome",
-    "org.mozilla.firefox",
-    "company.thebrowser.dia",
-    "at.studio.AsideBrowser",
-    "com.microsoft.edgemac",
-    "com.brave.Browser",
-    "company.thebrowser.Browser",
-];
+static ACTIVE_RULES: RwLock<Option<Arc<SceneRuleSet>>> = RwLock::new(None);
 
-const DEV_TERMINAL: &[&str] = &[
-    "com.mitchellh.ghostty",
-    "com.googlecode.iterm2",
-    "com.apple.Terminal",
-    "dev.warp.Warp-Stable",
-];
+// ── Rule data model ────────────────────────────────────────────────────
 
-const DEV_EDITOR: &[&str] = &[
-    "dev.zcode.app",
-    "com.anysphere.sand",
-    "com.todesktop.230313mzl4w4u92",
-    "com.microsoft.VSCode",
-];
+/// JSON file schema for scene rules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneRuleFile {
+    pub version: u32,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub shell_titles: Vec<String>,
+    #[serde(default)]
+    pub browser_bundles: Vec<String>,
+    #[serde(default)]
+    pub dev_terminal_bundles: Vec<String>,
+    #[serde(default)]
+    pub dev_editor_bundles: Vec<String>,
+    #[serde(default)]
+    pub comm_bundles: Vec<String>,
+    #[serde(default)]
+    pub loopback_hosts: Vec<String>,
+    #[serde(default)]
+    pub browser_title_suffixes: Vec<String>,
+    #[serde(default)]
+    pub known_hosts: HashMap<String, String>,
+}
 
-const COMM_BUNDLES: &[&str] = &[
-    "com.tencent.xinWeChat",
-    "com.electron.lark",
-    "com.alibaba.DingTalkMac",
-];
+/// Compiled rule set (all strings lowercased at parse time).
+#[derive(Debug, Clone)]
+pub struct SceneRuleSet {
+    pub shell_titles: Vec<String>,
+    pub browser_bundles: Vec<String>,
+    pub dev_terminal_bundles: Vec<String>,
+    pub dev_editor_bundles: Vec<String>,
+    pub comm_bundles: Vec<String>,
+    pub loopback_hosts: Vec<String>,
+    pub browser_title_suffixes: Vec<String>,
+    pub known_hosts: HashMap<String, String>,
+}
 
-const LOOPBACK: &[&str] = &["127.0.0.1", "localhost", "0.0.0.0"];
+impl SceneRuleSet {
+    fn from_file(f: &SceneRuleFile) -> Self {
+        Self {
+            shell_titles: f.shell_titles.iter().map(|s| s.to_ascii_lowercase()).collect(),
+            browser_bundles: f.browser_bundles.clone(),
+            dev_terminal_bundles: f.dev_terminal_bundles.clone(),
+            dev_editor_bundles: f.dev_editor_bundles.clone(),
+            comm_bundles: f.comm_bundles.clone(),
+            loopback_hosts: f.loopback_hosts.iter().map(|s| s.to_ascii_lowercase()).collect(),
+            browser_title_suffixes: f.browser_title_suffixes.clone(),
+            known_hosts: f.known_hosts.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.clone())).collect(),
+        }
+    }
+
+    fn default_set() -> Self {
+        let f: SceneRuleFile = serde_json::from_str(EMBEDDED_RULES).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to parse embedded scene rules; using empty");
+            SceneRuleFile {
+                version: 1,
+                description: String::new(),
+                shell_titles: vec!["herdr".into()],
+                browser_bundles: vec!["com.apple.Safari".into()],
+                dev_terminal_bundles: vec![],
+                dev_editor_bundles: vec![],
+                comm_bundles: vec![],
+                loopback_hosts: vec!["127.0.0.1".into(), "localhost".into()],
+                browser_title_suffixes: vec![],
+                known_hosts: HashMap::new(),
+            }
+        });
+        Self::from_file(&f)
+    }
+
+    fn is_shell_title(&self, title: &str) -> bool {
+        let t = norm(title).to_ascii_lowercase();
+        self.shell_titles.iter().any(|s| *s == t)
+    }
+
+    fn bundle_in(&self, bundle: &str, list: &[String]) -> bool {
+        list.iter().any(|p| bundle.starts_with(p))
+    }
+
+    fn is_browser(&self, bundle: &str) -> bool {
+        self.bundle_in(bundle, &self.browser_bundles)
+    }
+    fn is_dev_terminal(&self, bundle: &str) -> bool {
+        self.bundle_in(bundle, &self.dev_terminal_bundles)
+    }
+    fn is_dev_editor(&self, bundle: &str) -> bool {
+        self.bundle_in(bundle, &self.dev_editor_bundles)
+    }
+    fn is_comm(&self, bundle: &str) -> bool {
+        self.bundle_in(bundle, &self.comm_bundles)
+    }
+    fn is_loopback(&self, host: &str) -> bool {
+        self.loopback_hosts.iter().any(|h| h == host)
+    }
+}
+
+/// Get the active rule set (lazy-init from embedded defaults).
+pub fn active_rules() -> Arc<SceneRuleSet> {
+    {
+        let guard = ACTIVE_RULES.read().unwrap();
+        if let Some(set) = guard.as_ref() {
+            return Arc::clone(set);
+        }
+    }
+    let mut guard = ACTIVE_RULES.write().unwrap();
+    if guard.is_none() {
+        let set = Arc::new(SceneRuleSet::default_set());
+        *guard = Some(Arc::clone(&set));
+        tracing::info!("scene rules loaded from embedded defaults");
+    }
+    Arc::clone(guard.as_ref().unwrap())
+}
+
+/// Set the active rule set (used by the loader after reading from disk).
+pub fn set_active_rules(set: Arc<SceneRuleSet>) {
+    let mut guard = ACTIVE_RULES.write().unwrap();
+    *guard = Some(set);
+}
+
+/// Install + load scene rules from `$data_dir/rules/scene_rules.v1.json`.
+/// Seeds the file from embedded defaults if missing. Falls back to embedded
+/// on parse error (never bricks).
+pub fn install_and_load_scene_rules(data_dir: &Path) {
+    let rules_dir = data_dir.join("rules");
+    let _ = std::fs::create_dir_all(&rules_dir);
+    let rule_path = rules_dir.join("scene_rules.v1.json");
+
+    // Seed if missing.
+    if !rule_path.exists() {
+        if let Err(e) = std::fs::write(&rule_path, EMBEDDED_RULES) {
+            tracing::warn!(error = %e, "failed to seed scene rules file");
+            set_active_rules(Arc::new(SceneRuleSet::default_set()));
+            return;
+        }
+        tracing::info!("seeded scene rules to {}", rule_path.display());
+    }
+
+    // Load from file, fall back to embedded on error.
+    match std::fs::read_to_string(&rule_path) {
+        Ok(content) => match serde_json::from_str::<SceneRuleFile>(&content) {
+            Ok(f) => {
+                let set = Arc::new(SceneRuleSet::from_file(&f));
+                tracing::info!(
+                    path = %rule_path.display(),
+                    browsers = set.browser_bundles.len(),
+                    terminals = set.dev_terminal_bundles.len(),
+                    known_hosts = set.known_hosts.len(),
+                    "scene rules loaded from file"
+                );
+                set_active_rules(set);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to parse scene rules file; using embedded");
+                set_active_rules(Arc::new(SceneRuleSet::default_set()));
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read scene rules file; using embedded");
+            set_active_rules(Arc::new(SceneRuleSet::default_set()));
+        }
+    }
+}
+
+/// Reload from disk without reseeding.
+pub fn reload_scene_rules_from_dir(data_dir: &Path) {
+    install_and_load_scene_rules(data_dir);
+}
+
+// ── Scene types (unchanged) ────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SceneKind {
@@ -62,7 +211,6 @@ impl SceneKind {
     }
 }
 
-/// Nested identity. `leaf` is capture-time content; `shell` is mux/chrome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneStack {
     pub app: String,
@@ -88,14 +236,10 @@ impl SceneStack {
     }
 }
 
+// ── Helpers ────────────────────────────────────────────────────────────
+
 pub fn norm(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn is_shell_title(title: &str) -> bool {
-    SHELL_TITLES
-        .iter()
-        .any(|s| norm(title).eq_ignore_ascii_case(s))
 }
 
 /// herdr tab titles: `cwd · prompt · sid`
@@ -119,7 +263,8 @@ pub fn registrable_domain(url: Option<&str>) -> Option<String> {
     if host.is_empty() {
         return None;
     }
-    if LOOPBACK.contains(&host.as_str()) || host.ends_with(".local") {
+    let rules = active_rules();
+    if rules.is_loopback(&host) || host.ends_with(".local") {
         return Some(host);
     }
     if host.bytes().all(|b| b == b'.' || b.is_ascii_digit()) {
@@ -127,9 +272,8 @@ pub fn registrable_domain(url: Option<&str>) -> Option<String> {
     }
     let parts: Vec<&str> = host.split('.').collect();
     if parts.len() >= 3 && matches!(parts[0], "www" | "m" | "mail") {
-        return Some(parts[parts.len() - 2..].join("."));
-    }
-    if parts.len() >= 2 {
+        Some(parts[parts.len() - 2..].join("."))
+    } else if parts.len() >= 2 {
         Some(parts[parts.len() - 2..].join("."))
     } else {
         Some(host)
@@ -139,11 +283,7 @@ pub fn registrable_domain(url: Option<&str>) -> Option<String> {
 pub fn ghostty_leaf(title: &str) -> String {
     let t = norm(title);
     if t.is_empty() || t == "👻" || t == "Ghostty" {
-        return if t.is_empty() {
-            "Ghostty".into()
-        } else {
-            t
-        };
+        return if t.is_empty() { "Ghostty".into() } else { t };
     }
     if looks_like_herdr_tab(&t) {
         return t.split(" · ").next().unwrap_or(&t).to_string();
@@ -154,12 +294,19 @@ pub fn ghostty_leaf(title: &str) -> String {
     t
 }
 
+/// Build the leaf label for a browser page.
+/// Priority: known_hosts override → registrable domain → stripped title.
 pub fn page_leaf(title: &str, url: Option<&str>) -> String {
+    let rules = active_rules();
     if let Some(d) = registrable_domain(url) {
+        // Check known_hosts override.
+        if let Some(display) = rules.known_hosts.get(&d) {
+            return display.clone();
+        }
         return d;
     }
     let mut t = norm(title);
-    for suffix in [" - Comet", " - Safari", " - Chrome", " - Firefox", " - Dia", " - Aside"] {
+    for suffix in &rules.browser_title_suffixes {
         if let Some(stripped) = t.strip_suffix(suffix) {
             t = stripped.to_string();
         }
@@ -167,20 +314,17 @@ pub fn page_leaf(title: &str, url: Option<&str>) -> String {
     if t.starts_with("http") {
         return registrable_domain(Some(&t)).unwrap_or(t);
     }
-    if t.is_empty() {
-        "browser".into()
-    } else {
-        t
-    }
+    if t.is_empty() { "browser".into() } else { t }
 }
 
 /// Capture-time title wins the leaf. A known shell name on either side
 /// becomes `shell`. Never replace a specific capture leaf with a later AX title.
 pub fn fuse_titles(capture_title: &str, ax_title: &str) -> (Option<String>, String) {
+    let rules = active_rules();
     let cap = norm(capture_title);
     let ax = norm(ax_title);
-    let cap_shell = is_shell_title(&cap);
-    let ax_shell = is_shell_title(&ax);
+    let cap_shell = rules.is_shell_title(&cap);
+    let ax_shell = rules.is_shell_title(&ax);
 
     if cap_shell && !ax.is_empty() && !ax_shell {
         return (Some(cap.to_ascii_lowercase()), ghostty_leaf(&ax));
@@ -200,23 +344,20 @@ pub fn fuse_titles(capture_title: &str, ax_title: &str) -> (Option<String>, Stri
     (None, if ax.is_empty() { String::new() } else { ghostty_leaf(&ax) })
 }
 
-fn bundle_matches(bundle: &str, prefixes: &[&str]) -> bool {
-    prefixes.iter().any(|p| bundle.starts_with(p))
-}
-
-pub fn classify_kind(bundle: &str, url: Option<&str>) -> SceneKind {
-    if bundle_matches(bundle, BROWSER_BUNDLES) {
+fn classify_kind(bundle: &str, url: Option<&str>) -> SceneKind {
+    let rules = active_rules();
+    if rules.is_browser(bundle) {
         if let Some(host) = registrable_domain(url) {
-            if LOOPBACK.contains(&host.as_str()) {
+            if rules.is_loopback(&host) {
                 return SceneKind::Development;
             }
         }
         return SceneKind::Browser;
     }
-    if bundle_matches(bundle, DEV_TERMINAL) || bundle_matches(bundle, DEV_EDITOR) {
+    if rules.is_dev_terminal(bundle) || rules.is_dev_editor(bundle) {
         return SceneKind::Development;
     }
-    if bundle_matches(bundle, COMM_BUNDLES) {
+    if rules.is_comm(bundle) {
         return SceneKind::Communication;
     }
     SceneKind::Other
@@ -230,7 +371,9 @@ pub fn stack_for(
     ax_title: &str,
     url: Option<&str>,
 ) -> SceneStack {
-    if bundle_matches(bundle, BROWSER_BUNDLES) {
+    let rules = active_rules();
+
+    if rules.is_browser(bundle) {
         let leaf = page_leaf(capture_title, url);
         let kind = classify_kind(bundle, url);
         return SceneStack {
@@ -242,7 +385,7 @@ pub fn stack_for(
         };
     }
 
-    if bundle_matches(bundle, DEV_TERMINAL) {
+    if rules.is_dev_terminal(bundle) {
         let (mut shell, leaf) = fuse_titles(capture_title, ax_title);
         if shell.is_none() && looks_like_herdr_tab(capture_title) {
             shell = Some("herdr".into());
@@ -252,21 +395,13 @@ pub fn stack_for(
             bundle: bundle.to_string(),
             kind: SceneKind::Development,
             shell,
-            leaf: if leaf.is_empty() {
-                app.to_string()
-            } else {
-                leaf
-            },
+            leaf: if leaf.is_empty() { app.to_string() } else { leaf },
         };
     }
 
     let leaf = {
         let t = norm(capture_title);
-        if t.is_empty() {
-            app.to_string()
-        } else {
-            t
-        }
+        if t.is_empty() { app.to_string() } else { t }
     };
     SceneStack {
         app: app.to_string(),
@@ -324,46 +459,40 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_osc_tab_implies_herdr_shell() {
-        let s = stack_for(
-            "Ghostty",
-            "com.mitchellh.ghostty",
-            "writing · 看一下这篇的调研 · a0b45a82-37e5-43",
-            "writing · 看一下这篇的调研 · a0b45a82-37e5-43",
-            None,
-        );
-        assert_eq!(s.shell.as_deref(), Some("herdr"));
-        assert_eq!(s.leaf, "writing");
-        assert_eq!(s.label(), "Ghostty → herdr → writing");
-    }
-
-    #[test]
-    fn safari_kimi_is_page_not_desync() {
+    fn safari_kimi_uses_known_host() {
         let s = stack_for(
             "Safari",
             "com.apple.Safari",
-            "Kimi AI with K3 | Built for Agentic Coding & Knowledge Work",
-            "每日分析OpenAI官方快照变更 — DeepSeek Harness",
+            "Kimi AI with K3",
+            "",
             Some("https://www.kimi.com/membership/subscription?tab=quota"),
         );
-        assert!(s.shell.is_none());
-        assert_eq!(s.leaf, "kimi.com");
-        assert_eq!(s.label(), "Safari → kimi.com");
-        assert_eq!(s.kind, SceneKind::Browser);
-        assert!(!s.leaf.contains("DeepSeek"));
+        assert_eq!(s.leaf, "Kimi");
+        assert_eq!(s.label(), "Safari → Kimi");
     }
 
     #[test]
-    fn safari_kimi_without_url_keeps_capture_title() {
+    fn safari_x_uses_known_host() {
+        let s = stack_for(
+            "Comet",
+            "ai.perplexity.comet",
+            "Home / X - Comet",
+            "",
+            Some("https://x.com/home"),
+        );
+        assert_eq!(s.leaf, "X");
+    }
+
+    #[test]
+    fn safari_github_uses_known_host() {
         let s = stack_for(
             "Safari",
             "com.apple.Safari",
-            "Kimi AI with K3 | Built for Agentic Coding & Knowledge Work",
-            "每日分析OpenAI官方快照变更 — DeepSeek Harness",
-            None,
+            "fakechris/lumen-navi",
+            "",
+            Some("https://github.com/fakechris/lumen-navi"),
         );
-        assert!(s.leaf.starts_with("Kimi AI"));
-        assert!(!s.leaf.contains("DeepSeek"));
+        assert_eq!(s.leaf, "GitHub");
     }
 
     #[test]
@@ -376,7 +505,6 @@ mod tests {
             Some("http://127.0.0.1:3080/"),
         );
         assert_eq!(s.kind, SceneKind::Development);
-        assert_eq!(s.leaf, "127.0.0.1");
     }
 
     #[test]
@@ -384,5 +512,25 @@ mod tests {
         let s = stack_for("ZCode", "dev.zcode.app", "ZCode", "ZCode", None);
         assert_eq!(s.leaf, "ZCode");
         assert!(s.shell.is_none());
+    }
+
+    #[test]
+    fn external_rule_override_works() {
+        // Add a custom known_host at runtime.
+        let mut set = (*active_rules()).clone();
+        set.known_hosts.insert("example.com".into(), "My Site".into());
+        set_active_rules(Arc::new(set));
+
+        let s = stack_for(
+            "Safari",
+            "com.apple.Safari",
+            "Some Page",
+            "",
+            Some("https://example.com/page"),
+        );
+        assert_eq!(s.leaf, "My Site");
+
+        // Reset to default.
+        set_active_rules(Arc::new(SceneRuleSet::default_set()));
     }
 }

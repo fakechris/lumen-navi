@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "description": "Scene extraction rules. Edit $data_dir/rules/scene_rules.v1.json to override without recompiling. Reloads on next dashboard refresh (30s).",
+  "shell_titles": ["herdr"],
+  "browser_bundles": [
+    "com.apple.Safari",
+    "ai.perplexity.comet",
+    "com.google.Chrome",
+    "org.mozilla.firefox",
+    "company.thebrowser.dia",
+    "at.studio.AsideBrowser",
+    "com.microsoft.edgemac",
+    "com.brave.Browser",
+    "company.thebrowser.Browser"
+  ],
+  "dev_terminal_bundles": [
+    "com.mitchellh.ghostty",
+    "com.googlecode.iterm2",
+    "com.apple.Terminal",
+    "dev.warp.Warp-Stable"
+  ],
+  "dev_editor_bundles": [
+    "dev.zcode.app",
+    "com.anysphere.sand",
+    "com.todesktop.230313mzl4w4u92",
+    "com.microsoft.VSCode"
+  ],
+  "comm_bundles": [
+    "com.tencent.xinWeChat",
+    "com.electron.lark",
+    "com.alibaba.DingTalkMac"
+  ],
+  "loopback_hosts": ["127.0.0.1", "localhost", "0.0.0.0"],
+  "browser_title_suffixes": [
+    " - Comet",
+    " - Safari",
+    " - Chrome",
+    " - Firefox",
+    " - Dia",
+    " - Aside"
+  ],
+  "known_hosts": {
+    "x.com": "X",
+    "twitter.com": "X",
+    "github.com": "GitHub",
+    "chatgpt.com": "ChatGPT",
+    "grok.com": "Grok",
+    "mail.google.com": "Gmail",
+    "youtube.com": "YouTube",
+    "slack.com": "Slack",
+    "notion.so": "Notion",
+    "perplexity.ai": "Perplexity",
+    "deepseek.com": "DeepSeek",
+    "kimi.com": "Kimi"
+  }
+}

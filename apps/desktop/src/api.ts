@@ -94,6 +94,7 @@ export const api = {
   observeStart: () => invoke<ObserveStatus>("observe_start"),
   observeStop: () => invoke<ObserveStatus>("observe_stop"),
   openDataDir: () => invoke<void>("open_data_dir"),
+  getBuildInfo: () => invoke<{ version: string; sha: string }>("get_build_info"),
   getOnboarding: () => invoke<OnboardingState>("get_onboarding"),
   setOnboardingStep: (step: number) =>
     invoke<OnboardingState>("set_onboarding_step", { step }),

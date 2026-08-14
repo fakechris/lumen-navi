@@ -6,6 +6,9 @@ license.workspace = true
 description = "Scene-stack fuse: capture-time leaf + optional shell. Title mismatch is not desync."
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]

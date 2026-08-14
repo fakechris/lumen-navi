@@ -180,12 +180,17 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [statusNote, setStatusNote] = useState<string | null>(null);
   const [healthAlert, setHealthAlert] = useState<{ reason: string } | null>(null);
+  const [buildInfo, setBuildInfo] = useState<{ version: string; sha: string } | null>(null);
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const [summaryText, setSummaryText] = useState<string | null>(null);
   const [asrModels, setAsrModels] = useState<AsrModelStatus | null>(null);
   const [assistant, setAssistant] = useState<AssistantConfig | null>(null);
   const [assistantKey, setAssistantKey] = useState("");
   const [browserPairing, setBrowserPairing] = useState<BrowserPairing | null>(null);
+
+  useEffect(() => {
+    void api.getBuildInfo().then(setBuildInfo).catch(() => {});
+  }, []);
   const screenPermissionPending = useRef(false);
   // Thumbnail loading strategy: load every thumb in the current timeline page
   // eagerly (they're ~200-400KB JPEG data URLs, 60 items ≈ 15-24MB — fine),
@@ -642,7 +647,7 @@ export default function App() {
               }
             }}
           />
-          <span className="ver">v0.1.0</span>
+          <span className="ver" title="Build version">v{buildInfo?.version ?? "0.1.0"} ({buildInfo?.sha ?? "dev"})</span>
         </div>
       </aside>
 
