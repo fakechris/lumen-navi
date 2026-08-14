@@ -7,8 +7,9 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use lumen_api::{
-    ActivitySegmentDto, AppTotal, CategoryTotal, DayRollupDto, DayStatsDto, RangeStatsDto,
-    SceneDayDto,
+    ActivitySegmentDto, AppTotal, CategoryTotal, DayRoastSummaryDto, DayRollupDto, DayStatsDto,
+    RangeStatsDto, RoastAppTotal, RoastDomainTotal, RoastHour, RoastInputCounts,
+    RoastSceneTotal, RoastTitleTotal, SceneDayDto,
 };
 use lumen_types::{event_kind, ActivitySession, ArtifactRef, SourceEvent, SourceKind};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -1211,7 +1212,207 @@ impl SqliteStore {
         .to_string())
     }
 
-    /// List all activity segments for one day (local-day bucket), ordered by
+    /// Build the structured one-day roast summary — every field a real number
+    /// from the store, ready to feed an LLM with a roast prompt.
+    pub fn day_roast_summary(&self, day: &str) -> Result<DayRoastSummaryDto, StoreError> {
+        let stats = self.activity_day_stats(day, GroupBy::App)?;
+        let scenes = self.list_scene_day(day)?;
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+
+        let total = stats.total_active_ms.max(1) as f64;
+
+        // Top apps with pct.
+        let top_apps: Vec<RoastAppTotal> = stats
+            .top_apps
+            .iter()
+            .take(8)
+            .map(|a| RoastAppTotal {
+                app: a.app_name.clone(),
+                ms: a.ms,
+                pct: ((a.ms as f64 / total) * 100.0 * 10.0).round() / 10.0,
+                category: a.category.clone(),
+            })
+            .collect();
+
+        // Top domains by duration from segments.
+        let top_domains: Vec<RoastDomainTotal> = {
+            let mut stmt = conn
+                .prepare(
+                    r#"SELECT COALESCE(url, '') AS u, SUM(duration_ms) AS ms
+                       FROM activity_segments
+                       WHERE day = ?1 AND is_idle = 0 AND url IS NOT NULL AND url != ''
+                       GROUP BY u ORDER BY ms DESC LIMIT 8"#,
+                )
+                .map_err(StoreError::db)?;
+            let rows = stmt
+                .query_map(params![day], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(StoreError::db)?;
+            let mut out = Vec::new();
+            for r in rows {
+                let (raw, ms) = r.map_err(StoreError::db)?;
+                let domain = crate::categorization::registrable_domain(&raw)
+                    .unwrap_or(raw);
+                out.push(RoastDomainTotal { domain, ms });
+            }
+            // Merge same-domain rows (registrable_domain may collapse several).
+            out.sort_by(|a, b| b.ms.cmp(&a.ms));
+            out.dedup_by(|a, b| {
+                if a.domain == b.domain {
+                    b.ms += a.ms;
+                    true
+                } else {
+                    false
+                }
+            });
+            out.truncate(6);
+            out
+        };
+
+        // Top scenes.
+        let top_scenes: Vec<RoastSceneTotal> = scenes
+            .rollups
+            .iter()
+            .take(6)
+            .map(|r| RoastSceneTotal {
+                label: r.label.clone(),
+                ms: r.ms,
+                episode_count: r.episode_count,
+            })
+            .collect();
+
+        // Notable titles from screenshot events (recurring window titles).
+        let notable_titles: Vec<RoastTitleTotal> = {
+            let mut stmt = conn
+                .prepare(
+                    r#"SELECT json_extract(payload, '$.app_name') AS app,
+                              json_extract(payload, '$.window_title') AS t,
+                              COUNT(1) AS n
+                       FROM events
+                       WHERE kind = 'screenshot.v1' AND date(ts, 'localtime') = date(?1, 'localtime')
+                         AND t IS NOT NULL AND t != '' AND length(t) > 4
+                       GROUP BY app, t ORDER BY n DESC LIMIT 8"#,
+                )
+                .map_err(StoreError::db)?;
+            let rows = stmt
+                .query_map(params![day], |row| {
+                    Ok(RoastTitleTotal {
+                        app: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                        seen_count: row.get(2)?,
+                    })
+                })
+                .map_err(StoreError::db)?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        // Screenshot + AX counts.
+        let screenshot_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM events WHERE kind='screenshot.v1' AND date(ts,'localtime')=date(?1,'localtime')",
+                params![day],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let ax_sample_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM derived WHERE kind='ax.v1' AND date(created_at,'localtime')=date(?1,'localtime')",
+                params![day],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        // Aggregate input.stats.v1 events for the day (if any exist).
+        let input_counts: Option<RoastInputCounts> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT payload FROM events WHERE kind='input.stats.v1' \
+                     AND date(ts,'localtime')=date(?1,'localtime')",
+                )
+                .map_err(StoreError::db)?;
+            let rows = stmt
+                .query_map(params![day], |row| row.get::<_, String>(0))
+                .map_err(StoreError::db)?;
+            let mut total = RoastInputCounts::default();
+            let mut any = false;
+            for r in rows {
+                let payload = match r.map_err(StoreError::db) {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                let v: serde_json::Value = match serde_json::from_str(&payload) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                any = true;
+                macro_rules! add {
+                    ($field:ident) => {
+                        total.$field += v.get(stringify!($field))
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                    };
+                }
+                add!(key_delete); add!(key_tab); add!(key_esc); add!(key_enter);
+                add!(key_arrow); add!(key_space);
+                add!(combo_copy); add!(combo_paste); add!(combo_cut); add!(combo_undo);
+                add!(combo_selectall); add!(combo_find); add!(combo_close);
+                add!(combo_new); add!(combo_save);
+                add!(mouse_left); add!(mouse_right); add!(mouse_other); add!(mouse_double);
+            }
+            if any { Some(total) } else { None }
+        };
+        drop(conn);
+
+        // Hour histogram + busiest hour with top app.
+        let mut hour_histogram: Vec<RoastHour> = Vec::new();
+        for (h, ms) in stats.by_hour.iter().enumerate() {
+            if *ms > 0 {
+                hour_histogram.push(RoastHour {
+                    hour: h as u8,
+                    active_ms: *ms,
+                    top_app: None,
+                });
+            }
+        }
+        // Busiest hour + top app for that hour.
+        let busiest_hour: Option<RoastHour> = {
+            let busiest = hour_histogram.iter().max_by_key(|h| h.active_ms).cloned();
+            busiest.map(|mut h| {
+                if let Ok(conn2) = self.conn.lock() {
+                    h.top_app = conn2
+                        .query_row(
+                            r#"SELECT app_name, SUM(duration_ms) FROM activity_segments
+                               WHERE day = ?1 AND is_idle = 0 AND app_name IS NOT NULL
+                                 AND CAST(strftime('%H', started_at) AS INTEGER) = ?2
+                               GROUP BY app_name ORDER BY 2 DESC LIMIT 1"#,
+                            params![day, h.hour],
+                            |r| r.get::<_, Option<String>>(0),
+                        )
+                        .ok()
+                        .flatten();
+                }
+                h
+            })
+        };
+
+        Ok(DayRoastSummaryDto {
+            day: day.to_string(),
+            total_active_ms: stats.total_active_ms,
+            total_idle_ms: stats.total_idle_ms,
+            pulse_score: stats.pulse_score,
+            context_switches: stats.context_switches,
+            screenshot_count,
+            ax_sample_count,
+            input_counts,
+            top_apps,
+            top_domains,
+            top_scenes,
+            notable_titles,
+            busiest_hour,
+            hour_histogram,
+        })
+    }
     /// start time. Returns the dashboard's timeline data.
     pub fn list_activity_segments(&self, day: &str) -> Result<Vec<ActivitySegmentDto>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;

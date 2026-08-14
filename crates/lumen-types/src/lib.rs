@@ -61,6 +61,9 @@ pub mod event_kind {
     pub const PAGE_VISIT_V1: &str = "page_visit.v1";
     /// Lightweight day/session rollup (rule or LLM later).
     pub const SUMMARY_V1: &str = "summary.v1";
+    /// Aggregated behavioral input counts (Delete/Tab/clicks/Cmd+C…).
+    /// Content-free by construction — see input_counter.rs.
+    pub const INPUT_STATS_V1: &str = "input.stats.v1";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

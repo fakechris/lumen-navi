@@ -286,6 +286,98 @@ pub struct DayRollupDto {
     pub by_category: Vec<CategoryTotal>,
 }
 
+/// Structured one-day behavior summary — the payload for the "roast my day"
+/// LLM feature. Every field is a real number from the store; the LLM only
+/// needs to be witty, not to guess.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DayRoastSummaryDto {
+    pub day: String,
+    pub total_active_ms: i64,
+    pub total_idle_ms: i64,
+    /// 0-100 weighted productivity score (None if nothing classified).
+    pub pulse_score: Option<f64>,
+    pub context_switches: i64,
+    pub screenshot_count: i64,
+    pub ax_sample_count: i64,
+    /// Aggregated behavioral input counts for the day (None if the input
+    /// counter was never enabled). Content-free by construction.
+    pub input_counts: Option<RoastInputCounts>,
+    /// Top apps by active time with percentage of total.
+    pub top_apps: Vec<RoastAppTotal>,
+    /// Top websites by active time (from segment url).
+    pub top_domains: Vec<RoastDomainTotal>,
+    /// Top scenes (stack labels, e.g. "Ghostty → herdr → writing").
+    pub top_scenes: Vec<RoastSceneTotal>,
+    /// Recurring window titles — the "documents you lived in".
+    pub notable_titles: Vec<RoastTitleTotal>,
+    /// The single busiest local hour.
+    pub busiest_hour: Option<RoastHour>,
+    /// Per-hour active ms (local hour buckets 0-23, only non-zero entries).
+    pub hour_histogram: Vec<RoastHour>,
+}
+
+/// Day-aggregated input counts (sum of all input.stats.v1 events for the day).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RoastInputCounts {
+    pub key_delete: u64,
+    pub key_tab: u64,
+    pub key_esc: u64,
+    pub key_enter: u64,
+    pub key_arrow: u64,
+    pub key_space: u64,
+    pub combo_copy: u64,
+    pub combo_paste: u64,
+    pub combo_cut: u64,
+    pub combo_undo: u64,
+    pub combo_selectall: u64,
+    pub combo_find: u64,
+    pub combo_close: u64,
+    pub combo_new: u64,
+    pub combo_save: u64,
+    pub mouse_left: u64,
+    pub mouse_right: u64,
+    pub mouse_other: u64,
+    pub mouse_double: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoastAppTotal {
+    pub app: String,
+    pub ms: i64,
+    /// Percent of total_active_ms, 0-100 with one decimal.
+    pub pct: f64,
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoastDomainTotal {
+    pub domain: String,
+    pub ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoastSceneTotal {
+    pub label: String,
+    pub ms: i64,
+    pub episode_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoastTitleTotal {
+    /// App that owned the window.
+    pub app: String,
+    pub title: String,
+    pub seen_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoastHour {
+    /// Local hour 0-23.
+    pub hour: u8,
+    pub active_ms: i64,
+    pub top_app: Option<String>,
+}
+
 /// Aggregated stats over a date range (e.g. the last 7 days).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RangeStatsDto {

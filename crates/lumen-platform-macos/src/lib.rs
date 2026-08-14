@@ -11,6 +11,7 @@
 
 mod asr;
 pub mod ax;
+mod input_counter;
 pub mod ax_tree;
 mod capture;
 mod clipboard;
@@ -24,6 +25,16 @@ mod selection;
 
 pub use asr::MacSpeechAsr;
 pub use ax_tree::MacAxTreeWalker;
+pub use input_counter::{
+    start_input_counter, InputCounterState, InputCounts,
+};
+/// Convenience wrappers matching the daemon's call sites.
+pub fn input_snapshot(state: &InputCounterState) -> InputCounts {
+    input_counter::snapshot(state)
+}
+pub fn input_reset(state: &InputCounterState) {
+    input_counter::reset(state);
+}
 pub use capture::{MacDisplays, MacScreenCapturer};
 pub use clipboard::clipboard_grab_selection;
 pub use frontmost::MacFrontmost;
