@@ -30,7 +30,7 @@ use lumen_process::{
 };
 use lumen_sources_browser::BrowserIngestPolicy;
 use lumen_sources_media::{AudioOrchestrator, CaptureOrchestrator, CapturedBatch};
-use lumen_store::{EventStore, SCHEMA_VERSION, SqliteStore};
+use lumen_store::{EventStore, RecoveryPolicy, SCHEMA_VERSION, SqliteStore};
 use lumen_types::{event_kind, SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
@@ -80,6 +80,39 @@ fn default_data_dir() -> std::path::PathBuf {
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         std::path::PathBuf::from(home).join(".lumen-navi")
+    }
+}
+
+fn recovery_policy_from_config(config: &Config) -> RecoveryPolicy {
+    let stale_ms = config
+        .ocr
+        .stale_running_ms
+        .max(config.asr.stale_running_ms)
+        .max(config.ax.stale_running_ms);
+    let mut reclaim_kinds = Vec::new();
+    let mut skip_kinds = Vec::new();
+    if config.ocr.enabled {
+        reclaim_kinds.push("ocr_screen".into());
+    } else {
+        skip_kinds.push(("ocr_screen".into(), "ocr_disabled_on_boot".into()));
+    }
+    if config.asr.enabled {
+        reclaim_kinds.push("transcribe_audio".into());
+    } else {
+        skip_kinds.push((
+            "transcribe_audio".into(),
+            "asr_disabled_on_boot".into(),
+        ));
+    }
+    if config.ax.enabled {
+        reclaim_kinds.push("ax_screen".into());
+    } else {
+        skip_kinds.push(("ax_screen".into(), "ax_disabled_on_boot".into()));
+    }
+    RecoveryPolicy {
+        stale_running: chrono::Duration::milliseconds(stale_ms as i64),
+        reclaim_kinds,
+        skip_kinds,
     }
 }
 
@@ -211,18 +244,37 @@ async fn main() -> Result<()> {
         "durable store open"
     );
 
+    let recovery = store
+        .recover_after_unclean_shutdown(&recovery_policy_from_config(&config))
+        .with_context(|| "startup store recovery")?;
+    info!(
+        sessions_closed = recovery.sessions_closed,
+        jobs_reclaimed = recovery.jobs_reclaimed,
+        jobs_skipped = recovery.jobs_skipped,
+        "startup recovery"
+    );
+
     store
         .append(vec![SourceEvent::new(
             SourceKind::Other("daemon".into()),
             "daemon.boot.v1",
             json!({
-                "phase": "S3-audio-asr",
+                "phase": "fact-layer-f1a",
                 "observe": true,
                 "screen": config.sources.screen,
                 "audio": config.sources.audio,
                 "ocr": config.ocr.enabled,
                 "asr": config.asr.enabled,
+                "ax": config.ax.enabled,
                 "api": config.api.enabled,
+                "build": env!("CARGO_PKG_VERSION"),
+                "schema": SCHEMA_VERSION,
+                "boot_reason": "startup",
+                "recovery": {
+                    "sessions_closed": recovery.sessions_closed,
+                    "jobs_reclaimed": recovery.jobs_reclaimed,
+                    "jobs_skipped": recovery.jobs_skipped,
+                },
             }),
         )])
         .await?;

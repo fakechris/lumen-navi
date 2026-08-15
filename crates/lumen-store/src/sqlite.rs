@@ -11,7 +11,9 @@ use lumen_api::{
     RangeStatsDto, RoastAppTotal, RoastDomainTotal, RoastHour, RoastInputCounts,
     RoastSceneTotal, RoastTitleTotal, SceneDayDto,
 };
-use lumen_types::{event_kind, ActivitySession, ArtifactRef, SourceEvent, SourceKind};
+use lumen_types::{
+    event_kind, ActivitySession, ArtifactRef, SessionStatus, SourceEvent, SourceKind,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
@@ -24,7 +26,7 @@ use crate::schema::{
     MIGRATE_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, MIGRATE_V5, MIGRATE_V6, MIGRATE_V7,
     MIGRATE_V8, MIGRATE_V9, SCHEMA_VERSION,
 };
-use crate::{EventStore, JobRecord, JobStatus, StoreError};
+use crate::{EventStore, JobRecord, JobStatus, RecoveryPolicy, RecoveryReport, StoreError};
 
 /// Summary of one background enrichment pass.
 #[derive(Debug, Clone, Default)]
@@ -163,6 +165,8 @@ impl SqliteStore {
         let db_path = meta_dir.join("navi.db");
 
         let conn = Connection::open(&db_path).map_err(StoreError::db)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(StoreError::db)?;
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
             .map_err(StoreError::db)?;
         migrate(&conn)?;
@@ -455,6 +459,50 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn get_session(&self, id: Uuid) -> Result<Option<ActivitySession>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.query_row(
+            r#"SELECT id, started_at, ended_at, primary_app, primary_bundle, trigger,
+                      snapshot_count, status
+               FROM activity_sessions WHERE id = ?1"#,
+            params![id.to_string()],
+            |row| {
+                Ok(ActivitySession {
+                    id: Uuid::parse_str(&row.get::<_, String>(0)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    started_at: {
+                        let raw: String = row.get(1)?;
+                        DateTime::parse_from_rfc3339(&raw)
+                            .map(|value| value.with_timezone(&Utc))
+                            .map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    1,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?
+                    },
+                    ended_at: optional_sql_ts(row.get(2)?),
+                    primary_app: row.get(3)?,
+                    primary_bundle: row.get(4)?,
+                    trigger: row.get(5)?,
+                    snapshot_count: row.get::<_, i64>(6)? as u32,
+                    status: SessionStatus::parse(&row.get::<_, String>(7)?),
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::db)
+    }
+
     /// Enqueue a job unless one is already pending/running for the same event+kind.
     /// Returns `Ok(None)` when skipped as duplicate open job.
     pub fn enqueue_job(
@@ -522,6 +570,117 @@ impl SqliteStore {
             )
             .map_err(StoreError::db)?;
         Ok(n)
+    }
+
+    /// One transaction: close leaked sessions, skip disabled processors, reclaim
+    /// stale `running` jobs for enabled workers. Idempotent.
+    pub fn recover_after_unclean_shutdown(
+        &self,
+        policy: &RecoveryPolicy,
+    ) -> Result<RecoveryReport, StoreError> {
+        self.recover_after_unclean_shutdown_inner(policy, None)
+    }
+
+    fn recover_after_unclean_shutdown_inner(
+        &self,
+        policy: &RecoveryPolicy,
+        fail_after: Option<&str>,
+    ) -> Result<RecoveryReport, StoreError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        let now = Utc::now().to_rfc3339();
+
+        let sessions_closed = tx
+            .execute(
+                r#"UPDATE activity_sessions
+                   SET status = 'closed',
+                       ended_at = COALESCE(
+                         (SELECT MAX(ts) FROM events WHERE events.session_id = activity_sessions.id),
+                         started_at
+                       )
+                   WHERE status = 'open'"#,
+                [],
+            )
+            .map_err(StoreError::db)?;
+
+        if fail_after == Some("after_sessions") {
+            return Err(StoreError::Other("injected recovery failure".into()));
+        }
+
+        let mut jobs_skipped = 0usize;
+        for (kind, reason) in &policy.skip_kinds {
+            let n = tx
+                .execute(
+                    r#"UPDATE jobs
+                       SET status = 'skipped', last_error = ?1, updated_at = ?2
+                       WHERE kind = ?3 AND status IN ('pending', 'running')"#,
+                    params![reason, now, kind],
+                )
+                .map_err(StoreError::db)?;
+            jobs_skipped += n;
+        }
+
+        let cutoff = (Utc::now() - policy.stale_running).to_rfc3339();
+        let mut jobs_reclaimed = 0usize;
+        for kind in &policy.reclaim_kinds {
+            let n = tx
+                .execute(
+                    r#"UPDATE jobs
+                       SET status = 'pending', available_at = ?1, updated_at = ?1,
+                           last_error = COALESCE(last_error, 'reclaimed stale running')
+                       WHERE kind = ?2 AND status = 'running' AND updated_at < ?3"#,
+                    params![now, kind, cutoff],
+                )
+                .map_err(StoreError::db)?;
+            jobs_reclaimed += n;
+        }
+
+        tx.commit().map_err(StoreError::db)?;
+        Ok(RecoveryReport {
+            sessions_closed,
+            jobs_reclaimed,
+            jobs_skipped,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn recover_after_unclean_shutdown_failing_after_sessions(
+        &self,
+        policy: &RecoveryPolicy,
+    ) -> Result<RecoveryReport, StoreError> {
+        self.recover_after_unclean_shutdown_inner(policy, Some("after_sessions"))
+    }
+
+    #[cfg(test)]
+    pub fn test_set_job_row(
+        &self,
+        id: Uuid,
+        status: &str,
+        updated_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.execute(
+            "UPDATE jobs SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, updated_at.to_rfc3339(), id.to_string()],
+        )
+        .map_err(StoreError::db)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn busy_timeout_ms(&self) -> Result<i64, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .map_err(StoreError::db)
     }
 
     /// Claim pending jobs that are due (`available_at` null or <= now).
@@ -4843,5 +5002,156 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cat.as_deref(), Some("Browsing"));
+    }
+
+    #[test]
+    fn busy_timeout_is_set_on_app_connection() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        assert_eq!(store.busy_timeout_ms().unwrap(), 5000);
+    }
+
+    #[test]
+    fn recover_closes_open_sessions_at_last_event_not_now() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let started = DateTime::parse_from_rfc3339("2026-07-17T06:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let last = DateTime::parse_from_rfc3339("2026-07-17T06:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let sid = Uuid::new_v4();
+        store
+            .upsert_session(&ActivitySession {
+                id: sid,
+                started_at: started,
+                ended_at: None,
+                primary_app: Some("Safari".into()),
+                primary_bundle: Some("com.apple.Safari".into()),
+                trigger: "focus_change".into(),
+                snapshot_count: 3,
+                status: SessionStatus::Open,
+            })
+            .unwrap();
+        let mut ev = SourceEvent::new(SourceKind::Screen, event_kind::SCREENSHOT_V1, json!({}))
+            .with_session(sid);
+        ev.ts = last;
+        store.append_event(ev).unwrap();
+
+        let empty_sid = Uuid::new_v4();
+        store
+            .upsert_session(&ActivitySession {
+                id: empty_sid,
+                started_at: started,
+                ended_at: None,
+                primary_app: Some("Ghostty".into()),
+                primary_bundle: None,
+                trigger: "interval".into(),
+                snapshot_count: 0,
+                status: SessionStatus::Open,
+            })
+            .unwrap();
+
+        let report = store
+            .recover_after_unclean_shutdown(&RecoveryPolicy::default())
+            .unwrap();
+        assert_eq!(report.sessions_closed, 2);
+        let closed = store.get_session(sid).unwrap().unwrap();
+        assert_eq!(closed.status, SessionStatus::Closed);
+        assert_eq!(closed.ended_at, Some(last));
+        let empty = store.get_session(empty_sid).unwrap().unwrap();
+        assert_eq!(empty.ended_at, Some(started));
+
+        let again = store
+            .recover_after_unclean_shutdown(&RecoveryPolicy::default())
+            .unwrap();
+        assert_eq!(again.sessions_closed, 0);
+    }
+
+    #[test]
+    fn recover_is_atomic_on_injected_failure() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let sid = Uuid::new_v4();
+        store
+            .upsert_session(&ActivitySession {
+                id: sid,
+                started_at: Utc::now(),
+                ended_at: None,
+                primary_app: Some("Safari".into()),
+                primary_bundle: None,
+                trigger: "focus_change".into(),
+                snapshot_count: 1,
+                status: SessionStatus::Open,
+            })
+            .unwrap();
+        let err = store
+            .recover_after_unclean_shutdown_failing_after_sessions(&RecoveryPolicy::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("injected"));
+        let still = store.get_session(sid).unwrap().unwrap();
+        assert_eq!(still.status, SessionStatus::Open);
+        assert!(still.ended_at.is_none());
+    }
+
+    #[test]
+    fn recover_skips_disabled_and_reclaims_stale_running() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let ev = SourceEvent::new(SourceKind::Audio, event_kind::AUDIO_CHUNK_V1, json!({}));
+        let eid = ev.id;
+        store.append_event(ev).unwrap();
+        let transcribe = store.enqueue_job(eid, "transcribe_audio").unwrap().unwrap();
+        let ocr_event = SourceEvent::new(SourceKind::Screen, event_kind::SCREENSHOT_V1, json!({}));
+        let oid = ocr_event.id;
+        store.append_event(ocr_event).unwrap();
+        let ocr = store.enqueue_job(oid, "ocr_screen").unwrap().unwrap();
+        store
+            .test_set_job_row(
+                ocr.id,
+                "running",
+                Utc::now() - chrono::Duration::minutes(20),
+            )
+            .unwrap();
+
+        let policy = RecoveryPolicy {
+            stale_running: chrono::Duration::minutes(5),
+            reclaim_kinds: vec!["ocr_screen".into()],
+            skip_kinds: vec![(
+                "transcribe_audio".into(),
+                "asr_disabled_on_boot".into(),
+            )],
+        };
+        let report = store.recover_after_unclean_shutdown(&policy).unwrap();
+        assert_eq!(report.jobs_skipped, 1);
+        assert_eq!(report.jobs_reclaimed, 1);
+
+        let jobs = store.list_jobs(10).unwrap();
+        let t = jobs.iter().find(|j| j.id == transcribe.id).unwrap();
+        assert_eq!(t.status, JobStatus::Skipped);
+        assert_eq!(t.last_error.as_deref(), Some("asr_disabled_on_boot"));
+        let o = jobs.iter().find(|j| j.id == ocr.id).unwrap();
+        assert_eq!(o.status, JobStatus::Pending);
+    }
+
+    #[test]
+    fn busy_timeout_waits_out_cross_connection_lock() {
+        let dir = tempdir().unwrap();
+        let store = std::sync::Arc::new(SqliteStore::open(dir.path()).unwrap());
+        let db_path = dir.path().join("meta/navi.db");
+        let blocker = Connection::open(&db_path).unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE;").unwrap();
+        let writer = std::sync::Arc::clone(&store);
+        let handle = std::thread::spawn(move || {
+            writer.append_event(SourceEvent::new(
+                SourceKind::Other("test".into()),
+                "daemon.boot.v1",
+                json!({}),
+            ))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        blocker.execute_batch("COMMIT;").unwrap();
+        handle.join().unwrap().unwrap();
     }
 }

@@ -37,6 +37,7 @@ pub use sqlite::{
     EnrichmentPassReport, EventWithArtifacts, IdempotentAppendOutcome, OcrSearchHit,
     SessionDerivedRow, SqliteStore, TimelineItem, TimelineQuery,
 };
+// RecoveryPolicy / RecoveryReport are defined in this module.
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -82,6 +83,8 @@ pub enum JobStatus {
     Done,
     Failed,
     Dead,
+    /// Terminal: processor explicitly disabled (not a crash).
+    Skipped,
 }
 
 impl JobStatus {
@@ -92,6 +95,7 @@ impl JobStatus {
             Self::Done => "done",
             Self::Failed => "failed",
             Self::Dead => "dead",
+            Self::Skipped => "skipped",
         }
     }
 
@@ -101,9 +105,25 @@ impl JobStatus {
             "done" => Self::Done,
             "failed" => Self::Failed,
             "dead" => Self::Dead,
+            "skipped" => Self::Skipped,
             _ => Self::Pending,
         }
     }
+}
+
+/// Boot-time recovery knobs. `skip_kinds` are processors the user turned off.
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryPolicy {
+    pub stale_running: chrono::Duration,
+    pub reclaim_kinds: Vec<String>,
+    pub skip_kinds: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecoveryReport {
+    pub sessions_closed: usize,
+    pub jobs_reclaimed: usize,
+    pub jobs_skipped: usize,
 }
 
 #[derive(Debug, Clone)]
