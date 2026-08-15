@@ -71,7 +71,11 @@ pub struct AxWorker {
 }
 
 impl AxWorker {
-    pub fn new(store: Arc<SqliteStore>, walker: Arc<dyn AxTreeWalker>, config: AxWorkerConfig) -> Self {
+    pub fn new(
+        store: Arc<SqliteStore>,
+        walker: Arc<dyn AxTreeWalker>,
+        config: AxWorkerConfig,
+    ) -> Self {
         Self {
             store,
             walker,
@@ -103,6 +107,13 @@ impl AxWorker {
 
     pub async fn tick_once(&self) -> Result<usize, String> {
         if !self.walker.is_supported() {
+            let n = self
+                .store
+                .skip_pending_jobs(JOB_KIND_AX_SCREEN, "ax_unavailable")
+                .map_err(|e| e.to_string())?;
+            if n > 0 {
+                warn!(count = n, "skipped ax_screen jobs; walker unavailable");
+            }
             return Ok(0);
         }
         let _ = self.reclaim_stale();
@@ -131,12 +142,20 @@ impl AxWorker {
             Err(e) => {
                 self.failed.fetch_add(1, Ordering::Relaxed);
                 let msg = e.message;
+                if ax_unavailable(&msg) {
+                    let _ = self
+                        .store
+                        .complete_job(job.id, JobStatus::Skipped, Some(&msg));
+                    warn!(event = %job.event_id, error = %msg, "ax_screen skipped (unavailable)");
+                    return;
+                }
                 if job.attempts >= self.config.max_attempts {
                     self.dead.fetch_add(1, Ordering::Relaxed);
                     let _ = self.store.complete_job(job.id, JobStatus::Dead, Some(&msg));
                     warn!(event = %job.event_id, error = %msg, "ax_screen job dead");
                 } else {
-                    let delay = retry_delay(job.attempts, self.config.retry_base, self.config.retry_max);
+                    let delay =
+                        retry_delay(job.attempts, self.config.retry_base, self.config.retry_max);
                     let _ = self.store.complete_job_at(
                         job.id,
                         JobStatus::Pending,
@@ -250,7 +269,10 @@ impl AxWorker {
             match self.tick_once().await {
                 Ok(0) => break,
                 Ok(_) => {}
-                Err(e) => { warn!(error = %e, "ax drain error"); break; }
+                Err(e) => {
+                    warn!(error = %e, "ax drain error");
+                    break;
+                }
             }
         }
         info!("AX worker stopped");
@@ -286,6 +308,27 @@ fn ax_body_json(snapshot: &AxTreeSnapshot, event_id: &str, window_id: Option<u64
 /// Bundle-id prefixes for apps whose AX providers hang on deep tree traversal.
 /// Browsers get URL + title via AppleScript; Electron apps have unpredictable
 /// AX tree depth. Skip these to keep cua stable.
+fn ax_unavailable(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("connection refused")
+        || lower.contains("not connected")
+        || lower.contains("unavailable")
+        || lower.contains("sidecar")
+        || lower.contains("broken pipe")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ax_unavailable;
+
+    #[test]
+    fn ax_unavailable_matches_sidecar_errors() {
+        assert!(ax_unavailable("sidecar connection refused"));
+        assert!(ax_unavailable("AX walker unavailable"));
+        assert!(!ax_unavailable("element not found"));
+    }
+}
+
 fn is_ax_problematic_bundle(bundle_id: &str) -> bool {
     const SKIP_PREFIXES: &[&str] = &[
         "com.apple.Safari",
@@ -298,12 +341,12 @@ fn is_ax_problematic_bundle(bundle_id: &str) -> bool {
         "com.vivaldi.Vivaldi",
         "com.operasoftware.Opera",
         "org.mozilla.firefox",
-        "com.tinyspeck.slackmacgap",  // Slack
-        "com.microsoft.VSCode",       // VS Code
+        "com.tinyspeck.slackmacgap", // Slack
+        "com.microsoft.VSCode",      // VS Code
         "com.microsoft.VSCodeInsiders",
-        "md.obsidian",                // Obsidian
-        "com.hnc.Discord",            // Discord
-        "notion.id",                  // Notion
+        "md.obsidian",     // Obsidian
+        "com.hnc.Discord", // Discord
+        "notion.id",       // Notion
     ];
     SKIP_PREFIXES.iter().any(|p| bundle_id.starts_with(p))
 }
@@ -316,10 +359,16 @@ struct AxJobError {
 
 impl AxJobError {
     fn transient(s: String) -> Self {
-        Self { message: s, permanent: false }
+        Self {
+            message: s,
+            permanent: false,
+        }
     }
     fn permanent(s: String) -> Self {
-        Self { message: s, permanent: true }
+        Self {
+            message: s,
+            permanent: true,
+        }
     }
 }
 

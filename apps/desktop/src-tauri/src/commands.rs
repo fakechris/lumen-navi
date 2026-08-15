@@ -84,6 +84,7 @@ pub struct TimelineItemDto {
     pub session_id: Option<String>,
     pub app_name: Option<String>,
     pub window_title: Option<String>,
+    pub window_title_missing_reason: Option<String>,
     pub text_preview: Option<String>,
     pub text_kind: Option<String>,
     pub media_type: Option<String>,
@@ -155,6 +156,7 @@ pub async fn get_health(state: State<'_, AppState>) -> Result<HealthResponse, St
         ocr_docs,
         schema_version: SCHEMA_VERSION,
         browser,
+        observe: daemon_health.as_ref().and_then(|h| h.observe.clone()),
     })
 }
 
@@ -467,6 +469,7 @@ pub fn list_timeline(
                 session_id: it.session_id.map(|s| s.to_string()),
                 app_name: it.app_name,
                 window_title: it.window_title,
+                window_title_missing_reason: it.window_title_missing_reason,
                 text_preview: it.text_preview,
                 text_kind: it.text_kind,
                 media_type: it.media_type,
@@ -1243,6 +1246,7 @@ mod command_tests {
             ocr_docs: 0,
             schema_version: 0,
             browser: None,
+            observe: None,
         };
 
         let sources = health_sources(true, true, false, Some(&daemon));

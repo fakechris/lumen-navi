@@ -264,9 +264,7 @@ impl AsrConfig {
         // shared location Lumen ASR downloads into.
         #[cfg(target_os = "windows")]
         {
-            if let Some(local) =
-                std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty())
-            {
+            if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
                 return Some(std::path::PathBuf::from(local).join("Lumen").join("models"));
             }
         }
@@ -448,6 +446,62 @@ impl PrivacyConfig {
             return false;
         };
         self.app_blocklist.iter().any(|b| b == id)
+    }
+}
+
+/// Hard Observe gate evaluated before any screen / HID write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyGate {
+    Allow,
+    Paused,
+    ClosedEyes,
+    Locked,
+    AppBlocklist,
+    FrontmostUnknown,
+}
+
+impl PolicyGate {
+    pub fn allows(self) -> bool {
+        matches!(self, Self::Allow)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Paused => "paused",
+            Self::ClosedEyes => "closed_eyes",
+            Self::Locked => "locked",
+            Self::AppBlocklist => "app_blocklist",
+            Self::FrontmostUnknown => "frontmost_unknown",
+        }
+    }
+
+    /// Order: pause → closed_eyes → lock → unknown frontmost (if a blocklist
+    /// exists) → bundle blocklist.
+    pub fn evaluate(
+        paused: bool,
+        closed_eyes: bool,
+        locked: bool,
+        privacy: &PrivacyConfig,
+        bundle_id: Option<&str>,
+        frontmost_known: bool,
+    ) -> Self {
+        if paused || privacy.paused {
+            return Self::Paused;
+        }
+        if closed_eyes || privacy.closed_eyes {
+            return Self::ClosedEyes;
+        }
+        if locked {
+            return Self::Locked;
+        }
+        if !frontmost_known && !privacy.app_blocklist.is_empty() {
+            return Self::FrontmostUnknown;
+        }
+        if privacy.blocks_bundle(bundle_id) {
+            return Self::AppBlocklist;
+        }
+        Self::Allow
     }
 }
 
@@ -690,5 +744,32 @@ mod tests {
         assert_eq!(decoded.browser.ingest_token, "fixture-token");
         assert_eq!(decoded.browser.content_allow_hosts, vec!["example.test"]);
         assert_eq!(decoded.browser.excluded_hosts, vec!["private.example.test"]);
+    }
+
+    #[test]
+    fn policy_gate_order_is_pause_then_eyes_then_lock_then_blocklist() {
+        let mut privacy = PrivacyConfig::default();
+        assert_eq!(
+            PolicyGate::evaluate(true, false, false, &privacy, Some("a.b"), true),
+            PolicyGate::Paused
+        );
+        assert_eq!(
+            PolicyGate::evaluate(false, true, true, &privacy, Some("a.b"), true),
+            PolicyGate::ClosedEyes
+        );
+        assert_eq!(
+            PolicyGate::evaluate(false, false, true, &privacy, Some("a.b"), true),
+            PolicyGate::Locked
+        );
+        privacy.app_blocklist = vec!["com.secret".into()];
+        assert_eq!(
+            PolicyGate::evaluate(false, false, false, &privacy, None, false),
+            PolicyGate::FrontmostUnknown
+        );
+        assert_eq!(
+            PolicyGate::evaluate(false, false, false, &privacy, Some("com.secret"), true),
+            PolicyGate::AppBlocklist
+        );
+        assert!(PolicyGate::evaluate(false, false, false, &privacy, Some("ok"), true).allows());
     }
 }

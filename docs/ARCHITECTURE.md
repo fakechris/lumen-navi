@@ -263,13 +263,17 @@ Derived: `ocr.v1` (screen text), `transcript.v1` (audio text) — both feed FTS 
 
 ### PolicyGate (before store)
 
-1. Global pause → 2. Source disabled → 3. App deny-list → 4. Disk budget → 5. Cheap dedup (`pixel_hash` window)
+Screenshot **and** HID writes use the same order: pause → closed_eyes → lock → unknown frontmost (if a blocklist exists) → app blocklist. Disk budget still applies at persist. Same `pixel_hash` skips a second OCR enqueue (capture itself still uses the visual probe / dHash window).
 
 ### Local API (minimal)
 
-`health` · `search_ocr` · `reindex_ocr` · `list_events` · `wipe` · `pause`/`resume` · `permissions`  
+`health` · `search_ocr` · `reindex_ocr` · `list_events` · `wipe` · `pause`/`resume` · `get_settings` · `recent_context` · `permissions`
 
-Transport **now**: loopback HTTP (`127.0.0.1:7420` by default). UDS preferred later for desktop UI. Chrome reuses the same host schema (`lumen-api`).
+Transport: Unix socket (`<data_dir>/daemon.sock`) for the desktop shell and `lumen-daemon mcp`; loopback HTTP remains for the browser extension. Chrome and MCP reuse the same host schema (`lumen-api`).
+
+Agent surface (`lumen-daemon mcp`, stdio): `navi_status`, `navi_get_settings`, `navi_pause`, `navi_resume`, `navi_recent_context`, `navi_search`. No wipe and no Act tools on this server.
+
+Closed 10-minute History cards persist under `history.slot.*`. An optional local/OpenAI-compat narrative overlays title/body without blocking capture.
 
 ### Source style
 

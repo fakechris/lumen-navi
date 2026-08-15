@@ -146,6 +146,13 @@ export interface SourceStatus {
   last_error: string | null;
 }
 
+export interface ObserveCounters {
+  persisted: number;
+  persist_failed: number;
+  skipped_gate: number;
+  dropped_backpressure: number;
+}
+
 export interface Health {
   api_version: number;
   product: string;
@@ -156,6 +163,7 @@ export interface Health {
   ocr_docs: number;
   schema_version: number;
   browser: BrowserHealth | null;
+  observe?: ObserveCounters | null;
 }
 
 export interface BrowserHealth {
@@ -256,6 +264,7 @@ export interface TimelineItem {
   session_id: string | null;
   app_name: string | null;
   window_title: string | null;
+  window_title_missing_reason?: string | null;
   text_preview: string | null;
   text_kind: string | null;
   media_type: string | null;

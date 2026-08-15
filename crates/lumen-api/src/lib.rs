@@ -29,6 +29,17 @@ pub struct HealthResponse {
     /// Browser loopback intake status when configured.
     #[serde(default)]
     pub browser: Option<BrowserHealthResponse>,
+    /// Persist / skip / drop counters since this daemon process started.
+    #[serde(default)]
+    pub observe: Option<ObserveCountersDto>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ObserveCountersDto {
+    pub persisted: u64,
+    pub persist_failed: u64,
+    pub skipped_gate: u64,
+    pub dropped_backpressure: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +107,11 @@ pub enum ControlRequest {
     ClosedEyes {
         enabled: bool,
     },
+    GetSettings,
+    RecentContext {
+        #[serde(default)]
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +128,10 @@ pub enum ControlResponse {
     },
     Reindex {
         indexed: usize,
+    },
+    Settings(ObserveSettingsDto),
+    RecentContext {
+        slots: Vec<HistorySlotDto>,
     },
     Error {
         message: String,
@@ -155,6 +175,7 @@ impl HealthResponse {
             ocr_docs,
             schema_version,
             browser: None,
+            observe: None,
         }
     }
 }
@@ -384,6 +405,22 @@ pub struct RoastHour {
     pub hour: u8,
     pub active_ms: i64,
     pub top_app: Option<String>,
+}
+
+/// Live Observe settings snapshot for agents (get-then-replace later).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObserveSettingsDto {
+    pub paused: bool,
+    pub closed_eyes: bool,
+    pub app_blocklist: Vec<String>,
+    pub sources: ObserveSourcesDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObserveSourcesDto {
+    pub screen: bool,
+    pub audio: bool,
+    pub browser: bool,
 }
 
 /// One 10-minute History card (deterministic fold of activity segments).

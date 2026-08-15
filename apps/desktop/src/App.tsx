@@ -110,6 +110,19 @@ function permStatus(v: string): "done" | "failed" | "idle" {
   return "idle";
 }
 
+function titleMissingLabel(reason: string): string {
+  switch (reason) {
+    case "no_frontmost":
+      return "无前台应用";
+    case "no_window":
+      return "无窗口";
+    case "empty_title":
+      return "空标题";
+    default:
+      return reason;
+  }
+}
+
 function AudioPreview({ item }: { item: TimelineItem }) {
   const [url, setUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -776,6 +789,33 @@ export default function App() {
                   value={cfg?.audio ? (cfg.asr ? "转写" : "仅摄入") : "关闭"}
                   hint={`${cfg?.asr_engine ?? "sensevoice"} · ${cfg?.asr_locale ?? ""} · ${cfg?.audio_chunk_ms ?? "—"}ms`}
                 />
+                {health?.observe && (
+                  <>
+                    <StatCard
+                      label="已写入"
+                      value={health.observe.persisted}
+                      hint="本进程成功落库"
+                    />
+                    <StatCard
+                      label="写入失败"
+                      tone={health.observe.persist_failed > 0 ? "danger" : "default"}
+                      value={health.observe.persist_failed}
+                      hint="SQLite / 磁盘"
+                    />
+                    <StatCard
+                      label="门挡下"
+                      tone={health.observe.skipped_gate > 0 ? "warn" : "default"}
+                      value={health.observe.skipped_gate}
+                      hint="暂停 / 闭眼 / 锁屏 / 名单"
+                    />
+                    <StatCard
+                      label="队列丢弃"
+                      tone={health.observe.dropped_backpressure > 0 ? "danger" : "default"}
+                      value={health.observe.dropped_backpressure}
+                      hint="截图背压"
+                    />
+                  </>
+                )}
                 {(health?.browser?.last_ingest_at ||
                   health?.browser?.configured ||
                   browserPairing?.configured) && (
@@ -1028,7 +1068,11 @@ export default function App() {
                         <span className="meta">
                           {" "}
                           · {e.kind}
-                          {e.window_title ? ` · ${e.window_title}` : ""}
+                          {e.window_title
+                            ? ` · ${e.window_title}`
+                            : e.window_title_missing_reason
+                              ? ` · ${titleMissingLabel(e.window_title_missing_reason)}`
+                              : ""}
                         </span>
                       </div>
                       {e.text_preview && (

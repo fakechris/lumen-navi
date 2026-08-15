@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{DefaultBodyLimit, Query, State};
@@ -37,6 +37,41 @@ pub struct ControlState {
     screen_locked: Arc<dyn Fn() -> bool + Send + Sync>,
     pub sources: Vec<SourceStatus>,
     pub browser: BrowserRuntimeState,
+    pub counters: Arc<ObserveCounters>,
+    app_blocklist: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct ObserveCounters {
+    pub persisted: AtomicU64,
+    pub persist_failed: AtomicU64,
+    pub skipped_gate: AtomicU64,
+    pub dropped_backpressure: AtomicU64,
+}
+
+impl ObserveCounters {
+    pub fn snapshot(&self) -> lumen_api::ObserveCountersDto {
+        lumen_api::ObserveCountersDto {
+            persisted: self.persisted.load(Ordering::Relaxed),
+            persist_failed: self.persist_failed.load(Ordering::Relaxed),
+            skipped_gate: self.skipped_gate.load(Ordering::Relaxed),
+            dropped_backpressure: self.dropped_backpressure.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn note_persisted(&self) {
+        self.persisted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_persist_failed(&self) {
+        self.persist_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn sync_capture_stats(&self, skipped_gate: u64, dropped_backpressure: u64) {
+        self.skipped_gate.store(skipped_gate, Ordering::Relaxed);
+        self.dropped_backpressure
+            .store(dropped_backpressure, Ordering::Relaxed);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +106,8 @@ impl ControlState {
         max_blob_bytes: u64,
         sources: Vec<SourceStatus>,
         browser: BrowserRuntimeConfig,
+        counters: Arc<ObserveCounters>,
+        app_blocklist: Vec<String>,
     ) -> Self {
         Self {
             store,
@@ -79,6 +116,8 @@ impl ControlState {
             max_blob_bytes,
             screen_locked: Arc::new(lumen_platform_host::is_screen_locked),
             sources,
+            counters,
+            app_blocklist,
             browser: BrowserRuntimeState {
                 enabled: browser.enabled,
                 token: browser.token,
@@ -808,6 +847,25 @@ async fn handle_control(
             st.closed_eyes.store(enabled, Ordering::Relaxed);
             Ok(ControlResponse::Ack)
         }
+        ControlRequest::GetSettings => {
+            Ok(ControlResponse::Settings(lumen_api::ObserveSettingsDto {
+                paused: st.paused.load(Ordering::Relaxed),
+                closed_eyes: st.closed_eyes.load(Ordering::Relaxed),
+                app_blocklist: st.app_blocklist.clone(),
+                sources: lumen_api::ObserveSourcesDto {
+                    screen: st.sources.iter().any(|s| s.id == "screen" && s.enabled),
+                    audio: st.sources.iter().any(|s| s.id == "audio" && s.enabled),
+                    browser: st.browser.enabled,
+                },
+            }))
+        }
+        ControlRequest::RecentContext { limit } => {
+            let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let mut slots = st.store.list_history_slots(&day)?;
+            let keep = limit.unwrap_or(12).clamp(1, 48);
+            slots.truncate(keep);
+            Ok(ControlResponse::RecentContext { slots })
+        }
         ControlRequest::Permissions => Ok(ControlResponse::Error {
             message: "permissions probe not exposed on HTTP yet".into(),
         }),
@@ -831,6 +889,7 @@ async fn build_health(st: &ControlState) -> Result<HealthResponse, anyhow::Error
         stored_events: stored,
         ocr_docs,
         schema_version: SCHEMA_VERSION,
+        observe: Some(st.counters.snapshot()),
         browser: Some(BrowserHealthResponse {
             enabled: st.browser.enabled,
             configured: !st.browser.token.is_empty(),
@@ -936,6 +995,8 @@ mod tests {
                 token: "fixture-browser-token".into(),
                 policy: BrowserIngestPolicy::default(),
             },
+            Arc::new(super::ObserveCounters::default()),
+            vec![],
         );
         // Unit tests must not depend on whether the host desktop happens to be locked.
         state.screen_locked = Arc::new(|| false);
@@ -1153,5 +1214,59 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&body).unwrap()["rejected_artifacts"],
             1
         );
+    }
+
+    #[tokio::test]
+    async fn control_settings_pause_and_recent_context() {
+        let (_dir, state) = state();
+        let app = router(state);
+        let settings = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/control")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"op":"get_settings"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(settings.status(), StatusCode::OK);
+        let body = settings.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ok"], "settings");
+        assert_eq!(v["paused"], false);
+
+        let paused = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/control")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"op":"pause","source":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(paused.status(), StatusCode::OK);
+
+        let ctx = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/control")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"op":"recent_context","limit":3}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ctx.status(), StatusCode::OK);
+        let body = ctx.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ok"], "recent_context");
+        assert!(v["slots"].is_array());
     }
 }

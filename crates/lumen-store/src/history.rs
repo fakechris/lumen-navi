@@ -188,6 +188,26 @@ fn finish_slot(start: DateTime<Utc>, acc: SlotAcc) -> HistorySlotDto {
     }
 }
 
+pub fn history_slot_key(start: DateTime<Utc>) -> String {
+    format!("history.slot.{}", start.to_rfc3339())
+}
+
+/// Overlay a persisted LLM (or failed) narrative onto a freshly folded card.
+/// Deterministic title/body stay unless the stored status is `ready`.
+pub fn overlay_slot_narrative(slot: &mut HistorySlotDto, persisted: &HistorySlotDto) {
+    match persisted.narrative_status.as_str() {
+        "ready" => {
+            slot.title = persisted.title.clone();
+            slot.body = persisted.body.clone();
+            slot.narrative_status = persisted.narrative_status.clone();
+        }
+        "pending" | "failed" => {
+            slot.narrative_status = persisted.narrative_status.clone();
+        }
+        _ => {}
+    }
+}
+
 fn fmt_ms(ms: i64) -> String {
     let secs = (ms / 1000).max(0);
     if secs < 60 {
@@ -289,5 +309,40 @@ mod tests {
             slots[1].slot_start,
             Utc.with_ymd_and_hms(2026, 8, 15, 4, 10, 0).unwrap()
         );
+    }
+
+    #[test]
+    fn overlay_ready_replaces_title_body() {
+        let start = Utc.with_ymd_and_hms(2026, 8, 15, 4, 20, 0).unwrap();
+        let mut slot = fold_history_slots(
+            &[seg("Safari", "com.apple.Safari", "Inbox", start, 10)],
+            Utc,
+        )
+        .remove(0);
+        let mut persisted = slot.clone();
+        persisted.title = "Wrote the PR".into();
+        persisted.body = "Safari for ten minutes on Inbox.".into();
+        persisted.narrative_status = "ready".into();
+        overlay_slot_narrative(&mut slot, &persisted);
+        assert_eq!(slot.title, "Wrote the PR");
+        assert_eq!(slot.body, "Safari for ten minutes on Inbox.");
+        assert_eq!(slot.narrative_status, "ready");
+    }
+
+    #[test]
+    fn overlay_failed_keeps_deterministic_copy() {
+        let start = Utc.with_ymd_and_hms(2026, 8, 15, 4, 20, 0).unwrap();
+        let mut slot = fold_history_slots(
+            &[seg("Safari", "com.apple.Safari", "Inbox", start, 10)],
+            Utc,
+        )
+        .remove(0);
+        let original_title = slot.title.clone();
+        let mut persisted = slot.clone();
+        persisted.title = "ignored".into();
+        persisted.narrative_status = "failed".into();
+        overlay_slot_narrative(&mut slot, &persisted);
+        assert_eq!(slot.title, original_title);
+        assert_eq!(slot.narrative_status, "failed");
     }
 }

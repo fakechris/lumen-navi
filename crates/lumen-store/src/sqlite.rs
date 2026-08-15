@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use lumen_api::{
     ActivitySegmentDto, AppTotal, CategoryTotal, DayRoastSummaryDto, DayRollupDto, DayStatsDto,
-    RangeStatsDto, RoastAppTotal, RoastDomainTotal, RoastHour, RoastInputCounts,
+    HistorySlotDto, RangeStatsDto, RoastAppTotal, RoastDomainTotal, RoastHour, RoastInputCounts,
     RoastSceneTotal, RoastTitleTotal, SceneDayDto,
 };
 use lumen_types::{
@@ -75,6 +75,8 @@ pub struct TimelineItem {
     pub session_id: Option<Uuid>,
     pub app_name: Option<String>,
     pub window_title: Option<String>,
+    /// Why `window_title` is empty (`no_frontmost` / `no_window` / `empty_title`).
+    pub window_title_missing_reason: Option<String>,
     /// From ocr.v1 or transcript.v1 when present.
     pub text_preview: Option<String>,
     pub text_kind: Option<String>,
@@ -1012,6 +1014,23 @@ impl SqliteStore {
         Ok(n > 0)
     }
 
+    /// Mark pending/running jobs of `kind` as skipped (processor unavailable).
+    pub fn skip_pending_jobs(&self, kind: &str, reason: &str) -> Result<usize, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let n = conn
+            .execute(
+                r#"UPDATE jobs
+                   SET status = 'skipped', last_error = ?1, updated_at = ?2
+                   WHERE kind = ?3 AND status IN ('pending', 'running')"#,
+                params![reason, Utc::now().to_rfc3339(), kind],
+            )
+            .map_err(StoreError::db)?;
+        Ok(n)
+    }
+
     pub fn job_counts_by_status(&self, kind: &str) -> Result<Vec<(String, i64)>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let mut stmt = conn
@@ -1191,6 +1210,12 @@ impl SqliteStore {
                     .get("window_title")
                     .or_else(|| payload.get("title"))
                     .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                let window_title_missing_reason = payload
+                    .get("window_title_missing_reason")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
                     .map(|s| s.to_string());
                 by_id.insert(
                     id_s.clone(),
@@ -1202,6 +1227,7 @@ impl SqliteStore {
                         session_id: session_s.and_then(|s| Uuid::parse_str(&s).ok()),
                         app_name,
                         window_title,
+                        window_title_missing_reason,
                         text_preview: None,
                         text_kind: None,
                         media_type: media,
@@ -1642,37 +1668,105 @@ impl SqliteStore {
     }
 
     /// 10-minute History cards for a local day, newest slot first.
-    pub fn list_history_slots(&self, day: &str) -> Result<Vec<lumen_api::HistorySlotDto>, StoreError> {
+    /// Fresh fold of segments, then overlay any persisted slot narrative.
+    pub fn list_history_slots(&self, day: &str) -> Result<Vec<HistorySlotDto>, StoreError> {
         let segs = self.list_activity_segments(day)?;
-        Ok(crate::fold_history_slots(&segs, chrono::Local))
+        let mut slots = crate::fold_history_slots(&segs, chrono::Local);
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        for slot in &mut slots {
+            let key = crate::history_slot_key(slot.slot_start);
+            if let Some(raw) = kv_get(&conn, &key)? {
+                if let Ok(existing) = serde_json::from_str::<HistorySlotDto>(&raw) {
+                    crate::overlay_slot_narrative(slot, &existing);
+                }
+            }
+        }
+        Ok(slots)
     }
 
     /// Persist closed 10-minute cards so agents can read them without
     /// rescanning every activity segment. The open slot is left to the query.
+    /// An existing `ready` narrative is never overwritten by the fold.
     pub fn persist_closed_history_slots(&self) -> Result<usize, StoreError> {
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let slots = self.list_history_slots(&day)?;
+        let segs = self.list_activity_segments(&day)?;
+        let slots = crate::fold_history_slots(&segs, chrono::Local);
         let now = Utc::now();
         let mut wrote = 0usize;
         let conn = self
             .conn
             .lock()
             .map_err(|_| StoreError::Other("lock poisoned".into()))?;
-        for slot in slots {
+        for mut slot in slots {
             if slot.slot_end > now {
                 continue;
             }
-            let key = format!("history.slot.{}", slot.slot_start.to_rfc3339());
-            let value = serde_json::to_string(&slot).map_err(StoreError::json)?;
-            conn.execute(
-                r#"INSERT INTO kv (key, value) VALUES (?1, ?2)
-                   ON CONFLICT(key) DO UPDATE SET value = excluded.value"#,
-                params![key, value],
-            )
-            .map_err(StoreError::db)?;
+            let key = crate::history_slot_key(slot.slot_start);
+            if let Some(raw) = kv_get(&conn, &key)? {
+                if let Ok(existing) = serde_json::from_str::<HistorySlotDto>(&raw) {
+                    crate::overlay_slot_narrative(&mut slot, &existing);
+                }
+            }
+            kv_set(
+                &conn,
+                &key,
+                &serde_json::to_string(&slot).map_err(StoreError::json)?,
+            )?;
             wrote += 1;
         }
         Ok(wrote)
+    }
+
+    /// Closed cards that still need an LLM narrative (`none` or `failed`).
+    pub fn list_closed_slots_needing_narrative(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<HistorySlotDto>, StoreError> {
+        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let now = Utc::now();
+        Ok(self
+            .list_history_slots(&day)?
+            .into_iter()
+            .filter(|s| {
+                s.slot_end <= now
+                    && s.narrative_status != "ready"
+                    && s.narrative_status != "pending"
+            })
+            .take(limit.max(1))
+            .collect())
+    }
+
+    /// Write title/body/status onto an already-persisted History card.
+    pub fn apply_slot_narrative(
+        &self,
+        slot_start: DateTime<Utc>,
+        title: &str,
+        body: &str,
+        status: &str,
+    ) -> Result<(), StoreError> {
+        let key = crate::history_slot_key(slot_start);
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut slot: HistorySlotDto = match kv_get(&conn, &key)? {
+            Some(raw) => serde_json::from_str(&raw).map_err(StoreError::json)?,
+            None => {
+                return Err(StoreError::NotFound(key));
+            }
+        };
+        slot.title = title.to_string();
+        slot.body = body.to_string();
+        slot.narrative_status = status.to_string();
+        kv_set(
+            &conn,
+            &key,
+            &serde_json::to_string(&slot).map_err(StoreError::json)?,
+        )?;
+        Ok(())
     }
 
     /// Aggregated stats for one day — feeds the dashboard's stat cards, hour
@@ -3308,6 +3402,24 @@ fn preview_text(s: &str, max: usize) -> String {
     }
 }
 
+fn kv_get(conn: &Connection, key: &str) -> Result<Option<String>, StoreError> {
+    conn.query_row("SELECT value FROM kv WHERE key = ?1", params![key], |r| {
+        r.get(0)
+    })
+    .optional()
+    .map_err(StoreError::db)
+}
+
+fn kv_set(conn: &Connection, key: &str, value: &str) -> Result<(), StoreError> {
+    conn.execute(
+        r#"INSERT INTO kv (key, value) VALUES (?1, ?2)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value"#,
+        params![key, value],
+    )
+    .map_err(StoreError::db)?;
+    Ok(())
+}
+
 fn insert_event(tx: &rusqlite::Transaction<'_>, event: &SourceEvent) -> Result<(), StoreError> {
     insert_event_with_mode(tx, event, false).map(|_| ())
 }
@@ -4485,6 +4597,59 @@ mod tests {
         assert!(store.list_recent(10).await.unwrap().is_empty());
     }
 
+    #[test]
+    fn skip_pending_jobs_marks_open_rows() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let ev = SourceEvent::new(SourceKind::Screen, event_kind::SCREENSHOT_V1, json!({}));
+        let eid = ev.id;
+        store.append_event(ev).unwrap();
+        store.enqueue_job(eid, "ax_screen").unwrap();
+        let n = store.skip_pending_jobs("ax_screen", "ax_unavailable").unwrap();
+        assert_eq!(n, 1);
+        let jobs = store.list_jobs(10).unwrap();
+        assert_eq!(jobs[0].status, JobStatus::Skipped);
+        assert_eq!(jobs[0].last_error.as_deref(), Some("ax_unavailable"));
+        assert_eq!(store.skip_pending_jobs("ax_screen", "ax_unavailable").unwrap(), 0);
+    }
+
+    #[test]
+    fn persist_closed_history_slots_keeps_ready_narrative() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let start = Utc::now() - chrono::Duration::minutes(25);
+        let end = start + chrono::Duration::minutes(10);
+        store
+            .add_manual_segment(start, end, "Safari", Some("Inbox"), None, None)
+            .unwrap();
+        let wrote = store.persist_closed_history_slots().unwrap();
+        assert!(wrote >= 1);
+        let day = start
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        let listed = store.list_history_slots(&day).unwrap();
+        let slot = listed
+            .iter()
+            .find(|s| s.slot_end <= Utc::now())
+            .cloned()
+            .expect("closed slot");
+        store
+            .apply_slot_narrative(slot.slot_start, "Wrote the PR", "Safari on Inbox.", "ready")
+            .unwrap();
+        store.persist_closed_history_slots().unwrap();
+        let again = store.list_history_slots(&day).unwrap();
+        let kept = again
+            .iter()
+            .find(|s| s.slot_start == slot.slot_start)
+            .unwrap();
+        assert_eq!(kept.title, "Wrote the PR");
+        assert_eq!(kept.body, "Safari on Inbox.");
+        assert_eq!(kept.narrative_status, "ready");
+        let pending = store.list_closed_slots_needing_narrative(8).unwrap();
+        assert!(pending.iter().all(|s| s.slot_start != slot.slot_start));
+    }
+
     #[tokio::test]
     async fn enqueue_job_persists() {
         let dir = tempdir().unwrap();
@@ -4611,6 +4776,33 @@ mod tests {
         let body = store.build_day_summary_body(&Utc::now().format("%Y-%m-%d").to_string());
         assert!(body.is_ok());
         assert!(body.unwrap().contains("Screenshots"));
+    }
+
+    #[tokio::test]
+    async fn list_timeline_surfaces_title_missing_reason() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let event = SourceEvent::new(
+            SourceKind::Screen,
+            event_kind::SCREENSHOT_V1,
+            json!({
+                "app_name": "Safari",
+                "window_title": null,
+                "window_title_missing_reason": "no_window"
+            }),
+        );
+        store.append(vec![event]).await.unwrap();
+        let items = store
+            .list_timeline(TimelineQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(items[0].window_title, None);
+        assert_eq!(
+            items[0].window_title_missing_reason.as_deref(),
+            Some("no_window")
+        );
     }
 
     #[test]
