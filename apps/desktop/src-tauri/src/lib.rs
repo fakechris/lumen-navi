@@ -373,6 +373,7 @@ pub fn run() {
             commands::list_timeline,
             commands::activity_segments,
             commands::activity_scenes,
+            commands::activity_history_slots,
             commands::day_roast_summary,
             commands::roast_day,
             commands::activity_stats,

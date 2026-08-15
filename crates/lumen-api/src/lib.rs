@@ -386,6 +386,36 @@ pub struct RoastHour {
     pub top_app: Option<String>,
 }
 
+/// One 10-minute History card (deterministic fold of activity segments).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistorySlotDto {
+    pub slot_start: DateTime<Utc>,
+    pub slot_end: DateTime<Utc>,
+    pub title: String,
+    pub body: String,
+    pub apps: Vec<HistorySlotAppDto>,
+    pub scenes: Vec<HistorySlotSceneDto>,
+    pub titles: Vec<String>,
+    pub urls: Vec<String>,
+    pub active_ms: i64,
+    #[serde(default)]
+    pub narrative_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistorySlotAppDto {
+    pub app_name: String,
+    pub bundle_id: Option<String>,
+    pub ms: i64,
+    pub pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistorySlotSceneDto {
+    pub label: String,
+    pub ms: i64,
+}
+
 /// Aggregated stats over a date range (e.g. the last 7 days).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RangeStatsDto {

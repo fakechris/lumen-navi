@@ -206,6 +206,10 @@ pub fn router(state: ControlState) -> Router {
         .route("/v1/control", post(post_control))
         .route("/v1/activity/segments", get(get_activity_segments))
         .route("/v1/activity/scenes", get(get_activity_scenes))
+        .route(
+            "/v1/activity/history-slots",
+            get(get_activity_history_slots),
+        )
         .route("/v1/activity/stats", get(get_activity_stats))
         .route("/v1/activity/range", get(get_activity_range))
         .route(
@@ -568,6 +572,22 @@ async fn get_activity_segments(
 ) -> impl IntoResponse {
     match st.store.list_activity_segments(&q.day) {
         Ok(segments) => (StatusCode::OK, Json(segments)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ControlResponse::Error {
+                message: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_activity_history_slots(
+    State(st): State<ControlState>,
+    Query(q): Query<ActivityDayQuery>,
+) -> impl IntoResponse {
+    match st.store.list_history_slots(&q.day) {
+        Ok(slots) => (StatusCode::OK, Json(slots)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ControlResponse::Error {

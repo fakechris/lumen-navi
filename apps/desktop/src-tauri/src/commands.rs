@@ -488,6 +488,14 @@ pub fn activity_scenes(state: State<'_, AppState>, day: String) -> Result<lumen_
 }
 
 #[tauri::command]
+pub fn activity_history_slots(
+    state: State<'_, AppState>,
+    day: String,
+) -> Result<Vec<lumen_api::HistorySlotDto>, String> {
+    state.store.list_history_slots(&day).map_err(err)
+}
+
+#[tauri::command]
 pub fn day_roast_summary(
     state: State<'_, AppState>,
     day: String,

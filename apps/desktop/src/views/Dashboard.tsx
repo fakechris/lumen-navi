@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as d3 from "d3";
 import { api } from "../api";
 import { Button, Card, EmptyState, IconButton, Input, Select, StatCard } from "../design";
-import type { CategoryRule, MatchField, ProductivityLevel, ActivitySegment, DayStats, SceneDay } from "../types";
+import type { CategoryRule, MatchField, ProductivityLevel, ActivitySegment, DayStats, SceneDay, HistorySlot } from "../types";
 import { WeeklyView } from "./WeeklyView";
 
 // --- helpers --------------------------------------------------------------
@@ -101,19 +101,22 @@ export function DashboardView() {
   // Only affects the top-apps ranking, not the timeline/categories.
   const [groupBy, setGroupBy] = useState<"app" | "site" | "scene">("app");
   const [scenes, setScenes] = useState<SceneDay | null>(null);
+  const [slots, setSlots] = useState<HistorySlot[] | null>(null);
   // Calendar popover open state for the day picker.
   const [calendarOpen, setCalendarOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [segs, st, sc] = await Promise.all([
+      const [segs, st, sc, sl] = await Promise.all([
         api.activitySegments(day),
         api.activityStats(day, groupBy === "scene" ? "app" : groupBy),
         api.activityScenes(day),
+        api.activityHistorySlots(day),
       ]);
       setSegments(segs);
       setStats(st);
       setScenes(sc);
+      setSlots(sl);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -228,6 +231,16 @@ export function DashboardView() {
               }
             />
           </div>
+
+          {slots && slots.length > 0 && (
+            <Card pad={16}>
+              <SectionHeader
+                title="今日回顾"
+                subtitle="每 10 分钟一张 · 按时长记 app，不是按按键次数"
+              />
+              <HistorySlotList slots={slots} />
+            </Card>
+          )}
 
           {/* Category rules manager */}
           <CategoryRulesManager onRulesChanged={load} />
@@ -822,6 +835,72 @@ function HourDistribution({ stats }: { stats: DayStats }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {slots.map((slot) => (
+        <div
+          key={slot.slot_start}
+          style={{
+            paddingBottom: 14,
+            borderBottom: "1px solid var(--border)",
+          }}
+        >
+          <div
+            style={{
+              fontSize: "var(--text-xs)",
+              color: "var(--text-tertiary)",
+              fontFamily: "var(--font-mono)",
+              marginBottom: 4,
+            }}
+          >
+            {fmtClock(slot.slot_start)}
+          </div>
+          <div
+            style={{
+              fontSize: "var(--text-sm)",
+              fontWeight: "var(--weight-semibold)",
+              marginBottom: 4,
+            }}
+          >
+            {slot.title}
+          </div>
+          {slot.body && (
+            <div
+              style={{
+                fontSize: "var(--text-sm)",
+                color: "var(--text-secondary)",
+                lineHeight: 1.45,
+                marginBottom: 8,
+              }}
+            >
+              {slot.body}
+            </div>
+          )}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {slot.apps.map((app) => (
+              <span
+                key={`${app.bundle_id ?? app.app_name}`}
+                style={{
+                  fontSize: "var(--text-xs)",
+                  padding: "2px 8px",
+                  borderRadius: 999,
+                  border: "1px solid var(--border)",
+                  color: "var(--text-secondary)",
+                  background: "var(--surface-elevated, var(--surface))",
+                }}
+                title={fmtDuration(app.ms)}
+              >
+                {app.app_name}
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

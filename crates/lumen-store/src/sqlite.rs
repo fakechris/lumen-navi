@@ -1641,6 +1641,12 @@ impl SqliteStore {
         Ok(crate::scene::fold_scene_day(day, &segs))
     }
 
+    /// 10-minute History cards for a local day, newest slot first.
+    pub fn list_history_slots(&self, day: &str) -> Result<Vec<lumen_api::HistorySlotDto>, StoreError> {
+        let segs = self.list_activity_segments(day)?;
+        Ok(crate::fold_history_slots(&segs, chrono::Local))
+    }
+
     /// Aggregated stats for one day — feeds the dashboard's stat cards, hour
     /// distribution chart, category breakdown, and top-apps ranking.
     pub fn activity_day_stats(

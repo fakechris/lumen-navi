@@ -31,6 +31,31 @@ export interface SceneDay {
   rollups: SceneRollup[];
 }
 
+export interface HistorySlotApp {
+  app_name: string;
+  bundle_id: string | null;
+  ms: number;
+  pct: number;
+}
+
+export interface HistorySlotScene {
+  label: string;
+  ms: number;
+}
+
+export interface HistorySlot {
+  slot_start: string;
+  slot_end: string;
+  title: string;
+  body: string;
+  apps: HistorySlotApp[];
+  scenes: HistorySlotScene[];
+  titles: string[];
+  urls: string[];
+  active_ms: number;
+  narrative_status?: string;
+}
+
 export interface ActivitySegment {
   seg_id: string;
   day: string;
