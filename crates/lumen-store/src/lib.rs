@@ -7,6 +7,7 @@ mod blob;
 mod categorization;
 mod enrichment;
 mod history;
+mod pixel_hash;
 mod rule_engine;
 mod scene;
 mod schema;
@@ -32,6 +33,7 @@ use uuid::Uuid;
 
 pub use blob::BlobStore;
 pub use history::{fold_history_slots, history_slot_key, overlay_slot_narrative};
+pub use pixel_hash::PixelHashWindow;
 pub use scene::fold_scene_day;
 pub use schema::SCHEMA_VERSION;
 pub use sqlite::{

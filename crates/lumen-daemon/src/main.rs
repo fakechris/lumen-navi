@@ -18,7 +18,7 @@ use lumen_asr_engine::{
     build_engine, probe_status, samples_to_wav_mono_i16, AsrEngine, AsrEngineId, AsrError,
     AsrRequest, AsrResult, EngineBuildConfig, EngineKind,
 };
-use lumen_config::{AsrConfig, AudioConfig, Config, PrivacyConfig};
+use lumen_config::{AsrConfig, AudioConfig, Config, PolicyGate, PrivacyConfig};
 use lumen_cua::{CuaCaptureAdapter, CuaClient};
 use lumen_platform::{DisplayEnumerator, MicOpenConfig, PlatformError, ScreenCapturer};
 use lumen_platform_host as host;
@@ -35,7 +35,9 @@ use lumen_sources_media::{
     CaptureOrchestrator, CapturedBatch, InteractionCoalescer, InteractionContext,
     SessionTransition, SharedSessionBinder,
 };
-use lumen_store::{EventStore, ReclaimKind, RecoveryPolicy, SqliteStore, SCHEMA_VERSION};
+use lumen_store::{
+    EventStore, PixelHashWindow, ReclaimKind, RecoveryPolicy, SqliteStore, SCHEMA_VERSION,
+};
 use lumen_types::{event_kind, SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
@@ -161,8 +163,22 @@ fn persist_session_transition(
     );
 }
 
-fn observe_hard_gated(paused: bool, closed_eyes: bool, locked: bool) -> bool {
-    paused || closed_eyes || locked
+fn observe_policy_gate(
+    paused: bool,
+    closed_eyes: bool,
+    locked: bool,
+    privacy: &PrivacyConfig,
+    bundle_id: Option<&str>,
+    frontmost_known: bool,
+) -> PolicyGate {
+    PolicyGate::evaluate(
+        paused,
+        closed_eyes,
+        locked,
+        privacy,
+        bundle_id,
+        frontmost_known,
+    )
 }
 
 /// Open a session only when none exists. App switches stay with the activity
@@ -227,7 +243,7 @@ fn start_macos_input_loop(
             let stats_on = config.input.enabled;
             let observe_on = config.input.observe_interactions;
             let record_text = config.input.record_text;
-            let blocklist = config.privacy.app_blocklist.clone();
+            let privacy = config.privacy.clone();
             let observe_paused = Arc::clone(observe_paused);
             let observe_closed_eyes = Arc::clone(observe_closed_eyes);
             let session_binder = Arc::clone(session_binder);
@@ -251,14 +267,17 @@ fn start_macos_input_loop(
                             let paused = observe_paused.load(Ordering::Relaxed);
                             let closed_eyes = observe_closed_eyes.load(Ordering::Relaxed);
                             let locked = host::is_screen_locked();
-                            if observe_hard_gated(paused, closed_eyes, locked) {
-                                lumen_platform_macos::input_reset(state);
-                                continue;
-                            }
                             let frontmost = front.frontmost().await.ok().flatten();
-                            if blocklist.iter().any(|b| {
-                                frontmost.as_ref().and_then(|f| f.bundle_id.as_deref()) == Some(b.as_str())
-                            }) {
+                            if !observe_policy_gate(
+                                paused,
+                                closed_eyes,
+                                locked,
+                                &privacy,
+                                frontmost.as_ref().and_then(|f| f.bundle_id.as_deref()),
+                                frontmost.is_some(),
+                            )
+                            .allows()
+                            {
                                 lumen_platform_macos::input_reset(state);
                                 continue;
                             }
@@ -281,7 +300,18 @@ fn start_macos_input_loop(
                             let paused = observe_paused.load(Ordering::Relaxed);
                             let closed_eyes = observe_closed_eyes.load(Ordering::Relaxed);
                             let locked = host::is_screen_locked();
-                            if !observe_on || observe_hard_gated(paused, closed_eyes, locked) {
+                            let frontmost = front.frontmost().await.ok().flatten();
+                            if !observe_on
+                                || !observe_policy_gate(
+                                    paused,
+                                    closed_eyes,
+                                    locked,
+                                    &privacy,
+                                    frontmost.as_ref().and_then(|f| f.bundle_id.as_deref()),
+                                    frontmost.is_some(),
+                                )
+                                .allows()
+                            {
                                 let _ = lumen_platform_macos::input_drain_hid(state);
                                 lumen_platform_macos::input_reset(state);
                                 coal.discard_text();
@@ -298,13 +328,6 @@ fn start_macos_input_loop(
                                 } else {
                                     coal.discard_text();
                                 }
-                                continue;
-                            }
-                            let frontmost = front.frontmost().await.ok().flatten();
-                            if blocklist.iter().any(|b| {
-                                frontmost.as_ref().and_then(|f| f.bundle_id.as_deref()) == Some(b.as_str())
-                            }) {
-                                coal.discard_text();
                                 continue;
                             }
                             let _persist = session_persist.lock().await;
@@ -1096,6 +1119,7 @@ async fn main() -> Result<()> {
         let ax_on = config.ax.enabled;
         let persist_counters = Arc::clone(&observe_counters);
         let persist = tokio::spawn(async move {
+            let mut ocr_hashes = PixelHashWindow::default();
             while let Some(batch) = rx.recv().await {
                 let mut upserts = Vec::new();
                 if let Some(closed) = batch.closed_session {
@@ -1115,6 +1139,11 @@ async fn main() -> Result<()> {
                     }
                 }
                 for (event, frame) in batch.frames {
+                    let pixel_hash = event
+                        .payload
+                        .get("pixel_hash")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
                     match store_w.put_and_append(
                         event,
                         frame.media_type.clone(),
@@ -1124,10 +1153,21 @@ async fn main() -> Result<()> {
                             note_write();
                             persist_counters.note_persisted();
                             if ocr_on {
-                                match store_w.enqueue_job(stored.id, "ocr_screen") {
-                                    Ok(Some(_)) => {}
-                                    Ok(None) => debug_skip_dup_ocr(),
-                                    Err(e) => warn!(error = %e, "enqueue ocr_screen failed"),
+                                let skip_dup_hash = pixel_hash
+                                    .as_deref()
+                                    .is_some_and(|h| ocr_hashes.contains(h));
+                                if skip_dup_hash {
+                                    debug_skip_dup_ocr();
+                                } else {
+                                    match store_w.enqueue_job(stored.id, "ocr_screen") {
+                                        Ok(Some(_)) => {
+                                            if let Some(h) = pixel_hash.as_deref() {
+                                                ocr_hashes.insert(h);
+                                            }
+                                        }
+                                        Ok(None) => debug_skip_dup_ocr(),
+                                        Err(e) => warn!(error = %e, "enqueue ocr_screen failed"),
+                                    }
                                 }
                             }
                             if ax_on {
@@ -1786,11 +1826,31 @@ mod tests {
     }
 
     #[test]
-    fn hard_gates_cover_pause_closed_eyes_and_lock() {
-        assert!(!observe_hard_gated(false, false, false));
-        assert!(observe_hard_gated(true, false, false));
-        assert!(observe_hard_gated(false, true, false));
-        assert!(observe_hard_gated(false, false, true));
+    fn hid_writes_use_the_same_policy_gate_as_screenshots() {
+        let privacy = PrivacyConfig::default();
+        assert!(observe_policy_gate(false, false, false, &privacy, Some("a.b"), true).allows());
+        assert_eq!(
+            observe_policy_gate(true, false, false, &privacy, Some("a.b"), true),
+            PolicyGate::Paused
+        );
+        assert_eq!(
+            observe_policy_gate(false, true, false, &privacy, Some("a.b"), true),
+            PolicyGate::ClosedEyes
+        );
+        assert_eq!(
+            observe_policy_gate(false, false, true, &privacy, Some("a.b"), true),
+            PolicyGate::Locked
+        );
+        let mut blocked = PrivacyConfig::default();
+        blocked.app_blocklist = vec!["com.secret".into()];
+        assert_eq!(
+            observe_policy_gate(false, false, false, &blocked, None, false),
+            PolicyGate::FrontmostUnknown
+        );
+        assert_eq!(
+            observe_policy_gate(false, false, false, &blocked, Some("com.secret"), true),
+            PolicyGate::AppBlocklist
+        );
     }
 
     #[test]

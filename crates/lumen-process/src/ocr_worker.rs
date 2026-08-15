@@ -144,6 +144,13 @@ impl OcrWorker {
     /// Process one batch. Returns jobs claimed.
     pub async fn tick_once(&self) -> Result<usize, String> {
         if !self.engine.is_supported() {
+            let n = self
+                .store
+                .skip_pending_jobs(JOB_KIND_OCR_SCREEN, "ocr_unavailable")
+                .map_err(|e| e.to_string())?;
+            if n > 0 {
+                warn!(count = n, "skipped ocr_screen jobs; engine unavailable");
+            }
             return Ok(0);
         }
         let _ = self.reclaim_stale();
@@ -176,6 +183,13 @@ impl OcrWorker {
             Err(e) => {
                 let permanent = e.permanent;
                 let msg = e.message;
+                if ocr_unavailable(&msg) {
+                    let _ = self
+                        .store
+                        .complete_job(job.id, JobStatus::Skipped, Some(&msg));
+                    warn!(event = %job.event_id, error = %msg, "ocr_screen skipped (unavailable)");
+                    return;
+                }
                 if e.timeout {
                     self.timed_out.fetch_add(1, Ordering::Relaxed);
                 }
@@ -188,16 +202,11 @@ impl OcrWorker {
                         error = %msg,
                         "ocr job dead"
                     );
-                    let _ = self
-                        .store
-                        .complete_job(job.id, JobStatus::Dead, Some(&msg));
+                    let _ = self.store.complete_job(job.id, JobStatus::Dead, Some(&msg));
                 } else {
                     self.failed.fetch_add(1, Ordering::Relaxed);
-                    let backoff = retry_delay(
-                        job.attempts,
-                        self.config.retry_base,
-                        self.config.retry_max,
-                    );
+                    let backoff =
+                        retry_delay(job.attempts, self.config.retry_base, self.config.retry_max);
                     let available = Utc::now()
                         + ChronoDuration::from_std(backoff)
                             .unwrap_or_else(|_| ChronoDuration::seconds(2));
@@ -248,9 +257,7 @@ impl OcrWorker {
             )));
         }
 
-        let mut result = self
-            .run_engine_text(&bytes)
-            .await?;
+        let mut result = self.run_engine_text(&bytes).await?;
 
         let need_boxes = self.config.include_boxes
             && (!self.config.boxes_when_empty_only || result.text.trim().is_empty());
@@ -301,9 +308,7 @@ impl OcrWorker {
     }
 
     async fn run_engine_text(&self, bytes: &[u8]) -> Result<OcrResult, JobError> {
-        let fut = self
-            .engine
-            .recognize_text(bytes, &self.config.languages);
+        let fut = self.engine.recognize_text(bytes, &self.config.languages);
         match tokio::time::timeout(self.config.engine_timeout, fut).await {
             Ok(Ok(r)) => Ok(r),
             Ok(Err(e)) => Err(classify_platform_err(e)),
@@ -319,9 +324,7 @@ impl OcrWorker {
     }
 
     async fn run_engine_boxes(&self, bytes: &[u8]) -> Result<OcrResult, JobError> {
-        let fut = self
-            .engine
-            .recognize_boxes(bytes, &self.config.languages);
+        let fut = self.engine.recognize_boxes(bytes, &self.config.languages);
         match tokio::time::timeout(self.config.engine_timeout, fut).await {
             Ok(Ok(r)) => Ok(r),
             Ok(Err(e)) => Err(classify_platform_err(e)),
@@ -424,6 +427,15 @@ impl JobError {
     }
 }
 
+fn ocr_unavailable(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("ocr_unavailable")
+        || lower.contains("engine unavailable")
+        || lower.contains("not connected")
+        || lower.contains("connection refused")
+        || lower.contains("broken pipe")
+}
+
 fn classify_platform_err(e: PlatformError) -> JobError {
     let msg = e.to_string();
     let lower = msg.to_lowercase();
@@ -479,12 +491,13 @@ mod tests {
         calls: AtomicUsize,
         text: Mutex<String>,
         fail_times: AtomicUsize,
+        supported: bool,
     }
 
     #[async_trait]
     impl OcrEngine for FakeEngine {
         fn is_supported(&self) -> bool {
-            true
+            self.supported
         }
         async fn recognize_text(
             &self,
@@ -534,9 +547,7 @@ mod tests {
             json!({"reason": "test"}),
         );
         let id = event.id;
-        store
-            .put_and_append(event, "image/jpeg", bytes)
-            .unwrap();
+        store.put_and_append(event, "image/jpeg", bytes).unwrap();
         id
     }
 
@@ -545,22 +556,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
         let eid = seed_event(&store, b"jpeg-bytes").await;
-        assert!(store.enqueue_job(eid, JOB_KIND_OCR_SCREEN).unwrap().is_some());
+        assert!(store
+            .enqueue_job(eid, JOB_KIND_OCR_SCREEN)
+            .unwrap()
+            .is_some());
         let engine = Arc::new(FakeEngine {
             calls: AtomicUsize::new(0),
             text: Mutex::new("hello\nworld".into()),
             fail_times: AtomicUsize::new(0),
+            supported: true,
         });
-        let worker = OcrWorker::new(store.clone(), engine, OcrWorkerConfig {
-            include_boxes: false,
-            ..OcrWorkerConfig::default()
-        });
+        let worker = OcrWorker::new(
+            store.clone(),
+            engine,
+            OcrWorkerConfig {
+                include_boxes: false,
+                ..OcrWorkerConfig::default()
+            },
+        );
         assert_eq!(worker.tick_once().await.unwrap(), 1);
         assert!(store.has_derived(eid, DERIVED_OCR_V1).unwrap());
         let st = worker.stats();
         assert_eq!(st.succeeded, 1);
         // second enqueue while done allowed; processing skips to AlreadyDone
-        assert!(store.enqueue_job(eid, JOB_KIND_OCR_SCREEN).unwrap().is_some());
+        assert!(store
+            .enqueue_job(eid, JOB_KIND_OCR_SCREEN)
+            .unwrap()
+            .is_some());
         assert_eq!(worker.tick_once().await.unwrap(), 1);
         assert_eq!(worker.stats().skipped_existing, 1);
     }
@@ -575,6 +597,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             text: Mutex::new("ok".into()),
             fail_times: AtomicUsize::new(1),
+            supported: true,
         });
         let worker = OcrWorker::new(
             store.clone(),
@@ -609,6 +632,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             text: Mutex::new("x".into()),
             fail_times: AtomicUsize::new(0),
+            supported: true,
         });
         let worker = OcrWorker::new(
             store.clone(),
@@ -622,5 +646,32 @@ mod tests {
         worker.tick_once().await.unwrap();
         let jobs = store.list_jobs(5).unwrap();
         assert_eq!(jobs[0].status, JobStatus::Dead);
+    }
+
+    #[tokio::test]
+    async fn unsupported_engine_skips_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
+        let eid = seed_event(&store, b"x").await;
+        store.enqueue_job(eid, JOB_KIND_OCR_SCREEN).unwrap();
+        let engine = Arc::new(FakeEngine {
+            calls: AtomicUsize::new(0),
+            text: Mutex::new("x".into()),
+            fail_times: AtomicUsize::new(0),
+            supported: false,
+        });
+        let worker = OcrWorker::new(store.clone(), engine, OcrWorkerConfig::default());
+        assert_eq!(worker.tick_once().await.unwrap(), 0);
+        let jobs = store.list_jobs(5).unwrap();
+        assert_eq!(jobs[0].status, JobStatus::Skipped);
+        assert_eq!(jobs[0].last_error.as_deref(), Some("ocr_unavailable"));
+    }
+
+    #[test]
+    fn ocr_unavailable_matches_engine_down() {
+        assert!(ocr_unavailable("engine unavailable"));
+        assert!(ocr_unavailable("connection refused"));
+        assert!(!ocr_unavailable("decode failed"));
+        assert!(!ocr_unavailable("empty image"));
     }
 }

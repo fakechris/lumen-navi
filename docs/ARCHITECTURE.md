@@ -263,7 +263,7 @@ Derived: `ocr.v1` (screen text), `transcript.v1` (audio text) — both feed FTS 
 
 ### PolicyGate (before store)
 
-1. Global pause → 2. Source disabled → 3. App deny-list → 4. Disk budget → 5. Cheap dedup (`pixel_hash` window)
+Screenshot **and** HID writes use the same order: pause → closed_eyes → lock → unknown frontmost (if a blocklist exists) → app blocklist. Disk budget still applies at persist. Same `pixel_hash` skips a second OCR enqueue (capture itself still uses the visual probe / dHash window).
 
 ### Local API (minimal)
 

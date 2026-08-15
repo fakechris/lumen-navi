@@ -75,6 +75,8 @@ pub struct TimelineItem {
     pub session_id: Option<Uuid>,
     pub app_name: Option<String>,
     pub window_title: Option<String>,
+    /// Why `window_title` is empty (`no_frontmost` / `no_window` / `empty_title`).
+    pub window_title_missing_reason: Option<String>,
     /// From ocr.v1 or transcript.v1 when present.
     pub text_preview: Option<String>,
     pub text_kind: Option<String>,
@@ -1208,6 +1210,12 @@ impl SqliteStore {
                     .get("window_title")
                     .or_else(|| payload.get("title"))
                     .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                let window_title_missing_reason = payload
+                    .get("window_title_missing_reason")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
                     .map(|s| s.to_string());
                 by_id.insert(
                     id_s.clone(),
@@ -1219,6 +1227,7 @@ impl SqliteStore {
                         session_id: session_s.and_then(|s| Uuid::parse_str(&s).ok()),
                         app_name,
                         window_title,
+                        window_title_missing_reason,
                         text_preview: None,
                         text_kind: None,
                         media_type: media,
@@ -4767,6 +4776,33 @@ mod tests {
         let body = store.build_day_summary_body(&Utc::now().format("%Y-%m-%d").to_string());
         assert!(body.is_ok());
         assert!(body.unwrap().contains("Screenshots"));
+    }
+
+    #[tokio::test]
+    async fn list_timeline_surfaces_title_missing_reason() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let event = SourceEvent::new(
+            SourceKind::Screen,
+            event_kind::SCREENSHOT_V1,
+            json!({
+                "app_name": "Safari",
+                "window_title": null,
+                "window_title_missing_reason": "no_window"
+            }),
+        );
+        store.append(vec![event]).await.unwrap();
+        let items = store
+            .list_timeline(TimelineQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(items[0].window_title, None);
+        assert_eq!(
+            items[0].window_title_missing_reason.as_deref(),
+            Some("no_window")
+        );
     }
 
     #[test]
