@@ -11,9 +11,12 @@
 //! Requires Input Monitoring TCC (System Settings → Privacy → Input Monitoring).
 //! Default off; opt-in via config `[input] enabled = true`.
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
+
+use lumen_platform::{ObserveHidEvent, ObserveHidKind};
 
 /// Aggregated counters — the payload for input.stats.v1 events.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -26,15 +29,15 @@ pub struct InputCounts {
     pub key_arrow: u64,
     pub key_space: u64,
     // Shortcut combos (modifier + key class).
-    pub combo_copy: u64,    // Cmd/Ctrl + C
-    pub combo_paste: u64,   // Cmd/Ctrl + V
-    pub combo_cut: u64,     // Cmd/Ctrl + X
-    pub combo_undo: u64,    // Cmd/Ctrl + Z
+    pub combo_copy: u64,      // Cmd/Ctrl + C
+    pub combo_paste: u64,     // Cmd/Ctrl + V
+    pub combo_cut: u64,       // Cmd/Ctrl + X
+    pub combo_undo: u64,      // Cmd/Ctrl + Z
     pub combo_selectall: u64, // Cmd/Ctrl + A
-    pub combo_find: u64,    // Cmd/Ctrl + F
-    pub combo_close: u64,   // Cmd/Ctrl + W
-    pub combo_new: u64,     // Cmd/Ctrl + N
-    pub combo_save: u64,    // Cmd/Ctrl + S
+    pub combo_find: u64,      // Cmd/Ctrl + F
+    pub combo_close: u64,     // Cmd/Ctrl + W
+    pub combo_new: u64,       // Cmd/Ctrl + N
+    pub combo_save: u64,      // Cmd/Ctrl + S
     // Mouse.
     pub mouse_left: u64,
     pub mouse_right: u64,
@@ -48,6 +51,7 @@ pub struct InputCounterState {
     pub last_app: Mutex<String>,
     /// Total events seen (for diagnostics).
     pub events_seen: AtomicU64,
+    pending: Mutex<VecDeque<ObserveHidEvent>>,
 }
 
 impl Default for InputCounterState {
@@ -56,6 +60,7 @@ impl Default for InputCounterState {
             counts: Mutex::new(InputCounts::default()),
             last_app: Mutex::new(String::new()),
             events_seen: AtomicU64::new(0),
+            pending: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -92,21 +97,40 @@ const K_CG_EVENT_MOUSE_STATE: usize = 1; // kCGMouseEventButtonNumber
 const K_CG_EVENT_SOURCE_STATE_ID: usize = 36; // kCGEventSourceUnixProcessID (unused, we use our own)
 
 // CGEventFlags.
-const FLAG_CMD: u64 = 1 << 20;     // kCGEventFlagMaskCommand
-const FLAG_CTRL: u64 = 1 << 12;    // kCGEventFlagMaskControl
+const FLAG_CMD: u64 = 1 << 20; // kCGEventFlagMaskCommand
+const FLAG_CTRL: u64 = 1 << 12; // kCGEventFlagMaskControl
+const FLAG_SHIFT: u64 = 1 << 17;
+const FLAG_OPTION: u64 = 1 << 19;
 
 // CGEventTypes.
 const TYPE_LEFT_MOUSE_DOWN: u32 = 1;
+const TYPE_LEFT_MOUSE_UP: u32 = 2;
 const TYPE_RIGHT_MOUSE_DOWN: u32 = 3;
+const TYPE_RIGHT_MOUSE_UP: u32 = 4;
 const TYPE_OTHER_MOUSE_DOWN: u32 = 25;
+const TYPE_OTHER_MOUSE_UP: u32 = 26;
 const TYPE_KEY_DOWN: u32 = 10;
+const K_CG_EVENT_CLICK_STATE: usize = 1;
+
+#[repr(C)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
+    fn CGEventGetLocation(event: *const c_void) -> CGPoint;
+    fn CGEventKeyboardGetUnicodeString(
+        event: *const c_void,
+        max_len: usize,
+        actual: *mut usize,
+        buffer: *mut u16,
+    );
     fn CGEventTapCreate(
-        location: *const c_void,   // kCGSessionEventTap
-        placement: i32,            // kCGHeadInsertEventTap = 1
-        options: i32,              // kCGEventTapOptionListenOnly = 1
+        location: *const c_void, // kCGSessionEventTap
+        placement: i32,          // kCGHeadInsertEventTap = 1
+        options: i32,            // kCGEventTapOptionListenOnly = 1
         event_mask: u64,
         callback: unsafe extern "C" fn(
             proxy: *const c_void,
@@ -123,11 +147,39 @@ extern "C" {
     fn CFRunLoopStop(rl: *const c_void);
     fn CGEventGetIntegerValueField(event: *const c_void, field: usize) -> i64;
     fn CGEventGetFlags(event: *const c_void) -> u64;
-    fn CFMachPortCreateRunLoopSource(alloc: *const c_void, port: *const c_void, order: i32) -> *const c_void;
+    fn CFMachPortCreateRunLoopSource(
+        alloc: *const c_void,
+        port: *const c_void,
+        order: i32,
+    ) -> *const c_void;
 }
 
 static STOP_FLAG: AtomicU64 = AtomicU64::new(0);
 static mut COUNTER: Option<&'static InputCounterState> = None;
+static TAP_PORT: AtomicUsize = AtomicUsize::new(0);
+static TAP_REENABLES: AtomicU64 = AtomicU64::new(0);
+
+/// kCGEventTapDisabledByTimeout
+const TYPE_TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
+/// kCGEventTapDisabledByUserInput
+const TYPE_TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFF_FFFF;
+
+pub fn tap_should_reenable(etype: u32) -> bool {
+    etype == TYPE_TAP_DISABLED_BY_TIMEOUT || etype == TYPE_TAP_DISABLED_BY_USER_INPUT
+}
+
+pub fn tap_reenable_count() -> u64 {
+    TAP_REENABLES.load(Ordering::Relaxed)
+}
+
+fn reenable_input_tap() {
+    let tap = TAP_PORT.load(Ordering::Relaxed) as *const c_void;
+    if tap.is_null() {
+        return;
+    }
+    unsafe { CGEventTapEnable(tap, true) };
+    TAP_REENABLES.fetch_add(1, Ordering::Relaxed);
+}
 
 /// The event tap callback. Updates counters in-place. Must be fast (no I/O).
 unsafe extern "C" fn tap_callback(
@@ -136,6 +188,10 @@ unsafe extern "C" fn tap_callback(
     event: *const c_void,
     _userinfo: *mut c_void,
 ) -> *const c_void {
+    if tap_should_reenable(etype) {
+        reenable_input_tap();
+        return event;
+    }
     let counter = match { COUNTER } {
         Some(c) => c,
         None => return event,
@@ -170,16 +226,38 @@ unsafe extern "C" fn tap_callback(
                         keycode::TAB => c.key_tab += 1,
                         keycode::ESCAPE => c.key_esc += 1,
                         keycode::RETURN | keycode::ENTER => c.key_enter += 1,
-                        keycode::ARROW_LEFT | keycode::ARROW_RIGHT
-                        | keycode::ARROW_UP | keycode::ARROW_DOWN => c.key_arrow += 1,
+                        keycode::ARROW_LEFT
+                        | keycode::ARROW_RIGHT
+                        | keycode::ARROW_UP
+                        | keycode::ARROW_DOWN => c.key_arrow += 1,
                         keycode::SPACE => c.key_space += 1,
                         _ => {} // All other bare keys: ignored.
                     }
                 }
             }
+            enqueue_hid(
+                counter,
+                ObserveHidEvent {
+                    kind: ObserveHidKind::KeyDown,
+                    keycode: code,
+                    unicode: unicode_from_event(event),
+                    command: (flags & FLAG_CMD) != 0,
+                    control: (flags & FLAG_CTRL) != 0,
+                    shift: (flags & FLAG_SHIFT) != 0,
+                    option: (flags & FLAG_OPTION) != 0,
+                    button: 0,
+                    x: 0.0,
+                    y: 0.0,
+                    click_count: 1,
+                },
+            );
         }
         TYPE_LEFT_MOUSE_DOWN | TYPE_RIGHT_MOUSE_DOWN | TYPE_OTHER_MOUSE_DOWN => {
-            let button = CGEventGetIntegerValueField(event, K_CG_EVENT_MOUSE_STATE);
+            let button = match etype {
+                TYPE_LEFT_MOUSE_DOWN => 0,
+                TYPE_RIGHT_MOUSE_DOWN => 1,
+                _ => 2,
+            };
             if let Ok(mut c) = counter.counts.lock() {
                 match button {
                     0 => c.mouse_left += 1,
@@ -187,6 +265,50 @@ unsafe extern "C" fn tap_callback(
                     _ => c.mouse_other += 1,
                 }
             }
+            let loc = CGEventGetLocation(event);
+            let clicks = CGEventGetIntegerValueField(event, K_CG_EVENT_CLICK_STATE).max(1) as u32;
+            let flags = CGEventGetFlags(event);
+            enqueue_hid(
+                counter,
+                ObserveHidEvent {
+                    kind: ObserveHidKind::MouseDown,
+                    keycode: 0,
+                    unicode: None,
+                    command: (flags & FLAG_CMD) != 0,
+                    control: (flags & FLAG_CTRL) != 0,
+                    shift: (flags & FLAG_SHIFT) != 0,
+                    option: (flags & FLAG_OPTION) != 0,
+                    button,
+                    x: loc.x,
+                    y: loc.y,
+                    click_count: clicks,
+                },
+            );
+        }
+        TYPE_LEFT_MOUSE_UP | TYPE_RIGHT_MOUSE_UP | TYPE_OTHER_MOUSE_UP => {
+            let button = match etype {
+                TYPE_LEFT_MOUSE_UP => 0,
+                TYPE_RIGHT_MOUSE_UP => 1,
+                _ => 2,
+            };
+            let loc = CGEventGetLocation(event);
+            let flags = CGEventGetFlags(event);
+            enqueue_hid(
+                counter,
+                ObserveHidEvent {
+                    kind: ObserveHidKind::MouseUp,
+                    keycode: 0,
+                    unicode: None,
+                    command: (flags & FLAG_CMD) != 0,
+                    control: (flags & FLAG_CTRL) != 0,
+                    shift: (flags & FLAG_SHIFT) != 0,
+                    option: (flags & FLAG_OPTION) != 0,
+                    button,
+                    x: loc.x,
+                    y: loc.y,
+                    click_count: 1,
+                },
+            );
         }
         _ => {}
     }
@@ -206,15 +328,18 @@ pub fn start_input_counter(state: &'static InputCounterState) -> Result<(), Stri
     }
     #[cfg(target_os = "macos")]
     unsafe {
-        { COUNTER = Some(state); }
+        {
+            COUNTER = Some(state);
+        }
 
-        // Event mask: leftMouseDown(1<<1) | rightMouseDown(1<<3) | otherMouseDown(1<<25) | keyDown(1<<10)
-        let mask: u64 = (1 << 1) | (1 << 3) | (1 << 25) | (1 << 10);
+        // downs + ups + keyDown
+        let mask: u64 =
+            (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 25) | (1 << 26) | (1 << 10);
         let session_tap: *const c_void = 0 as *const c_void; // kCGSessionEventTap = NULL
         let tap = CGEventTapCreate(
             session_tap,
-            1,  // kCGHeadInsertEventTap
-            1,  // kCGEventTapOptionListenOnly
+            1, // kCGHeadInsertEventTap
+            1, // kCGEventTapOptionListenOnly
             mask,
             tap_callback,
             std::ptr::null_mut(),
@@ -224,6 +349,7 @@ pub fn start_input_counter(state: &'static InputCounterState) -> Result<(), Stri
                 "CGEventTap 创建失败 — 需要在系统设置 → 隐私与安全 → 输入监控中授权，且不能在无头环境运行".into(),
             );
         }
+        TAP_PORT.store(tap as usize, Ordering::Relaxed);
 
         // Wrap the raw pointer in a Send wrapper; it lives entirely on the
         // dedicated thread's run loop.
@@ -257,4 +383,46 @@ pub fn snapshot(state: &InputCounterState) -> InputCounts {
 /// Reset counters to zero (called after flushing an event).
 pub fn reset(state: &InputCounterState) {
     *state.counts.lock().unwrap() = InputCounts::default();
+}
+
+const PENDING_CAP: usize = 2048;
+
+fn enqueue_hid(state: &InputCounterState, ev: ObserveHidEvent) {
+    if let Ok(mut q) = state.pending.lock() {
+        if q.len() >= PENDING_CAP {
+            q.pop_front();
+        }
+        q.push_back(ev);
+    }
+}
+
+unsafe fn unicode_from_event(event: *const c_void) -> Option<String> {
+    let mut len = 0usize;
+    let mut buf = [0u16; 8];
+    CGEventKeyboardGetUnicodeString(event, buf.len(), &mut len, buf.as_mut_ptr());
+    if len == 0 {
+        return None;
+    }
+    String::from_utf16(&buf[..len]).ok()
+}
+
+pub fn drain_hid(state: &InputCounterState) -> Vec<ObserveHidEvent> {
+    state
+        .pending
+        .lock()
+        .map(|mut q| q.drain(..).collect())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_and_user_disable_reenable_the_tap() {
+        assert!(tap_should_reenable(TYPE_TAP_DISABLED_BY_TIMEOUT));
+        assert!(tap_should_reenable(TYPE_TAP_DISABLED_BY_USER_INPUT));
+        assert!(!tap_should_reenable(TYPE_KEY_DOWN));
+        assert!(!tap_should_reenable(TYPE_LEFT_MOUSE_DOWN));
+    }
 }

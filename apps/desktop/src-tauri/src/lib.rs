@@ -4,6 +4,7 @@ mod asr_models;
 mod assistant;
 mod commands;
 mod cua;
+mod restart;
 mod selection_popup;
 mod shell;
 mod state;
@@ -129,6 +130,17 @@ pub fn run() {
                         // the supervisor's lifetime, stop trying and let the
                         // user investigate — they can still manually restart.
                         if consecutive_crashes > 5 {
+                            continue;
+                        }
+                        if !state.restart_budget.try_acquire() {
+                            tracing::error!(
+                                remaining = state.restart_budget.remaining(),
+                                "observe daemon restart budget exhausted (3 / 10 min); not restarting"
+                            );
+                            let _ = handle.emit(
+                                "health://alert",
+                                serde_json::json!({ "reason": "观察进程反复退出，已暂停自动重启" }),
+                            );
                             continue;
                         }
                         // Backoff: 2s, 4s, 8s, 16s, 32s between attempts.
@@ -267,6 +279,14 @@ pub fn run() {
                         let Some(state) = handle.try_state::<AppState>() else {
                             continue;
                         };
+                        if state
+                            .observe_stopping
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                            || state.paused.lock().map(|g| *g).unwrap_or(false)
+                        {
+                            stagnant_ticks = 0;
+                            continue;
+                        }
 
                         // Check if daemon socket is alive.
                         let socket = state.data_dir.join("daemon.sock");
@@ -301,21 +321,31 @@ pub fn run() {
                             last_event_count = count;
                         }
 
-                        // After 2 stagnant ticks (~60s), try self-healing.
-                        let needs_heal = stagnant_ticks >= 2;
+                        // After ~4 minutes of no new events (past the 2-minute
+                        // static-screen heartbeat), try self-healing. A live
+                        // socket with a plateau is usually "user reading",
+                        // not a dead process — only restart the daemon if
+                        // the socket is gone, and only within the budget.
+                        let needs_heal = stagnant_ticks >= 8;
 
                         if needs_heal && !alert_active {
                             // Attempt self-heal.
                             let mut healed = false;
                             if !daemon_ok {
-                                match commands::observe_start_inner(&state) {
-                                    Ok(_) => {
-                                        tracing::info!("health monitor: restarted daemon");
-                                        healed = true;
+                                if state.restart_budget.try_acquire() {
+                                    match commands::observe_start_inner(&state) {
+                                        Ok(_) => {
+                                            tracing::info!("health monitor: restarted daemon");
+                                            healed = true;
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "health monitor: daemon restart failed");
+                                        }
                                     }
-                                    Err(e) => {
-                                        tracing::warn!(error = %e, "health monitor: daemon restart failed");
-                                    }
+                                } else {
+                                    tracing::error!(
+                                        "health monitor: restart budget exhausted; not restarting daemon"
+                                    );
                                 }
                             }
                             // Check cua if screen is enabled.
@@ -373,6 +403,7 @@ pub fn run() {
             commands::list_timeline,
             commands::activity_segments,
             commands::activity_scenes,
+            commands::activity_history_slots,
             commands::day_roast_summary,
             commands::roast_day,
             commands::ai_chat,

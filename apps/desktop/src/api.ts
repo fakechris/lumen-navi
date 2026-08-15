@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ActivitySegment,
   SceneDay,
+  HistorySlot,
   AsrModelCandidate,
   AsrModelStatus,
   AssistantAction,
@@ -62,6 +63,8 @@ export const api = {
     invoke<ActivitySegment[]>("activity_segments", { day }),
   activityScenes: (day: string) =>
     invoke<SceneDay>("activity_scenes", { day }),
+  activityHistorySlots: (day: string) =>
+    invoke<HistorySlot[]>("activity_history_slots", { day }),
   roastDay: (day: string) => invoke<string>("roast_day", { day }),
   aiChat: (messages: unknown[]) => invoke<string>("ai_chat", { messages }),
   activityStats: (day: string, groupBy?: "app" | "site") =>

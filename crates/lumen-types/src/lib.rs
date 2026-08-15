@@ -64,6 +64,16 @@ pub mod event_kind {
     /// Aggregated behavioral input counts (Delete/Tab/clicks/Cmd+C…).
     /// Content-free by construction — see input_counter.rs.
     pub const INPUT_STATS_V1: &str = "input.stats.v1";
+    pub const SESSION_STARTED_V1: &str = "session.started.v1";
+    pub const SESSION_ENDED_V1: &str = "session.ended.v1";
+    pub const WINDOW_CHANGED_V1: &str = "window.changed.v1";
+    pub const KEYBOARD_TEXT_INPUT_V1: &str = "keyboard.text_input.v1";
+    pub const KEYBOARD_SHORTCUT_V1: &str = "keyboard.shortcut.v1";
+    pub const KEYBOARD_SUBMIT_V1: &str = "keyboard.submit.v1";
+    pub const MOUSE_CLICK_V1: &str = "mouse.click.v1";
+    pub const MOUSE_DRAG_V1: &str = "mouse.drag.v1";
+    pub const MOUSE_CONTEXT_MENU_V1: &str = "mouse.context_menu.v1";
+    pub const SELECTION_CHANGED_V1: &str = "selection.changed.v1";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

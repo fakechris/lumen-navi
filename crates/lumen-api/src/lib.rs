@@ -16,6 +16,9 @@ pub struct HealthResponse {
     pub product: String,
     pub sources: Vec<SourceStatus>,
     pub paused: bool,
+    /// Live closed-eyes hard gate (mirrors `privacy.closed_eyes`).
+    #[serde(default)]
+    pub closed_eyes: bool,
     pub stored_events: usize,
     /// Indexed OCR documents (`ocr_docs` / FTS).
     #[serde(default)]
@@ -89,6 +92,10 @@ pub enum ControlRequest {
     },
     /// Rebuild `ocr_docs` from all `derived` ocr.v1 rows.
     ReindexOcr,
+    /// Flip the live closed-eyes hard gate without restarting Observe.
+    ClosedEyes {
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +150,7 @@ impl HealthResponse {
             product: "lumen-navi".into(),
             sources,
             paused,
+            closed_eyes: false,
             stored_events,
             ocr_docs,
             schema_version,
@@ -376,6 +384,36 @@ pub struct RoastHour {
     pub hour: u8,
     pub active_ms: i64,
     pub top_app: Option<String>,
+}
+
+/// One 10-minute History card (deterministic fold of activity segments).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistorySlotDto {
+    pub slot_start: DateTime<Utc>,
+    pub slot_end: DateTime<Utc>,
+    pub title: String,
+    pub body: String,
+    pub apps: Vec<HistorySlotAppDto>,
+    pub scenes: Vec<HistorySlotSceneDto>,
+    pub titles: Vec<String>,
+    pub urls: Vec<String>,
+    pub active_ms: i64,
+    #[serde(default)]
+    pub narrative_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistorySlotAppDto {
+    pub app_name: String,
+    pub bundle_id: Option<String>,
+    pub ms: i64,
+    pub pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistorySlotSceneDto {
+    pub label: String,
+    pub ms: i64,
 }
 
 /// Aggregated stats over a date range (e.g. the last 7 days).

@@ -6,6 +6,7 @@
 mod blob;
 mod categorization;
 mod enrichment;
+mod history;
 mod rule_engine;
 mod scene;
 mod schema;
@@ -30,6 +31,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub use blob::BlobStore;
+pub use history::fold_history_slots;
 pub use scene::fold_scene_day;
 pub use schema::SCHEMA_VERSION;
 pub use sqlite::{
@@ -37,6 +39,7 @@ pub use sqlite::{
     EnrichmentPassReport, EventWithArtifacts, IdempotentAppendOutcome, OcrSearchHit,
     SessionDerivedRow, SqliteStore, TimelineItem, TimelineQuery,
 };
+// RecoveryPolicy / RecoveryReport are defined in this module.
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -82,6 +85,8 @@ pub enum JobStatus {
     Done,
     Failed,
     Dead,
+    /// Terminal: processor explicitly disabled (not a crash).
+    Skipped,
 }
 
 impl JobStatus {
@@ -92,6 +97,7 @@ impl JobStatus {
             Self::Done => "done",
             Self::Failed => "failed",
             Self::Dead => "dead",
+            Self::Skipped => "skipped",
         }
     }
 
@@ -101,9 +107,43 @@ impl JobStatus {
             "done" => Self::Done,
             "failed" => Self::Failed,
             "dead" => Self::Dead,
+            "skipped" => Self::Skipped,
             _ => Self::Pending,
         }
     }
+}
+
+/// One enabled worker that should reclaim stale `running` jobs.
+#[derive(Debug, Clone)]
+pub struct ReclaimKind {
+    pub kind: String,
+    pub stale_running: chrono::Duration,
+}
+
+/// Boot-time recovery knobs. `skip_kinds` are processors the user turned off.
+#[derive(Debug, Clone)]
+pub struct RecoveryPolicy {
+    /// Clock used for cutoffs and `updated_at` (tests pin this).
+    pub now: DateTime<Utc>,
+    pub reclaim_kinds: Vec<ReclaimKind>,
+    pub skip_kinds: Vec<(String, String)>,
+}
+
+impl Default for RecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            now: Utc::now(),
+            reclaim_kinds: Vec::new(),
+            skip_kinds: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecoveryReport {
+    pub sessions_closed: usize,
+    pub jobs_reclaimed: usize,
+    pub jobs_skipped: usize,
 }
 
 #[derive(Debug, Clone)]

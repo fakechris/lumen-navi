@@ -26,7 +26,7 @@ mod selection;
 pub use asr::MacSpeechAsr;
 pub use ax_tree::MacAxTreeWalker;
 pub use input_counter::{
-    start_input_counter, InputCounterState, InputCounts,
+    start_input_counter, tap_reenable_count, tap_should_reenable, InputCounterState, InputCounts,
 };
 /// Convenience wrappers matching the daemon's call sites.
 pub fn input_snapshot(state: &InputCounterState) -> InputCounts {
@@ -34,6 +34,9 @@ pub fn input_snapshot(state: &InputCounterState) -> InputCounts {
 }
 pub fn input_reset(state: &InputCounterState) {
     input_counter::reset(state);
+}
+pub fn input_drain_hid(state: &InputCounterState) -> Vec<lumen_platform::ObserveHidEvent> {
+    input_counter::drain_hid(state)
 }
 pub use capture::{MacDisplays, MacScreenCapturer};
 pub use clipboard::clipboard_grab_selection;

@@ -5,12 +5,17 @@
 
 mod activity;
 mod audio;
+mod interaction;
 mod orchestrator;
 mod session;
 
-pub use activity::{ActivityAccumulator, ActivitySample};
+pub use activity::{ActivityAccumulator, ActivitySample, ActivityTick};
 pub use audio::{
     synthetic_silence_chunk, synthetic_tone_chunk, AudioOrchestrator, AudioStats, CapturedAudio,
 };
-pub use orchestrator::{CaptureOrchestrator, CaptureStats, CapturedBatch};
-pub use session::SessionManager;
+pub use interaction::{InteractionCoalescer, InteractionContext};
+pub use orchestrator::{ActivityPoll, CaptureOrchestrator, CaptureStats, CapturedBatch};
+pub use session::{
+    drain_transition, session_matches_frontmost, SessionManager, SessionTransition,
+    SharedSessionBinder,
+};

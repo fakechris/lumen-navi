@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use lumen_config::{CaptureConfig, PrivacyConfig};
 use lumen_platform::{
-    bgra_to_gray, dhash, gray_distance, hamming64, DisplayEnumerator, DisplayInfo, DisplaySleepProbe,
-    FrontmostApp, FrontmostAppProbe, IdleProbe, ScreenCapturer, ScreenLockProbe, ScreenshotFrame,
+    bgra_to_gray, dhash, gray_distance, hamming64, DisplayEnumerator, DisplayInfo,
+    DisplaySleepProbe, FrontmostApp, FrontmostAppProbe, IdleProbe, ScreenCapturer, ScreenLockProbe,
+    ScreenshotFrame,
 };
 use lumen_types::{event_kind, ActivitySession, SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
@@ -16,7 +17,7 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::activity::{ActivityAccumulator, ActivitySample};
-use crate::session::SessionManager;
+use crate::session::{SessionTransition, SharedSessionBinder};
 
 #[derive(Debug, Clone)]
 pub struct CapturedBatch {
@@ -27,6 +28,8 @@ pub struct CapturedBatch {
     pub closed_session: Option<ActivitySession>,
     /// Session row to upsert (open).
     pub open_session: Option<ActivitySession>,
+    /// Lifecycle facts from the capture-time bind (ended/started).
+    pub session_events: Vec<SourceEvent>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -38,6 +41,12 @@ pub struct CaptureStats {
     pub skipped_debounce: u64,
     pub skipped_gate: u64,
     pub dropped_backpressure: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct ActivityPoll {
+    pub events: Vec<SourceEvent>,
+    pub upsert_sessions: Vec<ActivitySession>,
 }
 
 pub struct CaptureOrchestrator {
@@ -61,7 +70,7 @@ pub struct CaptureOrchestrator {
     dhash_history: HashMap<u32, VecDeque<(u64, Instant)>>,
     /// Safety valve: last full capture per display (force one every 10s).
     last_full_capture: HashMap<u32, Instant>,
-    sessions: SessionManager,
+    sessions: Arc<SharedSessionBinder>,
     activity: ActivityAccumulator,
 
     stats_full: AtomicU64,
@@ -100,6 +109,31 @@ impl CaptureOrchestrator {
         privacy: PrivacyConfig,
     ) -> Self {
         let idle_session_ms = capture.idle_session_ms;
+        Self::with_sessions(
+            displays,
+            capturer,
+            frontmost,
+            lock,
+            idle,
+            power,
+            capture,
+            privacy,
+            SharedSessionBinder::new(idle_session_ms),
+        )
+    }
+
+    pub fn with_sessions(
+        displays: Arc<dyn DisplayEnumerator>,
+        capturer: Arc<dyn ScreenCapturer>,
+        frontmost: Arc<dyn FrontmostAppProbe>,
+        lock: Arc<dyn ScreenLockProbe>,
+        idle: Arc<dyn IdleProbe>,
+        power: Arc<dyn DisplaySleepProbe>,
+        capture: CaptureConfig,
+        privacy: PrivacyConfig,
+        sessions: Arc<SharedSessionBinder>,
+    ) -> Self {
+        let idle_session_ms = capture.idle_session_ms;
         let paused = AtomicBool::new(privacy.paused);
         let closed_eyes = AtomicBool::new(privacy.closed_eyes);
         // AFK threshold mirrors the existing session idle; heartbeats every 5s
@@ -125,7 +159,7 @@ impl CaptureOrchestrator {
             probe_gray: HashMap::new(),
             dhash_history: HashMap::new(),
             last_full_capture: HashMap::new(),
-            sessions: SessionManager::new(idle_session_ms),
+            sessions,
             activity,
             stats_full: AtomicU64::new(0),
             stats_probes: AtomicU64::new(0),
@@ -161,12 +195,20 @@ impl CaptureOrchestrator {
         self.stats_drop_bp.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn force_close_session(&mut self) -> Option<ActivitySession> {
+    pub fn force_close_session(&mut self) -> SessionTransition {
         self.sessions.force_close()
     }
 
-    pub fn close_idle_session(&mut self) -> Option<ActivitySession> {
+    pub fn close_idle_session(&mut self) -> SessionTransition {
         self.sessions.close_if_idle()
+    }
+
+    pub fn current_session_id(&self) -> Option<Uuid> {
+        self.sessions.current_id()
+    }
+
+    pub fn session_binder(&self) -> Arc<SharedSessionBinder> {
+        Arc::clone(&self.sessions)
     }
 
     /// Poll frontmost app; returns a focus/title trigger if changed.
@@ -178,7 +220,8 @@ impl CaptureOrchestrator {
                 return None; // establish baseline without force capture
             }
             Some(prev) => {
-                let bundle_changed = prev.bundle_id != cur.bundle_id || prev.app_name != cur.app_name;
+                let bundle_changed =
+                    prev.bundle_id != cur.bundle_id || prev.app_name != cur.app_name;
                 let title_changed = prev.window_title != cur.window_title;
                 if bundle_changed {
                     Some(TriggerReason::FocusChange)
@@ -200,31 +243,88 @@ impl CaptureOrchestrator {
     /// keeping (state change or heartbeat due). Independent of the screenshot
     /// path's visual debounce, so reading a static page still accrues time.
     ///
-    /// Respects pause/closed-eyes (no event emitted while user opted out) but
-    /// **not** screen-lock (a lock is itself meaningful activity context, so we
-    /// record it with `is_locked=true`).
-    pub async fn poll_activity(&mut self) -> Option<SourceEvent> {
-        if self.paused.load(Ordering::Relaxed) || self.privacy.paused {
-            return None;
+    /// Pause and closed-eyes emit nothing. Lock is a hard capture gate: we may
+    /// persist a lock-transition fact, but it never carries app/window/URL.
+    pub async fn poll_activity(&mut self) -> ActivityPoll {
+        if self.paused.load(Ordering::Relaxed) {
+            return ActivityPoll::default();
         }
-        if self.closed_eyes.load(Ordering::Relaxed) || self.privacy.closed_eyes {
-            return None;
+        if self.closed_eyes.load(Ordering::Relaxed) {
+            return ActivityPoll::default();
+        }
+
+        let is_locked = self.lock.is_locked().await.unwrap_or(false);
+        if is_locked {
+            let closed = self.sessions.force_close();
+            let idle_seconds = self.idle.idle_seconds().await.unwrap_or(0.0).max(0.0);
+            let sample = ActivitySample {
+                frontmost: None,
+                idle_seconds,
+                is_locked: true,
+                display_sleep_prevented: false,
+            };
+            let tick = self.activity.ingest_detailed(sample, chrono::Utc::now());
+            let mut events = closed.events;
+            if let Some(ev) = tick.focus {
+                events.push(ev);
+            }
+            return ActivityPoll {
+                events,
+                upsert_sessions: closed.upserts,
+            };
         }
 
         let frontmost = self.frontmost.frontmost().await.ok().flatten();
+        if self
+            .privacy
+            .blocks_bundle(frontmost.as_ref().and_then(|f| f.bundle_id.as_deref()))
+        {
+            return ActivityPoll::default();
+        }
         let idle_seconds = self.idle.idle_seconds().await.unwrap_or(0.0).max(0.0);
-        let is_locked = self.lock.is_locked().await.unwrap_or(false);
         let display_sleep_prevented = self.power.display_sleep_prevented().await.unwrap_or(false);
+        let sample = ActivitySample {
+            frontmost: frontmost.clone(),
+            idle_seconds,
+            is_locked: false,
+            display_sleep_prevented,
+        };
+        let key_idle = idle_seconds >= (self.capture.idle_session_ms as f64 / 1000.0)
+            && !display_sleep_prevented;
 
-        self.activity.ingest(
-            ActivitySample {
-                frontmost,
-                idle_seconds,
-                is_locked,
-                display_sleep_prevented,
-            },
-            chrono::Utc::now(),
-        )
+        let trans = if let Some(ref front) = frontmost {
+            if !key_idle {
+                self.sessions.bind(
+                    Some(front.app_name.as_str()),
+                    front.bundle_id.as_deref(),
+                    "focus_change",
+                )
+            } else {
+                SessionTransition::default()
+            }
+        } else {
+            SessionTransition::default()
+        };
+
+        let tick = self.activity.ingest_detailed(sample, chrono::Utc::now());
+        let sid = self.sessions.current_id();
+        let bind = |mut ev: SourceEvent| {
+            if let Some(id) = sid {
+                ev.session_id = Some(id);
+            }
+            ev
+        };
+        let mut out = trans.events;
+        if let Some(ev) = tick.window_changed {
+            out.push(bind(ev));
+        }
+        if let Some(ev) = tick.focus {
+            out.push(bind(ev));
+        }
+        ActivityPoll {
+            events: out,
+            upsert_sessions: trans.upserts,
+        }
     }
 
     /// Run one capture decision for `reason`. Returns None if gated/skipped.
@@ -232,12 +332,12 @@ impl CaptureOrchestrator {
         &mut self,
         reason: TriggerReason,
     ) -> Result<Option<CapturedBatch>, String> {
-        if self.paused.load(Ordering::Relaxed) || self.privacy.paused {
+        if self.paused.load(Ordering::Relaxed) {
             self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
             debug!("gate: paused");
             return Ok(None);
         }
-        if self.closed_eyes.load(Ordering::Relaxed) || self.privacy.closed_eyes {
+        if self.closed_eyes.load(Ordering::Relaxed) {
             self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
             debug!("gate: closed_eyes");
             return Ok(None);
@@ -248,8 +348,25 @@ impl CaptureOrchestrator {
             return Ok(None);
         }
 
-        let front = self.frontmost.frontmost().await.ok().flatten();
+        let front = match self.frontmost.frontmost().await {
+            Ok(front) => front,
+            Err(_) => {
+                self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
+                debug!("gate: frontmost_unavailable");
+                return Ok(None);
+            }
+        };
         let bundle = front.as_ref().and_then(|f| f.bundle_id.clone());
+        if front.is_none() && !self.privacy.app_blocklist.is_empty() {
+            self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
+            debug!("gate: frontmost_unknown_with_blocklist");
+            return Ok(None);
+        }
+        if self.privacy.blocks_bundle(bundle.as_deref()) {
+            self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
+            debug!("gate: app_blocklist");
+            return Ok(None);
+        }
 
         if !self.allow_debounce(reason, bundle.as_deref()) {
             self.stats_skip_debounce.fetch_add(1, Ordering::Relaxed);
@@ -312,7 +429,10 @@ impl CaptureOrchestrator {
                 probe_hashes.insert(d.id.0, hash);
 
                 let history = self.dhash_history.entry(d.id.0).or_default();
-                while history.front().is_some_and(|(_, t)| now.duration_since(*t) > DHASH_HISTORY_TTL) {
+                while history
+                    .front()
+                    .is_some_and(|(_, t)| now.duration_since(*t) > DHASH_HISTORY_TTL)
+                {
                     history.pop_front();
                 }
                 let near_dup = history
@@ -353,10 +473,22 @@ impl CaptureOrchestrator {
         let capture_id = Uuid::new_v4();
         let app_name = front.as_ref().map(|f| f.app_name.as_str());
         let bundle_s = front.as_ref().and_then(|f| f.bundle_id.as_deref());
-        let (session_id, closed_session) =
-            self.sessions
-                .touch(app_name, bundle_s, reason.as_str());
-        let open_session = self.sessions.current().cloned();
+        let trans = self.sessions.bind(app_name, bundle_s, reason.as_str());
+        let closed_session = trans
+            .upserts
+            .iter()
+            .find(|s| matches!(s.status, lumen_types::SessionStatus::Closed))
+            .cloned();
+        let open_session = trans
+            .upserts
+            .iter()
+            .find(|s| matches!(s.status, lumen_types::SessionStatus::Open))
+            .cloned();
+        let session_id = open_session
+            .as_ref()
+            .map(|s| s.id)
+            .or_else(|| self.sessions.current_id())
+            .unwrap_or_else(Uuid::new_v4);
 
         let mut frames = Vec::new();
         for (index, d) in displays.iter().enumerate() {
@@ -431,6 +563,7 @@ impl CaptureOrchestrator {
             frames,
             closed_session,
             open_session,
+            session_events: trans.events,
         }))
     }
 
@@ -452,9 +585,7 @@ impl CaptureOrchestrator {
         // Same-app throttle for non-force reasons
         if !reason.forces_full_capture() {
             if let (Some(prev), Some(b)) = (&self.last_capture_bundle, bundle) {
-                if prev == b
-                    && elapsed < Duration::from_millis(self.capture.same_app_min_ms)
-                {
+                if prev == b && elapsed < Duration::from_millis(self.capture.same_app_min_ms) {
                     return false;
                 }
             }
@@ -463,12 +594,20 @@ impl CaptureOrchestrator {
     }
 
     async fn select_displays(&self) -> Result<Vec<DisplayInfo>, String> {
-        let mut list = self.displays.list_displays().await.map_err(|e| e.to_string())?;
+        let mut list = self
+            .displays
+            .list_displays()
+            .await
+            .map_err(|e| e.to_string())?;
         if !self.capture.all_displays() {
             list.retain(|d| d.is_main);
             if list.is_empty() {
                 // fall back to first
-                list = self.displays.list_displays().await.map_err(|e| e.to_string())?;
+                list = self
+                    .displays
+                    .list_displays()
+                    .await
+                    .map_err(|e| e.to_string())?;
                 list.truncate(1);
             }
         }
@@ -521,11 +660,20 @@ mod tests {
         }
     }
 
-    struct FakeLock;
+    struct FakeLock {
+        locked: AtomicBool,
+    }
+    impl FakeLock {
+        fn unlocked() -> Self {
+            Self {
+                locked: AtomicBool::new(false),
+            }
+        }
+    }
     #[async_trait]
     impl ScreenLockProbe for FakeLock {
         async fn is_locked(&self) -> Result<bool, PlatformError> {
-            Ok(false)
+            Ok(self.locked.load(Ordering::Relaxed))
         }
     }
 
@@ -606,7 +754,7 @@ mod tests {
                     window_id: None,
                 }),
             }),
-            Arc::new(FakeLock),
+            Arc::new(FakeLock::unlocked()),
             Arc::new(FakeIdle),
             Arc::new(FakePower),
             CaptureConfig {
@@ -648,6 +796,121 @@ mod tests {
         assert!(r.is_none());
     }
 
+    #[tokio::test]
+    async fn blocklist_blocks_screenshot_capture() {
+        let mut privacy = PrivacyConfig::default();
+        privacy.app_blocklist = vec!["a.b".into()];
+        let mut o = CaptureOrchestrator::new(
+            Arc::new(FakeDisplays),
+            Arc::new(FakeCap { n: Mutex::new(1) }),
+            Arc::new(FakeFront {
+                app: Mutex::new(FrontmostApp {
+                    app_name: "A".into(),
+                    bundle_id: Some("a.b".into()),
+                    window_title: Some("secret".into()),
+                    ls_category_type: None,
+                    tab_url: Some("https://bank.example".into()),
+                    pid: None,
+                    window_id: None,
+                }),
+            }),
+            Arc::new(FakeLock::unlocked()),
+            Arc::new(FakeIdle),
+            Arc::new(FakePower),
+            CaptureConfig {
+                visual_change_threshold: 0.05,
+                debounce_default_ms: 0,
+                debounce_churn_ms: 0,
+                same_app_min_ms: 0,
+                probe_scale: 1,
+                displays: "all".into(),
+                ..CaptureConfig::default()
+            },
+            privacy,
+        );
+        let r = o.capture_tick(TriggerReason::FocusChange).await.unwrap();
+        assert!(r.is_none());
+        assert_eq!(o.stats().skipped_gate, 1);
+    }
+
+    struct FakeFrontNone;
+    #[async_trait]
+    impl FrontmostAppProbe for FakeFrontNone {
+        async fn frontmost(&self) -> Result<Option<FrontmostApp>, PlatformError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_frontmost_skips_capture_when_blocklist_is_set() {
+        let mut privacy = PrivacyConfig::default();
+        privacy.app_blocklist = vec!["com.secret.app".into()];
+        let mut o = CaptureOrchestrator::new(
+            Arc::new(FakeDisplays),
+            Arc::new(FakeCap { n: Mutex::new(1) }),
+            Arc::new(FakeFrontNone),
+            Arc::new(FakeLock::unlocked()),
+            Arc::new(FakeIdle),
+            Arc::new(FakePower),
+            CaptureConfig {
+                debounce_default_ms: 0,
+                debounce_churn_ms: 0,
+                same_app_min_ms: 0,
+                probe_scale: 1,
+                displays: "all".into(),
+                ..CaptureConfig::default()
+            },
+            privacy,
+        );
+        let r = o.capture_tick(TriggerReason::FocusChange).await.unwrap();
+        assert!(r.is_none());
+        assert_eq!(o.stats().skipped_gate, 1);
+    }
+
+    #[tokio::test]
+    async fn lock_poll_closes_session_without_app_content() {
+        let lock = Arc::new(FakeLock::unlocked());
+        let mut o = CaptureOrchestrator::new(
+            Arc::new(FakeDisplays),
+            Arc::new(FakeCap { n: Mutex::new(1) }),
+            Arc::new(FakeFront {
+                app: Mutex::new(FrontmostApp {
+                    app_name: "Safari".into(),
+                    bundle_id: Some("com.apple.Safari".into()),
+                    window_title: Some("Inbox".into()),
+                    ls_category_type: None,
+                    tab_url: Some("https://mail.example".into()),
+                    pid: None,
+                    window_id: None,
+                }),
+            }),
+            lock.clone(),
+            Arc::new(FakeIdle),
+            Arc::new(FakePower),
+            CaptureConfig::default(),
+            PrivacyConfig::default(),
+        );
+        let open = o.poll_activity().await;
+        assert!(open
+            .upsert_sessions
+            .iter()
+            .any(|s| matches!(s.status, lumen_types::SessionStatus::Open)));
+        lock.locked.store(true, Ordering::Relaxed);
+        let locked = o.poll_activity().await;
+        assert!(locked
+            .upsert_sessions
+            .iter()
+            .any(|s| matches!(s.status, lumen_types::SessionStatus::Closed)));
+        let focus = locked
+            .events
+            .iter()
+            .find(|e| e.kind == event_kind::ACTIVITY_FOCUS_V1)
+            .expect("lock transition fact");
+        assert_eq!(focus.payload["is_locked"], serde_json::json!(true));
+        assert!(focus.payload["app_name"].is_null());
+        assert!(focus.payload["url"].is_null());
+    }
+
     /// Regression: a visually static screen (browser showing a fixed page,
     /// paused video, PDF) used to never capture because the MAD `continue`
     /// fired before the safety valve was consulted. The safety valve must
@@ -664,14 +927,15 @@ mod tests {
 
         // Second tick, immediately after: stable + not overdue -> skip.
         let second = o.capture_tick(TriggerReason::Interval).await.unwrap();
-        assert!(second.is_none(), "stable frame within safety window should skip");
+        assert!(
+            second.is_none(),
+            "stable frame within safety window should skip"
+        );
 
         // Pretend DHASH_SAFETY_VALVE has elapsed by backdating last_full_capture.
         for d in o.select_displays().await.unwrap() {
-            o.last_full_capture.insert(
-                d.id.0,
-                Instant::now() - Duration::from_secs(121),
-            );
+            o.last_full_capture
+                .insert(d.id.0, Instant::now() - Duration::from_secs(121));
         }
 
         // Third tick, same static screen but safety valve overdue -> MUST capture.

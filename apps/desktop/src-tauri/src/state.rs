@@ -11,6 +11,7 @@ use lumen_config::Config;
 use lumen_store::SqliteStore;
 
 use crate::cua::CuaController;
+use crate::restart::RestartBudget;
 use crate::shell::{self, ShellConfig};
 
 pub struct AppState {
@@ -25,8 +26,11 @@ pub struct AppState {
     /// True while the user (or app shutdown) intentionally stopped Observe.
     /// The supervisor reads this to distinguish an intentional stop (don't
     /// restart) from a crash (alert + auto-restart). Set by observe_stop_inner,
-    /// cleared by observe_start_inner.
+    /// cleared by observe_start_inner (user start) and after an intentional
+    /// reload's new socket is up.
     pub observe_stopping: AtomicBool,
+    /// Shared 10-minute crash-restart budget for supervisor + health monitor.
+    pub restart_budget: RestartBudget,
     /// In-flight assistant (selection popup) streaming requests, by id.
     pub assistant_tasks:
         Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
@@ -69,6 +73,7 @@ impl AppState {
             shell: Mutex::new(shell_cfg),
             observe_child: Mutex::new(None),
             observe_stopping: AtomicBool::new(false),
+            restart_budget: RestartBudget::default(),
             assistant_tasks: Mutex::new(HashMap::new()),
         })
     }

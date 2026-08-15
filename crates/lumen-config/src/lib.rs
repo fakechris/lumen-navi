@@ -427,6 +427,9 @@ impl CaptureConfig {
 pub struct PrivacyConfig {
     pub paused: bool,
     pub closed_eyes: bool,
+    /// Bundle IDs that must never produce Observe facts (screen or HID).
+    #[serde(default)]
+    pub app_blocklist: Vec<String>,
 }
 
 impl Default for PrivacyConfig {
@@ -434,7 +437,17 @@ impl Default for PrivacyConfig {
         Self {
             paused: false,
             closed_eyes: false,
+            app_blocklist: Vec::new(),
         }
+    }
+}
+
+impl PrivacyConfig {
+    pub fn blocks_bundle(&self, bundle_id: Option<&str>) -> bool {
+        let Some(id) = bundle_id else {
+            return false;
+        };
+        self.app_blocklist.iter().any(|b| b == id)
     }
 }
 
@@ -562,6 +575,10 @@ pub struct InputConfig {
     pub enabled: bool,
     /// How often to flush counters as an `input.stats.v1` event (seconds).
     pub flush_interval_s: u64,
+    /// Persist discrete click / shortcut / text / drag events (Observe).
+    pub observe_interactions: bool,
+    /// Include coalesced typed text on `keyboard.text_input.v1`.
+    pub record_text: bool,
 }
 
 impl Default for InputConfig {
@@ -569,6 +586,8 @@ impl Default for InputConfig {
         Self {
             enabled: false,
             flush_interval_s: 300, // 5 minutes
+            observe_interactions: false,
+            record_text: false,
         }
     }
 }
