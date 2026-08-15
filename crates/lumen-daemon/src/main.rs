@@ -175,6 +175,173 @@ fn ensure_session_if_absent(
     })
 }
 
+#[cfg(target_os = "macos")]
+fn start_macos_input_loop(
+    config: &Config,
+    store: &Arc<SqliteStore>,
+    observe_paused: &Arc<AtomicBool>,
+    observe_closed_eyes: &Arc<AtomicBool>,
+    session_binder: &Arc<SharedSessionBinder>,
+    session_persist: &Arc<tokio::sync::Mutex<()>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    static INPUT_STATE: std::sync::OnceLock<lumen_platform_macos::InputCounterState> =
+        std::sync::OnceLock::new();
+    if !config.input.enabled {
+        info!("input counter disabled in config");
+        return None;
+    }
+    let state = INPUT_STATE.get_or_init(lumen_platform_macos::InputCounterState::default);
+    match lumen_platform_macos::start_input_counter(state) {
+        Ok(()) => {
+            info!(
+                flush_s = config.input.flush_interval_s,
+                observe = config.input.observe_interactions,
+                record_text = config.input.record_text,
+                "input tap started"
+            );
+            let store_in = Arc::clone(store);
+            let flush_every = Duration::from_secs(config.input.flush_interval_s.max(30));
+            let stats_on = config.input.enabled;
+            let observe_on = config.input.observe_interactions;
+            let record_text = config.input.record_text;
+            let blocklist = config.privacy.app_blocklist.clone();
+            let observe_paused = Arc::clone(observe_paused);
+            let observe_closed_eyes = Arc::clone(observe_closed_eyes);
+            let session_binder = Arc::clone(session_binder);
+            let session_persist = Arc::clone(session_persist);
+            Some(tokio::spawn(async move {
+                let mut stats_tick = tokio::time::interval(flush_every);
+                stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut hid_tick = tokio::time::interval(Duration::from_millis(50));
+                hid_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                stats_tick.tick().await;
+                hid_tick.tick().await;
+                let mut coal = InteractionCoalescer::default();
+                let front = host::frontmost();
+                loop {
+                    tokio::select! {
+                        _ = stats_tick.tick() => {
+                            if !stats_on {
+                                continue;
+                            }
+                            let paused = observe_paused.load(Ordering::Relaxed);
+                            let closed_eyes = observe_closed_eyes.load(Ordering::Relaxed);
+                            let locked = host::is_screen_locked();
+                            if observe_hard_gated(paused, closed_eyes, locked) {
+                                lumen_platform_macos::input_reset(state);
+                                continue;
+                            }
+                            let frontmost = front.frontmost().await.ok().flatten();
+                            if blocklist.iter().any(|b| {
+                                frontmost.as_ref().and_then(|f| f.bundle_id.as_deref()) == Some(b.as_str())
+                            }) {
+                                lumen_platform_macos::input_reset(state);
+                                continue;
+                            }
+                            let counts = lumen_platform_macos::input_snapshot(state);
+                            lumen_platform_macos::input_reset(state);
+                            let event = SourceEvent::new(
+                                SourceKind::Screen,
+                                event_kind::INPUT_STATS_V1,
+                                serde_json::to_value(&counts).unwrap_or_default(),
+                            );
+                            if let Err(e) = store_in.append_event(event) {
+                                warn!(error = %e, "append input.stats.v1 failed");
+                            } else {
+                                note_write();
+                            }
+                        }
+                        _ = hid_tick.tick() => {
+                            let paused = observe_paused.load(Ordering::Relaxed);
+                            let closed_eyes = observe_closed_eyes.load(Ordering::Relaxed);
+                            let locked = host::is_screen_locked();
+                            if !observe_on || observe_hard_gated(paused, closed_eyes, locked) {
+                                let _ = lumen_platform_macos::input_drain_hid(state);
+                                lumen_platform_macos::input_reset(state);
+                                coal.discard_text();
+                                continue;
+                            }
+                            let raw = lumen_platform_macos::input_drain_hid(state);
+                            if raw.is_empty() {
+                                if record_text {
+                                    persist_interaction_events(
+                                        &store_in,
+                                        coal.flush_due(std::time::Instant::now()),
+                                    );
+                                } else {
+                                    coal.discard_text();
+                                }
+                                continue;
+                            }
+                            let frontmost = front.frontmost().await.ok().flatten();
+                            if blocklist.iter().any(|b| {
+                                frontmost.as_ref().and_then(|f| f.bundle_id.as_deref()) == Some(b.as_str())
+                            }) {
+                                coal.discard_text();
+                                continue;
+                            }
+                            let _persist = session_persist.lock().await;
+                            let session_id = ensure_session_if_absent(
+                                &store_in,
+                                &session_binder,
+                                frontmost.as_ref().map(|f| f.app_name.as_str()),
+                                frontmost.as_ref().and_then(|f| f.bundle_id.as_deref()),
+                            );
+                            if session_id.is_none() {
+                                coal.discard_text();
+                                continue;
+                            }
+                            let ctx = InteractionContext {
+                                app_name: frontmost.as_ref().map(|f| f.app_name.clone()),
+                                bundle_id: frontmost.as_ref().and_then(|f| f.bundle_id.clone()),
+                                window_title: frontmost.as_ref().and_then(|f| f.window_title.clone()),
+                                url: frontmost.as_ref().and_then(|f| f.tab_url.clone()),
+                                session_id,
+                            };
+                            let now = std::time::Instant::now();
+                            let mut last_selection: Option<String> = None;
+                            for hid in raw {
+                                let mut evs = coal.push(hid, ctx.clone(), now);
+                                if !record_text {
+                                    evs.retain(|e| e.kind != event_kind::KEYBOARD_TEXT_INPUT_V1);
+                                }
+                                for ev in evs {
+                                    let is_sel_trigger = ev.kind == event_kind::MOUSE_CLICK_V1
+                                        || ev.kind == event_kind::MOUSE_CONTEXT_MENU_V1
+                                        || ev.kind == event_kind::MOUSE_DRAG_V1;
+                                    if record_text && is_sel_trigger {
+                                        if let Some(sel) = lumen_platform_macos::focused_selection() {
+                                            if !sel.text.trim().is_empty()
+                                                && last_selection.as_deref() != Some(sel.text.as_str())
+                                            {
+                                                last_selection = Some(sel.text.clone());
+                                                persist_interaction_events(
+                                                    &store_in,
+                                                    vec![attach_selection(&ctx, sel.text)],
+                                                );
+                                            }
+                                        }
+                                    }
+                                    persist_interaction_events(&store_in, vec![ev]);
+                                }
+                            }
+                            if record_text {
+                                persist_interaction_events(&store_in, coal.flush_due(now));
+                            } else {
+                                coal.discard_text();
+                            }
+                        }
+                    }
+                }
+            }))
+        }
+        Err(e) => {
+            warn!(error = %e, "input counter failed to start (needs Input Monitoring permission)");
+            None
+        }
+    }
+}
+
 fn recovery_policy_from_config(config: &Config) -> RecoveryPolicy {
     let mut reclaim_kinds = Vec::new();
     let mut skip_kinds = Vec::new();
@@ -555,167 +722,14 @@ async fn main() -> Result<()> {
 
     // --- Input counter (roast feature: behavioral keys + clicks, opt-in) ---
     // A single static state: the CGEventTap callback holds a &'static ref.
-    static INPUT_STATE: std::sync::OnceLock<lumen_platform_macos::InputCounterState> =
-        std::sync::OnceLock::new();
-    let tap_wanted = config.input.enabled;
-    let _input_handle = if tap_wanted {
-        let state = INPUT_STATE.get_or_init(lumen_platform_macos::InputCounterState::default);
-        match lumen_platform_macos::start_input_counter(state) {
-            Ok(()) => {
-                info!(
-                    flush_s = config.input.flush_interval_s,
-                    observe = config.input.observe_interactions,
-                    record_text = config.input.record_text,
-                    "input tap started"
-                );
-                let store_in = Arc::clone(&store);
-                let flush_every = Duration::from_secs(config.input.flush_interval_s.max(30));
-                let stats_on = config.input.enabled;
-                let observe_on = config.input.observe_interactions;
-                let record_text = config.input.record_text;
-                let blocklist = config.privacy.app_blocklist.clone();
-                let observe_paused = Arc::clone(&observe_paused);
-                let observe_closed_eyes = Arc::clone(&observe_closed_eyes);
-                let session_binder = Arc::clone(&session_binder);
-                let session_persist = Arc::clone(&session_persist);
-                Some(tokio::spawn(async move {
-                    let mut stats_tick = tokio::time::interval(flush_every);
-                    stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    let mut hid_tick = tokio::time::interval(Duration::from_millis(50));
-                    hid_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    stats_tick.tick().await;
-                    hid_tick.tick().await;
-                    let mut coal = InteractionCoalescer::default();
-                    let front = host::frontmost();
-                    loop {
-                        tokio::select! {
-                            _ = stats_tick.tick() => {
-                                if !stats_on {
-                                    continue;
-                                }
-                                let paused = observe_paused.load(Ordering::Relaxed);
-                                let closed_eyes = observe_closed_eyes.load(Ordering::Relaxed);
-                                let locked = host::is_screen_locked();
-                                if observe_hard_gated(paused, closed_eyes, locked) {
-                                    lumen_platform_macos::input_reset(state);
-                                    continue;
-                                }
-                                let frontmost = front.frontmost().await.ok().flatten();
-                                if blocklist.iter().any(|b| {
-                                    frontmost
-                                        .as_ref()
-                                        .and_then(|f| f.bundle_id.as_deref())
-                                        == Some(b.as_str())
-                                }) {
-                                    lumen_platform_macos::input_reset(state);
-                                    continue;
-                                }
-                                let counts = lumen_platform_macos::input_snapshot(state);
-                                lumen_platform_macos::input_reset(state);
-                                let event = SourceEvent::new(
-                                    SourceKind::Screen,
-                                    event_kind::INPUT_STATS_V1,
-                                    serde_json::to_value(&counts).unwrap_or_default(),
-                                );
-                                if let Err(e) = store_in.append_event(event) {
-                                    warn!(error = %e, "append input.stats.v1 failed");
-                                } else {
-                                    note_write();
-                                }
-                            }
-                            _ = hid_tick.tick() => {
-                                let paused = observe_paused.load(Ordering::Relaxed);
-                                let closed_eyes = observe_closed_eyes.load(Ordering::Relaxed);
-                                let locked = host::is_screen_locked();
-                                if !observe_on || observe_hard_gated(paused, closed_eyes, locked) {
-                                    let _ = lumen_platform_macos::input_drain_hid(state);
-                                    lumen_platform_macos::input_reset(state);
-                                    coal.discard_text();
-                                    continue;
-                                }
-                                let raw = lumen_platform_macos::input_drain_hid(state);
-                                if raw.is_empty() {
-                                    if record_text {
-                                        persist_interaction_events(
-                                            &store_in,
-                                            coal.flush_due(std::time::Instant::now()),
-                                        );
-                                    } else {
-                                        coal.discard_text();
-                                    }
-                                    continue;
-                                }
-                                let frontmost = front.frontmost().await.ok().flatten();
-                                if blocklist.iter().any(|b| {
-                                    frontmost
-                                        .as_ref()
-                                        .and_then(|f| f.bundle_id.as_deref())
-                                        == Some(b.as_str())
-                                }) {
-                                    coal.discard_text();
-                                    continue;
-                                }
-                                let _persist = session_persist.lock().await;
-                                let session_id = ensure_session_if_absent(
-                                    &store_in,
-                                    &session_binder,
-                                    frontmost.as_ref().map(|f| f.app_name.as_str()),
-                                    frontmost.as_ref().and_then(|f| f.bundle_id.as_deref()),
-                                );
-                                if session_id.is_none() {
-                                    coal.discard_text();
-                                    continue;
-                                }
-                                let ctx = InteractionContext {
-                                    app_name: frontmost.as_ref().map(|f| f.app_name.clone()),
-                                    bundle_id: frontmost.as_ref().and_then(|f| f.bundle_id.clone()),
-                                    window_title: frontmost.as_ref().and_then(|f| f.window_title.clone()),
-                                    url: frontmost.as_ref().and_then(|f| f.tab_url.clone()),
-                                    session_id,
-                                };
-                                let now = std::time::Instant::now();
-                                let mut last_selection: Option<String> = None;
-                                for hid in raw {
-                                    let mut evs = coal.push(hid, ctx.clone(), now);
-                                    if !record_text {
-                                        evs.retain(|e| e.kind != event_kind::KEYBOARD_TEXT_INPUT_V1);
-                                    }
-                                    for ev in evs {
-                                        let is_sel_trigger = ev.kind == event_kind::MOUSE_CLICK_V1
-                                            || ev.kind == event_kind::MOUSE_CONTEXT_MENU_V1
-                                            || ev.kind == event_kind::MOUSE_DRAG_V1;
-                                        if record_text && is_sel_trigger {
-                                            if let Some(sel) = lumen_platform_macos::focused_selection() {
-                                                if !sel.text.trim().is_empty()
-                                                    && last_selection.as_deref() != Some(sel.text.as_str())
-                                                {
-                                                    last_selection = Some(sel.text.clone());
-                                                    let sel_ev = attach_selection(&ctx, sel.text);
-                                                    persist_interaction_events(&store_in, vec![sel_ev]);
-                                                }
-                                            }
-                                        }
-                                        persist_interaction_events(&store_in, vec![ev]);
-                                    }
-                                }
-                                if record_text {
-                                    persist_interaction_events(&store_in, coal.flush_due(now));
-                                } else {
-                                    coal.discard_text();
-                                }
-                            }
-                        }
-                    }
-                }))
-            }
-            Err(e) => {
-                warn!(error = %e, "input counter failed to start (needs Input Monitoring permission)");
-                None
-            }
+    #[cfg(target_os = "macos")]
+    let _input_handle = start_macos_input_loop(&config, &store, &observe_paused, &observe_closed_eyes, &session_binder, &session_persist);
+    #[cfg(not(target_os = "macos"))]
+    let _input_handle = {
+        if config.input.enabled {
+            info!("input counter requires macOS; disabled on this OS");
         }
-    } else {
-        info!("input counter disabled in config");
-        None
+        None::<tokio::task::JoinHandle<()>>
     };
     // Continuous mic → audio_chunk → transcribe_audio jobs → engine (SenseVoice default).
     let (asr_cancel_tx, asr_cancel_rx) = watch::channel(false);
