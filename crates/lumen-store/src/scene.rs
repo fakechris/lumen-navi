@@ -162,7 +162,7 @@ mod tests {
             ),
         ];
         let day = fold_scene_day("2026-08-12", &segs);
-        assert_eq!(day.episodes[0].label, "Safari → kimi.com");
+        assert_eq!(day.episodes[0].label, "Safari → Kimi");
         assert_eq!(day.episodes[0].kind, "browser");
         assert_eq!(day.episodes[1].label, "Safari → 127.0.0.1");
         assert_eq!(day.episodes[1].kind, "development");
