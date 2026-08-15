@@ -1,4 +1,4 @@
-export type TabId = "overview" | "dashboard" | "search" | "activity" | "settings";
+export type TabId = "overview" | "dashboard" | "search" | "activity" | "ai" | "settings";
 
 export interface SceneEpisode {
   day: string;

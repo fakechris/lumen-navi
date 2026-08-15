@@ -63,6 +63,7 @@ export const api = {
   activityScenes: (day: string) =>
     invoke<SceneDay>("activity_scenes", { day }),
   roastDay: (day: string) => invoke<string>("roast_day", { day }),
+  aiChat: (messages: unknown[]) => invoke<string>("ai_chat", { messages }),
   activityStats: (day: string, groupBy?: "app" | "site") =>
     invoke<DayStats>("activity_stats", { day, groupBy }),
   activityRange: (from: string, to: string, groupBy?: "app" | "site") =>

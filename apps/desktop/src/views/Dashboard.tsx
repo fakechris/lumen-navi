@@ -297,8 +297,6 @@ export function DashboardView() {
               <SceneRanking scenes={scenes} />
             </Card>
           )}
-
-          <DayRoastCard day={day} />
         </>
       )}
 
@@ -1267,70 +1265,6 @@ function ManualSegmentForm({ day, onAdded }: { day: string; onAdded: () => void 
             disabled={saving || !appName.trim()}
             onClick={() => void submit()}
           >添加</Button>
-        </div>
-      )}
-    </Card>
-  );
-}
-
-// --- Day Roast: LLM roasts your day based on structured stats ------------
-
-function DayRoastCard({ day }: { day: string }) {
-  const [roast, setRoast] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const run = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    setRoast(null);
-    try {
-      const text = await api.roastDay(day);
-      setRoast(text);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [day]);
-
-  return (
-    <Card pad={16}>
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
-        <SectionHeader
-          title="Roast 我的一天 🔥"
-          subtitle="把今天的真实数据喂给 LLM，让它毒舌点评你的行为模式"
-        />
-        <Button
-          variant="primary"
-          disabled={loading}
-          onClick={() => void run()}
-          style={{ flexShrink: 0 }}
-        >
-          {loading ? "吐槽生成中…" : "Roast 我"}
-        </Button>
-      </div>
-      {error && (
-        <div style={{ color: "var(--danger)", fontSize: "var(--text-sm)" }}>{error}</div>
-      )}
-      {roast && (
-        <div
-          style={{
-            whiteSpace: "pre-wrap",
-            fontSize: "var(--text-sm)",
-            lineHeight: 1.7,
-            color: "var(--text)",
-            background: "var(--surface-2, var(--surface))",
-            borderRadius: "var(--radius-md)",
-            padding: "12px 14px",
-          }}
-        >
-          {roast}
-        </div>
-      )}
-      {!roast && !error && !loading && (
-        <div style={{ color: "var(--text-tertiary)", fontSize: "var(--text-sm)" }}>
-          需要在设置中配置 Assistant LLM。点击后会把今天的 app/网站/场景/时段统计发给 LLM。
         </div>
       )}
     </Card>
