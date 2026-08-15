@@ -27,6 +27,8 @@ use crate::schema::{
     MIGRATE_V8, MIGRATE_V9, SCHEMA_VERSION,
 };
 use crate::{EventStore, JobRecord, JobStatus, RecoveryPolicy, RecoveryReport, StoreError};
+#[cfg(test)]
+use crate::ReclaimKind;
 
 /// Summary of one background enrichment pass.
 #[derive(Debug, Clone, Default)]
@@ -557,19 +559,8 @@ impl SqliteStore {
         kind: &str,
         stale_for: chrono::Duration,
     ) -> Result<usize, StoreError> {
-        let cutoff = (Utc::now() - stale_for).to_rfc3339();
-        let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
-        let n = conn
-            .execute(
-                r#"UPDATE jobs
-                   SET status = 'pending', available_at = ?1, updated_at = ?1,
-                       last_error = COALESCE(last_error, 'reclaimed stale running')
-                   WHERE kind = ?2 AND status = 'running' AND updated_at < ?3"#,
-                params![now, kind, cutoff],
-            )
-            .map_err(StoreError::db)?;
-        Ok(n)
+        reclaim_stale_running_on(&conn, kind, Utc::now(), stale_for)
     }
 
     /// One transaction: close leaked sessions, skip disabled processors, reclaim
@@ -591,18 +582,33 @@ impl SqliteStore {
             .lock()
             .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let tx = conn.transaction().map_err(StoreError::db)?;
-        let now = Utc::now().to_rfc3339();
+        let now = policy.now;
+        let now_s = now.to_rfc3339();
 
         let sessions_closed = tx
             .execute(
                 r#"UPDATE activity_sessions
                    SET status = 'closed',
-                       ended_at = COALESCE(
-                         (SELECT MAX(ts) FROM events WHERE events.session_id = activity_sessions.id),
-                         started_at
-                       )
+                       ended_at = CASE
+                         WHEN (
+                           SELECT MAX(ts) FROM events
+                           WHERE events.session_id = activity_sessions.id
+                         ) IS NULL THEN started_at
+                         WHEN (
+                           SELECT MAX(ts) FROM events
+                           WHERE events.session_id = activity_sessions.id
+                         ) < started_at THEN started_at
+                         WHEN (
+                           SELECT MAX(ts) FROM events
+                           WHERE events.session_id = activity_sessions.id
+                         ) > ?1 THEN ?1
+                         ELSE (
+                           SELECT MAX(ts) FROM events
+                           WHERE events.session_id = activity_sessions.id
+                         )
+                       END
                    WHERE status = 'open'"#,
-                [],
+                params![now_s],
             )
             .map_err(StoreError::db)?;
 
@@ -617,25 +623,20 @@ impl SqliteStore {
                     r#"UPDATE jobs
                        SET status = 'skipped', last_error = ?1, updated_at = ?2
                        WHERE kind = ?3 AND status IN ('pending', 'running')"#,
-                    params![reason, now, kind],
+                    params![reason, now_s, kind],
                 )
                 .map_err(StoreError::db)?;
             jobs_skipped += n;
         }
 
-        let cutoff = (Utc::now() - policy.stale_running).to_rfc3339();
         let mut jobs_reclaimed = 0usize;
-        for kind in &policy.reclaim_kinds {
-            let n = tx
-                .execute(
-                    r#"UPDATE jobs
-                       SET status = 'pending', available_at = ?1, updated_at = ?1,
-                           last_error = COALESCE(last_error, 'reclaimed stale running')
-                       WHERE kind = ?2 AND status = 'running' AND updated_at < ?3"#,
-                    params![now, kind, cutoff],
-                )
-                .map_err(StoreError::db)?;
-            jobs_reclaimed += n;
+        for reclaim in &policy.reclaim_kinds {
+            jobs_reclaimed += reclaim_stale_running_on(
+                &tx,
+                &reclaim.kind,
+                now,
+                reclaim.stale_running,
+            )?;
         }
 
         tx.commit().map_err(StoreError::db)?;
@@ -4038,6 +4039,25 @@ fn json_i64(value: Option<&serde_json::Value>) -> Option<i64> {
     })
 }
 
+fn reclaim_stale_running_on(
+    conn: &Connection,
+    kind: &str,
+    now: DateTime<Utc>,
+    stale_for: chrono::Duration,
+) -> Result<usize, StoreError> {
+    let cutoff = (now - stale_for).to_rfc3339();
+    let n = conn
+        .execute(
+            r#"UPDATE jobs
+               SET status = 'pending', available_at = ?1, updated_at = ?1,
+                   last_error = COALESCE(last_error, 'reclaimed stale running')
+               WHERE kind = ?2 AND status = 'running' AND updated_at < ?3"#,
+            params![now.to_rfc3339(), kind, cutoff],
+        )
+        .map_err(StoreError::db)?;
+    Ok(n)
+}
+
 fn optional_sql_ts(value: Option<String>) -> Option<DateTime<Utc>> {
     value
         .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
@@ -5116,8 +5136,11 @@ mod tests {
             .unwrap();
 
         let policy = RecoveryPolicy {
-            stale_running: chrono::Duration::minutes(5),
-            reclaim_kinds: vec!["ocr_screen".into()],
+            now: Utc::now(),
+            reclaim_kinds: vec![ReclaimKind {
+                kind: "ocr_screen".into(),
+                stale_running: chrono::Duration::minutes(5),
+            }],
             skip_kinds: vec![(
                 "transcribe_audio".into(),
                 "asr_disabled_on_boot".into(),
@@ -5126,6 +5149,9 @@ mod tests {
         let report = store.recover_after_unclean_shutdown(&policy).unwrap();
         assert_eq!(report.jobs_skipped, 1);
         assert_eq!(report.jobs_reclaimed, 1);
+        let again = store.recover_after_unclean_shutdown(&policy).unwrap();
+        assert_eq!(again.jobs_skipped, 0);
+        assert_eq!(again.jobs_reclaimed, 0);
 
         let jobs = store.list_jobs(10).unwrap();
         let t = jobs.iter().find(|j| j.id == transcribe.id).unwrap();
@@ -5133,6 +5159,52 @@ mod tests {
         assert_eq!(t.last_error.as_deref(), Some("asr_disabled_on_boot"));
         let o = jobs.iter().find(|j| j.id == ocr.id).unwrap();
         assert_eq!(o.status, JobStatus::Pending);
+    }
+
+    #[test]
+    fn recover_uses_per_kind_stale_thresholds() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let ev = SourceEvent::new(SourceKind::Screen, event_kind::SCREENSHOT_V1, json!({}));
+        let eid = ev.id;
+        store.append_event(ev).unwrap();
+        let ocr = store.enqueue_job(eid, "ocr_screen").unwrap().unwrap();
+        let ax = store.enqueue_job(eid, "ax_screen").unwrap().unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-08-15T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        store
+            .test_set_job_row(ocr.id, "running", now - chrono::Duration::minutes(10))
+            .unwrap();
+        store
+            .test_set_job_row(ax.id, "running", now - chrono::Duration::minutes(10))
+            .unwrap();
+        let report = store
+            .recover_after_unclean_shutdown(&RecoveryPolicy {
+                now,
+                reclaim_kinds: vec![
+                    ReclaimKind {
+                        kind: "ocr_screen".into(),
+                        stale_running: chrono::Duration::minutes(5),
+                    },
+                    ReclaimKind {
+                        kind: "ax_screen".into(),
+                        stale_running: chrono::Duration::minutes(30),
+                    },
+                ],
+                skip_kinds: vec![],
+            })
+            .unwrap();
+        assert_eq!(report.jobs_reclaimed, 1);
+        let jobs = store.list_jobs(10).unwrap();
+        assert_eq!(
+            jobs.iter().find(|j| j.id == ocr.id).unwrap().status,
+            JobStatus::Pending
+        );
+        assert_eq!(
+            jobs.iter().find(|j| j.id == ax.id).unwrap().status,
+            JobStatus::Running
+        );
     }
 
     #[test]

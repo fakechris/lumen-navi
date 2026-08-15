@@ -30,7 +30,7 @@ use lumen_process::{
 };
 use lumen_sources_browser::BrowserIngestPolicy;
 use lumen_sources_media::{AudioOrchestrator, CaptureOrchestrator, CapturedBatch};
-use lumen_store::{EventStore, RecoveryPolicy, SCHEMA_VERSION, SqliteStore};
+use lumen_store::{EventStore, ReclaimKind, RecoveryPolicy, SCHEMA_VERSION, SqliteStore};
 use lumen_types::{event_kind, SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
@@ -84,20 +84,21 @@ fn default_data_dir() -> std::path::PathBuf {
 }
 
 fn recovery_policy_from_config(config: &Config) -> RecoveryPolicy {
-    let stale_ms = config
-        .ocr
-        .stale_running_ms
-        .max(config.asr.stale_running_ms)
-        .max(config.ax.stale_running_ms);
     let mut reclaim_kinds = Vec::new();
     let mut skip_kinds = Vec::new();
     if config.ocr.enabled {
-        reclaim_kinds.push("ocr_screen".into());
+        reclaim_kinds.push(ReclaimKind {
+            kind: "ocr_screen".into(),
+            stale_running: chrono::Duration::milliseconds(config.ocr.stale_running_ms as i64),
+        });
     } else {
         skip_kinds.push(("ocr_screen".into(), "ocr_disabled_on_boot".into()));
     }
     if config.asr.enabled {
-        reclaim_kinds.push("transcribe_audio".into());
+        reclaim_kinds.push(ReclaimKind {
+            kind: "transcribe_audio".into(),
+            stale_running: chrono::Duration::milliseconds(config.asr.stale_running_ms as i64),
+        });
     } else {
         skip_kinds.push((
             "transcribe_audio".into(),
@@ -105,12 +106,15 @@ fn recovery_policy_from_config(config: &Config) -> RecoveryPolicy {
         ));
     }
     if config.ax.enabled {
-        reclaim_kinds.push("ax_screen".into());
+        reclaim_kinds.push(ReclaimKind {
+            kind: "ax_screen".into(),
+            stale_running: chrono::Duration::milliseconds(config.ax.stale_running_ms as i64),
+        });
     } else {
         skip_kinds.push(("ax_screen".into(), "ax_disabled_on_boot".into()));
     }
     RecoveryPolicy {
-        stale_running: chrono::Duration::milliseconds(stale_ms as i64),
+        now: chrono::Utc::now(),
         reclaim_kinds,
         skip_kinds,
     }

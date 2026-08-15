@@ -111,12 +111,30 @@ impl JobStatus {
     }
 }
 
-/// Boot-time recovery knobs. `skip_kinds` are processors the user turned off.
-#[derive(Debug, Clone, Default)]
-pub struct RecoveryPolicy {
+/// One enabled worker that should reclaim stale `running` jobs.
+#[derive(Debug, Clone)]
+pub struct ReclaimKind {
+    pub kind: String,
     pub stale_running: chrono::Duration,
-    pub reclaim_kinds: Vec<String>,
+}
+
+/// Boot-time recovery knobs. `skip_kinds` are processors the user turned off.
+#[derive(Debug, Clone)]
+pub struct RecoveryPolicy {
+    /// Clock used for cutoffs and `updated_at` (tests pin this).
+    pub now: DateTime<Utc>,
+    pub reclaim_kinds: Vec<ReclaimKind>,
     pub skip_kinds: Vec<(String, String)>,
+}
+
+impl Default for RecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            now: Utc::now(),
+            reclaim_kinds: Vec::new(),
+            skip_kinds: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
