@@ -1647,6 +1647,34 @@ impl SqliteStore {
         Ok(crate::fold_history_slots(&segs, chrono::Local))
     }
 
+    /// Persist closed 10-minute cards so agents can read them without
+    /// rescanning every activity segment. The open slot is left to the query.
+    pub fn persist_closed_history_slots(&self) -> Result<usize, StoreError> {
+        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let slots = self.list_history_slots(&day)?;
+        let now = Utc::now();
+        let mut wrote = 0usize;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        for slot in slots {
+            if slot.slot_end > now {
+                continue;
+            }
+            let key = format!("history.slot.{}", slot.slot_start.to_rfc3339());
+            let value = serde_json::to_string(&slot).map_err(StoreError::json)?;
+            conn.execute(
+                r#"INSERT INTO kv (key, value) VALUES (?1, ?2)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value"#,
+                params![key, value],
+            )
+            .map_err(StoreError::db)?;
+            wrote += 1;
+        }
+        Ok(wrote)
+    }
+
     /// Aggregated stats for one day — feeds the dashboard's stat cards, hour
     /// distribution chart, category breakdown, and top-apps ranking.
     pub fn activity_day_stats(
@@ -3296,6 +3324,19 @@ fn insert_event_with_mode(
     event: &SourceEvent,
     idempotent: bool,
 ) -> Result<bool, StoreError> {
+    // Steady-state activity heartbeats only extend the open segment.
+    // They must not flood `events` (58k orphan focus rows).
+    if event.kind == event_kind::ACTIVITY_FOCUS_V1
+        && event
+            .payload
+            .get("heartbeat")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    {
+        project_activity_event(tx, event)?;
+        return Ok(true);
+    }
+
     let source = serde_json::to_string(&event.source).map_err(StoreError::json)?;
     let payload = serde_json::to_string(&event.payload).map_err(StoreError::json)?;
     let session = event.session_id.map(|s| s.to_string());
@@ -4651,6 +4692,53 @@ mod tests {
             "no close across gaps larger than the merge window"
         );
 
+        drop(conn);
+    }
+
+    #[test]
+    fn heartbeat_focus_extends_segment_without_event_row() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-08-15T04:20:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mk = |offset: i64, heartbeat: bool| {
+            let mut e = SourceEvent::new(
+                SourceKind::Activity,
+                event_kind::ACTIVITY_FOCUS_V1,
+                json!({
+                    "app_name": "Safari",
+                    "bundle_id": "com.apple.Safari",
+                    "window_title": "Inbox",
+                    "is_idle": false,
+                    "is_locked": false,
+                    "heartbeat": heartbeat,
+                }),
+            );
+            e.ts = base + chrono::Duration::seconds(offset);
+            e.id = Uuid::new_v4();
+            e
+        };
+        store.append_event(mk(0, false)).unwrap();
+        store.append_event(mk(5, true)).unwrap();
+        store.append_event(mk(10, true)).unwrap();
+        let conn = store.conn.lock().unwrap();
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM events WHERE kind = 'activity.focus.v1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 1);
+        let ms: i64 = conn
+            .query_row(
+                "SELECT duration_ms FROM activity_segments WHERE app_name = 'Safari'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ms, 10_000);
         drop(conn);
     }
 

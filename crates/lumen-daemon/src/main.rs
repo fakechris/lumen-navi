@@ -830,6 +830,24 @@ async fn main() -> Result<()> {
         None
     };
 
+    {
+        let store_slots = Arc::clone(&store);
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(Duration::from_secs(60));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                every.tick().await;
+                match store_slots.persist_closed_history_slots() {
+                    Ok(n) if n > 0 => {
+                        info!(slots = n, "persisted closed history slots");
+                    }
+                    Err(e) => warn!(error = %e, "persist history slots failed"),
+                    _ => {}
+                }
+            }
+        });
+    }
+
     // Background category enrichment (Homebrew index + iTunes). Off the
     // sampling path; fills app_category_cache and re-applies segments.
     {
@@ -887,13 +905,9 @@ async fn main() -> Result<()> {
     let expect_long = ((screen_ready || cua_retry) && config.capture.screen_ticks == 0)
         || (config.sources.audio && config.audio.ticks == 0);
 
-    // Write watchdog: in long-running observe mode the activity heartbeat
-    // lands a row every few seconds, so 5 minutes without any event write
-    // while collection is supposed to be running means the pipeline is
-    // wedged (production incident: the tokio blocking pool exhausted by OS
-    // calls stuck on a SkyLight mutex — daemon alive, health "fine", zero
-    // writes). Exit non-zero so the app's supervisor restarts us.
-    // Not armed when paused/closed-eyes, where no writes are expected.
+    // Write stall log: the desktop health monitor owns restarts (shared
+    // 10-minute budget). This process must not suicide on a quiet desk —
+    // identity-only activity no longer inserts a row every few seconds.
     if expect_long {
         note_write();
         let watchdog_paused = Arc::clone(&observe_paused);
@@ -912,11 +926,10 @@ async fn main() -> Result<()> {
                 let last = LAST_WRITE_UNIX.load(Ordering::Relaxed);
                 let silent_for = unix_now().saturating_sub(last);
                 if last > 0 && silent_for > 300 {
-                    error!(
+                    warn!(
                         silent_for_secs = silent_for,
-                        "no events written for over 5 minutes while observing; exiting for supervisor restart"
+                        "no events written for over 5 minutes while observing"
                     );
-                    std::process::exit(1);
                 }
             }
         });

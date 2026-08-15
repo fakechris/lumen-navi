@@ -162,7 +162,7 @@ impl ActivityAccumulator {
         }
         self.last_key = Some(key.clone());
         self.last_emit = Some(now);
-        let focus = Some(make_event(&sample, &key, now));
+        let focus = Some(make_event(&sample, &key, now, !changed));
         let window_changed = if window_identity_changed && !key.is_idle && !key.is_locked {
             Some(make_window_changed(&sample, &key, now))
         } else {
@@ -185,6 +185,7 @@ fn make_event(
     sample: &ActivitySample,
     key: &ActivityKey,
     ts: chrono::DateTime<Utc>,
+    heartbeat: bool,
 ) -> SourceEvent {
     let ls_category_type = sample
         .frontmost
@@ -200,6 +201,7 @@ fn make_event(
         "idle_seconds": sample.idle_seconds,
         "is_idle": key.is_idle,
         "is_locked": key.is_locked,
+        "heartbeat": heartbeat,
     });
     let mut event = SourceEvent::new(SourceKind::Activity, event_kind::ACTIVITY_FOCUS_V1, payload);
     event.id = Uuid::new_v4();
@@ -331,7 +333,10 @@ mod tests {
     fn heartbeat_emits_on_steady_run() {
         let mut acc = ActivityAccumulator::new(Duration::from_secs(180), Duration::from_secs(5));
         let mut now = Utc::now();
-        acc.ingest(sample("Safari", Some("Hello"), 1.0), now);
+        let first = acc
+            .ingest(sample("Safari", Some("Hello"), 1.0), now)
+            .unwrap();
+        assert_eq!(first.payload["heartbeat"], serde_json::json!(false));
         // Within heartbeat window → no emit.
         now += chrono::Duration::seconds(3);
         assert!(acc
@@ -339,9 +344,10 @@ mod tests {
             .is_none());
         // Past heartbeat → emit even though state unchanged.
         now += chrono::Duration::seconds(3);
-        assert!(acc
+        let beat = acc
             .ingest(sample("Safari", Some("Hello"), 1.0), now)
-            .is_some());
+            .unwrap();
+        assert_eq!(beat.payload["heartbeat"], serde_json::json!(true));
     }
 
     #[test]

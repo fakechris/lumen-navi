@@ -744,8 +744,21 @@ pub fn update_sources_config(
 }
 
 fn reload_local_service(state: &AppState) -> Result<(), String> {
+    // Keep the intentional-stop flag set across the swap so the supervisor
+    // does not treat a config reload as a crash and consume the budget.
     observe_stop_inner(state)?;
-    observe_start_inner(state)?;
+    let status = observe_start_inner_opts(state, false)?;
+    let socket = state.data_dir.join("daemon.sock");
+    for _ in 0..25 {
+        if crate::daemon_socket_alive(&socket) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    state
+        .observe_stopping
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let _ = status;
     Ok(())
 }
 
@@ -855,6 +868,13 @@ pub fn observe_status(state: State<'_, AppState>) -> Result<ObserveStatus, Strin
 
 /// Shared start logic for command + auto-launch + tray.
 pub fn observe_start_inner(state: &AppState) -> Result<ObserveStatus, String> {
+    observe_start_inner_opts(state, true)
+}
+
+fn observe_start_inner_opts(
+    state: &AppState,
+    clear_stopping: bool,
+) -> Result<ObserveStatus, String> {
     if state.observe_running() {
         let running = true;
         let pid = state
@@ -931,9 +951,13 @@ pub fn observe_start_inner(state: &AppState) -> Result<ObserveStatus, String> {
 
     let pid = child.id();
     *state.observe_child.lock().map_err(err)? = Some(child);
-    // (Re)starting clears any prior intentional-stop flag so the supervisor
-    // will treat a future crash as a crash again.
-    state.observe_stopping.store(false, std::sync::atomic::Ordering::SeqCst);
+    // User/manual start clears the intentional-stop flag. Reload keeps it
+    // set until the new socket answers, so the supervisor stays quiet.
+    if clear_stopping {
+        state
+            .observe_stopping
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
     tracing::info!(pid, path = %daemon.display(), "observe daemon started");
     Ok(ObserveStatus {
         running: true,
