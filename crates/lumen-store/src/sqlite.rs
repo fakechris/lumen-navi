@@ -232,6 +232,28 @@ impl SqliteStore {
         self.append_sync(std::slice::from_ref(&event))
     }
 
+    /// One transaction: upsert activity sessions then append their lifecycle
+    /// / focus events. Used so `session.ended` never lands without the closed row.
+    pub fn apply_activity_transition(
+        &self,
+        sessions: &[ActivitySession],
+        events: &[SourceEvent],
+    ) -> Result<(), StoreError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        for session in sessions {
+            upsert_session_tx(&tx, session)?;
+        }
+        for event in events {
+            insert_event(&tx, event)?;
+        }
+        tx.commit().map_err(StoreError::db)?;
+        Ok(())
+    }
+
     /// Persist a replay-safe batch. Existing event ids are counted as duplicates;
     /// their payload and artifacts are left untouched.
     pub fn append_idempotent_with_artifacts(
@@ -435,30 +457,7 @@ impl SqliteStore {
             .conn
             .lock()
             .map_err(|_| StoreError::Other("lock poisoned".into()))?;
-        conn.execute(
-            r#"INSERT INTO activity_sessions
-               (id, started_at, ended_at, primary_app, primary_bundle, trigger, snapshot_count, status)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-               ON CONFLICT(id) DO UPDATE SET
-                 ended_at=excluded.ended_at,
-                 primary_app=excluded.primary_app,
-                 primary_bundle=excluded.primary_bundle,
-                 trigger=excluded.trigger,
-                 snapshot_count=excluded.snapshot_count,
-                 status=excluded.status"#,
-            params![
-                session.id.to_string(),
-                session.started_at.to_rfc3339(),
-                session.ended_at.map(|t| t.to_rfc3339()),
-                session.primary_app,
-                session.primary_bundle,
-                session.trigger,
-                session.snapshot_count as i64,
-                session.status.as_str(),
-            ],
-        )
-        .map_err(StoreError::db)?;
-        Ok(())
+        upsert_session_on(&conn, session)
     }
 
     pub fn get_session(&self, id: Uuid) -> Result<Option<ActivitySession>, StoreError> {
@@ -4039,6 +4038,43 @@ fn json_i64(value: Option<&serde_json::Value>) -> Option<i64> {
     })
 }
 
+fn upsert_session_tx(
+    tx: &rusqlite::Transaction<'_>,
+    session: &ActivitySession,
+) -> Result<(), StoreError> {
+    upsert_session_on(tx, session)
+}
+
+fn upsert_session_on(
+    conn: &Connection,
+    session: &ActivitySession,
+) -> Result<(), StoreError> {
+    conn.execute(
+        r#"INSERT INTO activity_sessions
+           (id, started_at, ended_at, primary_app, primary_bundle, trigger, snapshot_count, status)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+           ON CONFLICT(id) DO UPDATE SET
+             ended_at=excluded.ended_at,
+             primary_app=excluded.primary_app,
+             primary_bundle=excluded.primary_bundle,
+             trigger=excluded.trigger,
+             snapshot_count=excluded.snapshot_count,
+             status=excluded.status"#,
+        params![
+            session.id.to_string(),
+            session.started_at.to_rfc3339(),
+            session.ended_at.map(|t| t.to_rfc3339()),
+            session.primary_app,
+            session.primary_bundle,
+            session.trigger,
+            session.snapshot_count as i64,
+            session.status.as_str(),
+        ],
+    )
+    .map_err(StoreError::db)?;
+    Ok(())
+}
+
 fn reclaim_stale_running_on(
     conn: &Connection,
     kind: &str,
@@ -5087,6 +5123,35 @@ mod tests {
             .recover_after_unclean_shutdown(&RecoveryPolicy::default())
             .unwrap();
         assert_eq!(again.sessions_closed, 0);
+    }
+
+    #[test]
+    fn apply_activity_transition_is_atomic() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let sid = Uuid::new_v4();
+        let started = Utc::now();
+        let session = ActivitySession {
+            id: sid,
+            started_at: started,
+            ended_at: Some(started),
+            primary_app: Some("Safari".into()),
+            primary_bundle: Some("com.apple.Safari".into()),
+            trigger: "focus_change".into(),
+            snapshot_count: 1,
+            status: SessionStatus::Closed,
+        };
+        let ev = SourceEvent::new(
+            SourceKind::Activity,
+            event_kind::SESSION_ENDED_V1,
+            json!({"application_session_id": sid}),
+        )
+        .with_session(sid);
+        store
+            .apply_activity_transition(std::slice::from_ref(&session), std::slice::from_ref(&ev))
+            .unwrap();
+        let row = store.get_session(sid).unwrap().unwrap();
+        assert_eq!(row.status, SessionStatus::Closed);
     }
 
     #[test]

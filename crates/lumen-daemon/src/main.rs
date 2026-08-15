@@ -87,8 +87,14 @@ fn default_data_dir() -> std::path::PathBuf {
     }
 }
 
+fn debug_skip_hid_without_session() {}
+
 fn persist_interaction_events(store: &SqliteStore, events: Vec<SourceEvent>) {
     for ev in events {
+        if ev.session_id.is_none() {
+            debug_skip_hid_without_session();
+            continue;
+        }
         if let Err(e) = store.append_event(ev) {
             warn!(error = %e, "append interaction event failed");
         } else {
@@ -117,24 +123,22 @@ fn persist_activity_poll(
     current_session: &Mutex<Option<Uuid>>,
 ) {
     let mut sid = current_session.lock().ok().and_then(|g| *g);
-    for session in poll.upsert_sessions {
-        if let Err(e) = store.upsert_session(&session) {
-            warn!(error = %e, "upsert activity session failed");
-        }
+    for session in &poll.upsert_sessions {
         match session.status {
             SessionStatus::Open => sid = Some(session.id),
             SessionStatus::Closed if sid == Some(session.id) => sid = None,
             SessionStatus::Closed => {}
         }
     }
+    if let Err(e) = store.apply_activity_transition(&poll.upsert_sessions, &poll.events) {
+        warn!(error = %e, "apply activity transition failed");
+        return;
+    }
+    if !poll.events.is_empty() || !poll.upsert_sessions.is_empty() {
+        note_write();
+    }
     if let Ok(mut g) = current_session.lock() {
         *g = sid;
-    }
-    for ev in poll.events {
-        match store.append_event(ev) {
-            Ok(()) => note_write(),
-            Err(e) => warn!(error = %e, "append activity event failed"),
-        }
     }
 }
 
@@ -596,6 +600,10 @@ async fn main() -> Result<()> {
                                     continue;
                                 }
                                 let session_id = current_session.lock().ok().and_then(|g| *g);
+                                if session_id.is_none() {
+                                    coal.discard_text();
+                                    continue;
+                                }
                                 let ctx = InteractionContext {
                                     app_name: frontmost.as_ref().map(|f| f.app_name.clone()),
                                     bundle_id: frontmost.as_ref().and_then(|f| f.bundle_id.clone()),
@@ -872,7 +880,7 @@ async fn main() -> Result<()> {
             config.capture.focus_poll_ms.max(500),
         ));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let act_cancel = observe_cancel_rx.clone();
+        let mut act_cancel = observe_cancel_rx.clone();
         let current_session = Arc::clone(&current_session);
         let observe_paused = Arc::clone(&observe_paused);
         let observe_closed_eyes = Arc::clone(&observe_closed_eyes);
@@ -882,35 +890,42 @@ async fn main() -> Result<()> {
             // Activity tracking is always-on. It does NOT honor observe_cancel
             // (that signal is for winding down screen/audio workers mid-run);
             // this task runs until the process exits.
-            let _ = act_cancel;
             loop {
-                tick.tick().await;
-                orch.set_paused(observe_paused.load(Ordering::Relaxed));
-                orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
-                persist_activity_poll(
-                    &store_act,
-                    orch.poll_activity().await,
-                    &current_session,
-                );
-                if let Some(closed) = orch.close_idle_session() {
-                    if current_session
-                        .lock()
-                        .ok()
-                        .and_then(|g| *g)
-                        == Some(closed.id)
-                    {
-                        if let Ok(mut g) = current_session.lock() {
-                            *g = None;
+                tokio::select! {
+                    _ = tick.tick() => {
+                        orch.set_paused(observe_paused.load(Ordering::Relaxed));
+                        orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
+                        persist_activity_poll(
+                            &store_act,
+                            orch.poll_activity().await,
+                            &current_session,
+                        );
+                        if let Some(closed) = orch.close_idle_session() {
+                            persist_activity_poll(
+                                &store_act,
+                                ActivityPoll {
+                                    events: orch.drain_session_lifecycle(),
+                                    upsert_sessions: vec![closed],
+                                },
+                                &current_session,
+                            );
                         }
                     }
-                    persist_activity_poll(
-                        &store_act,
-                        ActivityPoll {
-                            events: orch.drain_session_lifecycle(),
-                            upsert_sessions: vec![closed],
-                        },
-                        &current_session,
-                    );
+                    _ = act_cancel.changed() => {
+                        if *act_cancel.borrow() {
+                            if let Some(closed) = orch.force_close_session() {
+                                persist_activity_poll(
+                                    &store_act,
+                                    ActivityPoll {
+                                        events: orch.drain_session_lifecycle(),
+                                        upsert_sessions: vec![closed],
+                                    },
+                                    &current_session,
+                                );
+                            }
+                            break;
+                        }
+                    }
                 }
             }
         });
