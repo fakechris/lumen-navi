@@ -407,6 +407,47 @@ pub struct RoastHour {
     pub top_app: Option<String>,
 }
 
+/// AI chat thread summary (one conversation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiThreadDto {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub message_count: i64,
+}
+
+/// One persisted chat turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiMessageDto {
+    pub id: String,
+    pub thread_id: String,
+    /// "user" | "assistant"
+    pub role: String,
+    pub content: String,
+    pub reasoning: Option<String>,
+    pub created_at: String,
+}
+
+/// An archived roast for one day (there can be several per day).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoastRecordDto {
+    pub id: String,
+    /// "YYYY-MM-DD" the roast is about.
+    pub day: String,
+    pub model: String,
+    pub content: String,
+    pub reasoning: Option<String>,
+    pub created_at: String,
+}
+
+/// Calendar index entry: which days have roasts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoastIndexDto {
+    pub day: String,
+    pub count: i64,
+}
+
 /// Live Observe settings snapshot for agents (get-then-replace later).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObserveSettingsDto {

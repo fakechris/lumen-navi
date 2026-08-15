@@ -320,6 +320,47 @@ export interface LlmReply {
   reasoning: string | null;
 }
 
+/** AI chat conversation thread (persisted in navi.db ai_threads). */
+export interface AiThread {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+}
+
+export interface AiMessage {
+  id: string;
+  thread_id: string;
+  role: "user" | "assistant" | string;
+  content: string;
+  reasoning: string | null;
+  created_at: string;
+}
+
+/** Result of ai_send — where the exchange was persisted + the reply. */
+export interface AiSendResult {
+  thread_id: string;
+  content: string;
+  reasoning: string | null;
+}
+
+/** An archived roast for one day. */
+export interface RoastRecord {
+  id: string;
+  day: string;
+  model: string;
+  content: string;
+  reasoning: string | null;
+  created_at: string;
+}
+
+/** Calendar index: which days have roasts. */
+export interface RoastIndexEntry {
+  day: string;
+  count: number;
+}
+
 /** Selection-popup assistant config (navi.toml `[assistant]`). */
 export interface AssistantConfig {  enabled: boolean;
   popup_enabled: boolean;

@@ -4,6 +4,11 @@ import type {
   SceneDay,
   HistorySlot,
   LlmReply,
+  AiThread,
+  AiMessage,
+  AiSendResult,
+  RoastRecord,
+  RoastIndexEntry,
   AsrModelCandidate,
   AsrModelStatus,
   AssistantAction,
@@ -67,7 +72,15 @@ export const api = {
   activityHistorySlots: (day: string) =>
     invoke<HistorySlot[]>("activity_history_slots", { day }),
   roastDay: (day: string) => invoke<LlmReply>("roast_day", { day }),
-  aiChat: (messages: unknown[]) => invoke<LlmReply>("ai_chat", { messages }),
+  roastList: (day: string) => invoke<RoastRecord[]>("roast_list", { day }),
+  roastIndex: () => invoke<RoastIndexEntry[]>("roast_index"),
+  aiSend: (threadId: string | null, content: string) =>
+    invoke<AiSendResult>("ai_send", { threadId, content }),
+  aiThreadList: () => invoke<AiThread[]>("ai_thread_list"),
+  aiThreadMessages: (threadId: string) =>
+    invoke<AiMessage[]>("ai_thread_messages", { threadId }),
+  aiThreadDelete: (threadId: string) =>
+    invoke<void>("ai_thread_delete", { threadId }),
   llmTest: () => invoke<string>("llm_test"),
   llmListModels: () => invoke<string[]>("llm_list_models"),
   activityStats: (day: string, groupBy?: "app" | "site") =>
