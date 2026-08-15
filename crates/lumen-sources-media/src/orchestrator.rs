@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lumen_config::{CaptureConfig, PrivacyConfig};
+use lumen_config::{CaptureConfig, PolicyGate, PrivacyConfig};
 use lumen_platform::{
     bgra_to_gray, dhash, gray_distance, hamming64, DisplayEnumerator, DisplayInfo,
     DisplaySleepProbe, FrontmostApp, FrontmostAppProbe, IdleProbe, ScreenCapturer, ScreenLockProbe,
@@ -332,22 +332,7 @@ impl CaptureOrchestrator {
         &mut self,
         reason: TriggerReason,
     ) -> Result<Option<CapturedBatch>, String> {
-        if self.paused.load(Ordering::Relaxed) {
-            self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
-            debug!("gate: paused");
-            return Ok(None);
-        }
-        if self.closed_eyes.load(Ordering::Relaxed) {
-            self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
-            debug!("gate: closed_eyes");
-            return Ok(None);
-        }
-        if self.lock.is_locked().await.unwrap_or(false) {
-            self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
-            debug!("gate: screen_locked");
-            return Ok(None);
-        }
-
+        let locked = self.lock.is_locked().await.unwrap_or(false);
         let front = match self.frontmost.frontmost().await {
             Ok(front) => front,
             Err(_) => {
@@ -357,14 +342,17 @@ impl CaptureOrchestrator {
             }
         };
         let bundle = front.as_ref().and_then(|f| f.bundle_id.clone());
-        if front.is_none() && !self.privacy.app_blocklist.is_empty() {
+        let gate = PolicyGate::evaluate(
+            self.paused.load(Ordering::Relaxed),
+            self.closed_eyes.load(Ordering::Relaxed),
+            locked,
+            &self.privacy,
+            bundle.as_deref(),
+            front.is_some(),
+        );
+        if !gate.allows() {
             self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
-            debug!("gate: frontmost_unknown_with_blocklist");
-            return Ok(None);
-        }
-        if self.privacy.blocks_bundle(bundle.as_deref()) {
-            self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
-            debug!("gate: app_blocklist");
+            debug!(reason = gate.as_str(), "gate");
             return Ok(None);
         }
 
@@ -503,6 +491,25 @@ impl CaptureOrchestrator {
                 .await
                 .map_err(|e| e.to_string())?;
 
+            let window_title = front
+                .as_ref()
+                .and_then(|f| f.window_title.as_ref())
+                .filter(|t| !t.is_empty());
+            let window_title_missing_reason = if window_title.is_some() {
+                None
+            } else if front.is_none() {
+                Some("no_frontmost")
+            } else if front.as_ref().and_then(|f| f.window_id).is_none() {
+                Some("no_window")
+            } else {
+                Some("empty_title")
+            };
+            let pixel_hash = probe_hashes
+                .get(&d.id.0)
+                .map(|h| format!("dhash:{h:016x}"))
+                .unwrap_or_else(|| {
+                    format!("blake3:{}", blake3::hash(&frame.png_or_jpeg_bytes).to_hex())
+                });
             let payload = json!({
                 "payload_version": 1,
                 "reason": reason.as_str(),
@@ -510,7 +517,8 @@ impl CaptureOrchestrator {
                 "bundle_id": front.as_ref().and_then(|f| f.bundle_id.as_ref()),
                 "pid": front.as_ref().and_then(|f| f.pid),
                 "window_id": front.as_ref().and_then(|f| f.window_id),
-                "window_title": front.as_ref().and_then(|f| f.window_title.as_ref()),
+                "window_title": window_title,
+                "window_title_missing_reason": window_title_missing_reason,
                 "url": front.as_ref().and_then(|f| f.tab_url.as_ref()),
                 "display_id": d.id.0,
                 "display_index": index,
@@ -519,6 +527,7 @@ impl CaptureOrchestrator {
                 "width": frame.width,
                 "height": frame.height,
                 "probe_distance": max_distance,
+                "pixel_hash": pixel_hash,
                 "capture_id": capture_id,
                 "bytes": frame.png_or_jpeg_bytes.len(),
                 "media_type": frame.media_type,
@@ -786,6 +795,23 @@ mod tests {
         let _ = o.capture_tick(TriggerReason::Interval).await.unwrap();
         let forced = o.capture_tick(TriggerReason::FocusChange).await.unwrap();
         assert!(forced.is_some());
+    }
+
+    #[tokio::test]
+    async fn screenshot_payload_has_hash_and_title_reason() {
+        let mut o = orch(FakeCap { n: Mutex::new(1) });
+        let batch = o
+            .capture_tick(TriggerReason::FocusChange)
+            .await
+            .unwrap()
+            .expect("captured");
+        let payload = &batch.frames[0].0.payload;
+        let hash = payload["pixel_hash"].as_str().unwrap();
+        assert!(hash.starts_with("dhash:") || hash.starts_with("blake3:"));
+        assert_eq!(
+            payload["window_title_missing_reason"],
+            serde_json::json!("no_window")
+        );
     }
 
     #[tokio::test]

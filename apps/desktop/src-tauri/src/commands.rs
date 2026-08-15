@@ -155,6 +155,7 @@ pub async fn get_health(state: State<'_, AppState>) -> Result<HealthResponse, St
         ocr_docs,
         schema_version: SCHEMA_VERSION,
         browser,
+        observe: daemon_health.as_ref().and_then(|h| h.observe.clone()),
     })
 }
 
@@ -1243,6 +1244,7 @@ mod command_tests {
             ocr_docs: 0,
             schema_version: 0,
             browser: None,
+            observe: None,
         };
 
         let sources = health_sources(true, true, false, Some(&daemon));

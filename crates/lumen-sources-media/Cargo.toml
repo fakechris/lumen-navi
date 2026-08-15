@@ -7,6 +7,7 @@ description = "Screen/audio/video intake and Observe capture orchestrator"
 
 [dependencies]
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 chrono = { workspace = true }
 lumen-config = { workspace = true }
 lumen-intake = { workspace = true }

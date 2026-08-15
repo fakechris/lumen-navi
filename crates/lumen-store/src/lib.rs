@@ -31,7 +31,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub use blob::BlobStore;
-pub use history::fold_history_slots;
+pub use history::{fold_history_slots, history_slot_key, overlay_slot_narrative};
 pub use scene::fold_scene_day;
 pub use schema::SCHEMA_VERSION;
 pub use sqlite::{

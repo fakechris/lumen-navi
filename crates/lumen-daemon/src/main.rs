@@ -3,6 +3,9 @@
 //! Screen and audio never wait on each other. OCR/ASR never block capture.
 
 mod control_server;
+#[cfg(unix)]
+mod mcp;
+mod summarizer;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -88,7 +91,11 @@ fn default_data_dir() -> std::path::PathBuf {
 
 fn debug_skip_hid_without_session() {}
 
-fn persist_interaction_events(store: &SqliteStore, events: Vec<SourceEvent>) {
+fn persist_interaction_events(
+    store: &SqliteStore,
+    events: Vec<SourceEvent>,
+    counters: &control_server::ObserveCounters,
+) {
     for ev in events {
         if ev.session_id.is_none() {
             debug_skip_hid_without_session();
@@ -96,8 +103,10 @@ fn persist_interaction_events(store: &SqliteStore, events: Vec<SourceEvent>) {
         }
         if let Err(e) = store.append_event(ev) {
             warn!(error = %e, "append interaction event failed");
+            counters.note_persist_failed();
         } else {
             note_write();
+            counters.note_persisted();
         }
     }
 }
@@ -120,24 +129,35 @@ fn attach_selection(ctx: &InteractionContext, text: String) -> SourceEvent {
     ev
 }
 
-fn persist_activity_poll(store: &SqliteStore, poll: ActivityPoll) {
+fn persist_activity_poll(
+    store: &SqliteStore,
+    poll: ActivityPoll,
+    counters: &control_server::ObserveCounters,
+) {
     if poll.upsert_sessions.is_empty() && poll.events.is_empty() {
         return;
     }
     if let Err(e) = store.apply_activity_transition(&poll.upsert_sessions, &poll.events) {
         warn!(error = %e, "apply activity transition failed");
+        counters.note_persist_failed();
         return;
     }
     note_write();
+    counters.note_persisted();
 }
 
-fn persist_session_transition(store: &SqliteStore, trans: SessionTransition) {
+fn persist_session_transition(
+    store: &SqliteStore,
+    trans: SessionTransition,
+    counters: &control_server::ObserveCounters,
+) {
     persist_activity_poll(
         store,
         ActivityPoll {
             events: trans.events,
             upsert_sessions: trans.upserts,
         },
+        counters,
     );
 }
 
@@ -168,7 +188,9 @@ fn ensure_session_if_absent(
             return manager.current().map(|s| s.id);
         }
         match store.apply_activity_transition(&trans.upserts, &trans.events) {
-            Ok(()) => note_write(),
+            Ok(()) => {
+                note_write();
+            }
             Err(e) => warn!(error = %e, "apply activity transition failed"),
         }
         manager.current().map(|s| s.id)
@@ -183,6 +205,7 @@ fn start_macos_input_loop(
     observe_closed_eyes: &Arc<AtomicBool>,
     session_binder: &Arc<SharedSessionBinder>,
     session_persist: &Arc<tokio::sync::Mutex<()>>,
+    counters: &Arc<control_server::ObserveCounters>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     static INPUT_STATE: std::sync::OnceLock<lumen_platform_macos::InputCounterState> =
         std::sync::OnceLock::new();
@@ -209,6 +232,7 @@ fn start_macos_input_loop(
             let observe_closed_eyes = Arc::clone(observe_closed_eyes);
             let session_binder = Arc::clone(session_binder);
             let session_persist = Arc::clone(session_persist);
+            let counters = Arc::clone(counters);
             Some(tokio::spawn(async move {
                 let mut stats_tick = tokio::time::interval(flush_every);
                 stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -247,8 +271,10 @@ fn start_macos_input_loop(
                             );
                             if let Err(e) = store_in.append_event(event) {
                                 warn!(error = %e, "append input.stats.v1 failed");
+                                counters.note_persist_failed();
                             } else {
                                 note_write();
+                                counters.note_persisted();
                             }
                         }
                         _ = hid_tick.tick() => {
@@ -267,6 +293,7 @@ fn start_macos_input_loop(
                                     persist_interaction_events(
                                         &store_in,
                                         coal.flush_due(std::time::Instant::now()),
+                                        &counters,
                                     );
                                 } else {
                                     coal.discard_text();
@@ -318,15 +345,20 @@ fn start_macos_input_loop(
                                                 persist_interaction_events(
                                                     &store_in,
                                                     vec![attach_selection(&ctx, sel.text)],
+                                                    &counters,
                                                 );
                                             }
                                         }
                                     }
-                                    persist_interaction_events(&store_in, vec![ev]);
+                                    persist_interaction_events(&store_in, vec![ev], &counters);
                                 }
                             }
                             if record_text {
-                                persist_interaction_events(&store_in, coal.flush_due(now));
+                                persist_interaction_events(
+                                    &store_in,
+                                    coal.flush_due(now),
+                                    &counters,
+                                );
                             } else {
                                 coal.discard_text();
                             }
@@ -391,6 +423,18 @@ async fn main() -> Result<()> {
         .unwrap_or(Level::INFO);
     let subscriber = FmtSubscriber::builder().with_max_level(max_level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("mcp") {
+        #[cfg(unix)]
+        {
+            return mcp::run().await;
+        }
+        #[cfg(not(unix))]
+        {
+            anyhow::bail!("lumen-daemon mcp requires a Unix domain socket");
+        }
+    }
 
     info!(
         product = "lumen-navi",
@@ -503,6 +547,7 @@ async fn main() -> Result<()> {
     );
 
     let observe_paused = Arc::new(std::sync::atomic::AtomicBool::new(config.privacy.paused));
+    let observe_counters = Arc::new(control_server::ObserveCounters::default());
     let observe_closed_eyes = Arc::new(std::sync::atomic::AtomicBool::new(
         config.privacy.closed_eyes,
     ));
@@ -723,7 +768,15 @@ async fn main() -> Result<()> {
     // --- Input counter (roast feature: behavioral keys + clicks, opt-in) ---
     // A single static state: the CGEventTap callback holds a &'static ref.
     #[cfg(target_os = "macos")]
-    let _input_handle = start_macos_input_loop(&config, &store, &observe_paused, &observe_closed_eyes, &session_binder, &session_persist);
+    let _input_handle = start_macos_input_loop(
+        &config,
+        &store,
+        &observe_paused,
+        &observe_closed_eyes,
+        &session_binder,
+        &session_persist,
+        &observe_counters,
+    );
     #[cfg(not(target_os = "macos"))]
     let _input_handle = {
         if config.input.enabled {
@@ -823,6 +876,8 @@ async fn main() -> Result<()> {
                     max_artifact_bytes: config.browser.max_artifact_bytes,
                 },
             },
+            Arc::clone(&observe_counters),
+            config.privacy.app_blocklist.clone(),
         );
 
         let socket_path = config.data_dir.join("daemon.sock");
@@ -846,6 +901,7 @@ async fn main() -> Result<()> {
 
     {
         let store_slots = Arc::clone(&store);
+        let assistant = config.assistant.clone();
         tokio::spawn(async move {
             let mut every = tokio::time::interval(Duration::from_secs(60));
             every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -857,6 +913,9 @@ async fn main() -> Result<()> {
                     }
                     Err(e) => warn!(error = %e, "persist history slots failed"),
                     _ => {}
+                }
+                if let Err(e) = summarizer::fill_pending_slot_narratives(&store_slots, &assistant) {
+                    warn!(error = %e, "slot narrative job failed");
                 }
             }
         });
@@ -908,8 +967,9 @@ async fn main() -> Result<()> {
         let audio_cfg = config.audio.clone();
         let privacy = config.privacy.clone();
         let cancel = observe_cancel_rx.clone();
+        let counters = Arc::clone(&observe_counters);
         Some(tokio::spawn(async move {
-            run_audio_loop(store_a, audio_cfg, privacy, cancel).await
+            run_audio_loop(store_a, audio_cfg, privacy, cancel, counters).await
         }))
     } else {
         None
@@ -976,6 +1036,7 @@ async fn main() -> Result<()> {
         let observe_paused = Arc::clone(&observe_paused);
         let observe_closed_eyes = Arc::clone(&observe_closed_eyes);
         let session_persist = Arc::clone(&session_persist);
+        let counters = Arc::clone(&observe_counters);
         tokio::spawn(async move {
             tick.tick().await; // consume the immediate tick
             info!("activity tracker running (screen capture unavailable, tracking time only)");
@@ -983,7 +1044,7 @@ async fn main() -> Result<()> {
             orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
             {
                 let _persist = session_persist.lock().await;
-                persist_activity_poll(&store_act, orch.poll_activity().await);
+                persist_activity_poll(&store_act, orch.poll_activity().await, &counters);
             }
             loop {
                 tokio::select! {
@@ -991,13 +1052,13 @@ async fn main() -> Result<()> {
                         orch.set_paused(observe_paused.load(Ordering::Relaxed));
                         orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
                         let _persist = session_persist.lock().await;
-                        persist_activity_poll(&store_act, orch.poll_activity().await);
-                        persist_session_transition(&store_act, orch.close_idle_session());
+                        persist_activity_poll(&store_act, orch.poll_activity().await, &counters);
+                        persist_session_transition(&store_act, orch.close_idle_session(), &counters);
                     }
                     _ = act_cancel.changed() => {
                         if *act_cancel.borrow() {
                             let _persist = session_persist.lock().await;
-                            persist_session_transition(&store_act, orch.force_close_session());
+                            persist_session_transition(&store_act, orch.force_close_session(), &counters);
                             break;
                         }
                     }
@@ -1033,6 +1094,7 @@ async fn main() -> Result<()> {
         let store_w = Arc::clone(&store);
         let ocr_on = config.ocr.enabled;
         let ax_on = config.ax.enabled;
+        let persist_counters = Arc::clone(&observe_counters);
         let persist = tokio::spawn(async move {
             while let Some(batch) = rx.recv().await {
                 let mut upserts = Vec::new();
@@ -1047,6 +1109,9 @@ async fn main() -> Result<()> {
                         store_w.apply_activity_transition(&upserts, &batch.session_events)
                     {
                         warn!(error = %e, "apply capture session transition failed");
+                        persist_counters.note_persist_failed();
+                    } else {
+                        persist_counters.note_persisted();
                     }
                 }
                 for (event, frame) in batch.frames {
@@ -1057,6 +1122,7 @@ async fn main() -> Result<()> {
                     ) {
                         Ok(stored) => {
                             note_write();
+                            persist_counters.note_persisted();
                             if ocr_on {
                                 match store_w.enqueue_job(stored.id, "ocr_screen") {
                                     Ok(Some(_)) => {}
@@ -1077,7 +1143,10 @@ async fn main() -> Result<()> {
                                 "persisted screenshot"
                             );
                         }
-                        Err(e) => warn!(error = %e, "persist failed"),
+                        Err(e) => {
+                            warn!(error = %e, "persist failed");
+                            persist_counters.note_persist_failed();
+                        }
                     }
                 }
             }
@@ -1099,7 +1168,7 @@ async fn main() -> Result<()> {
         orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
         {
             let _persist = session_persist.lock().await;
-            persist_activity_poll(&store, orch.poll_activity().await);
+            persist_activity_poll(&store, orch.poll_activity().await, &observe_counters);
         }
 
         info!("observe screen loop running (Ctrl+C to stop if ticks=0)");
@@ -1127,7 +1196,7 @@ async fn main() -> Result<()> {
                     orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
                     {
                         let _persist = session_persist.lock().await;
-                        persist_activity_poll(&store, orch.poll_activity().await);
+                        persist_activity_poll(&store, orch.poll_activity().await, &observe_counters);
                     }
 
                     // Capture is gated on Cua readiness: while Cua is down the
@@ -1153,7 +1222,16 @@ async fn main() -> Result<()> {
                     }
                     {
                         let _persist = session_persist.lock().await;
-                        persist_session_transition(&store, orch.close_idle_session());
+                        persist_session_transition(
+                            &store,
+                            orch.close_idle_session(),
+                            &observe_counters,
+                        );
+                    }
+                    {
+                        let st = orch.stats();
+                        observe_counters
+                            .sync_capture_stats(st.skipped_gate, st.dropped_backpressure);
                     }
                 }
                 _ = capture_tick.tick() => {
@@ -1175,6 +1253,9 @@ async fn main() -> Result<()> {
                                 screen_status.last_error = Some(e);
                             }
                         }
+                        let st = orch.stats();
+                        observe_counters
+                            .sync_capture_stats(st.skipped_gate, st.dropped_backpressure);
                     }
                 }
             }
@@ -1182,7 +1263,7 @@ async fn main() -> Result<()> {
 
         {
             let _persist = session_persist.lock().await;
-            persist_session_transition(&store, orch.force_close_session());
+            persist_session_transition(&store, orch.force_close_session(), &observe_counters);
         }
         drop(tx);
         let _ = persist.await;
@@ -1362,6 +1443,7 @@ async fn run_audio_loop(
     config: AudioConfig,
     privacy: PrivacyConfig,
     mut cancel: watch::Receiver<bool>,
+    counters: Arc<control_server::ObserveCounters>,
 ) -> Result<lumen_sources_media::AudioStats> {
     let open_cfg = MicOpenConfig {
         preferred_sample_rate: config.sample_rate,
@@ -1416,6 +1498,7 @@ async fn run_audio_loop(
                     match store.put_and_append(cap.event, cap.media_type, &cap.wav) {
                         Ok(stored) => {
                             note_write();
+                            counters.note_persisted();
                             if enqueue_asr && voiced {
                                 match store.enqueue_job(stored.id, JOB_KIND_TRANSCRIBE_AUDIO) {
                                     Ok(Some(_)) => {}
@@ -1431,7 +1514,10 @@ async fn run_audio_loop(
                                 "persisted audio chunk"
                             );
                         }
-                        Err(e) => warn!(error = %e, "audio persist failed"),
+                        Err(e) => {
+                            warn!(error = %e, "audio persist failed");
+                            counters.note_persist_failed();
+                        }
                     }
                     if max_ticks > 0 && orch.stats().chunks_emitted >= max_ticks {
                         break;
@@ -1731,6 +1817,7 @@ mod tests {
         persist_session_transition(
             &store,
             binder.bind(Some("Mail"), Some("com.apple.mail"), "focus_change"),
+            &control_server::ObserveCounters::default(),
         );
         let mail = binder.current_id().unwrap();
         assert_ne!(mail, safari);
