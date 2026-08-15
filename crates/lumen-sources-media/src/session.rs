@@ -37,9 +37,10 @@ impl SessionManager {
         let mut closed = None;
 
         if let Some(ref mut s) = self.open {
-            let app_switched = bundle.is_some()
-                && s.primary_bundle.is_some()
-                && s.primary_bundle.as_deref() != bundle;
+            let app_switched = match (s.primary_bundle.as_deref(), bundle) {
+                (Some(prev), Some(next)) => prev != next,
+                _ => s.primary_app.as_deref() != app,
+            };
             if let Some(last) = self.last_activity {
                 let idle = (now - last).num_milliseconds().max(0) as u64;
                 if idle >= self.idle_ms || app_switched {
@@ -169,5 +170,26 @@ mod tests {
                 "session.started.v1"
             ]
         );
+    }
+
+    #[test]
+    fn missing_bundle_still_switches_on_app_name() {
+        let mut m = SessionManager::new(60_000);
+        m.touch(Some("Safari"), None, "focus_change");
+        let (_, closed) = m.touch(Some("Mail"), None, "focus_change");
+        assert!(closed.is_some());
+        assert_eq!(closed.unwrap().primary_app.as_deref(), Some("Safari"));
+    }
+
+    #[test]
+    fn idle_close_requires_no_fresh_touch() {
+        let mut m = SessionManager::new(10);
+        m.touch(Some("Safari"), Some("com.apple.Safari"), "focus_change");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let closed = m.close_if_idle();
+        assert!(closed.is_some());
+        assert_eq!(m.current(), None);
+        let kinds: Vec<_> = m.drain_lifecycle().into_iter().map(|e| e.kind).collect();
+        assert!(kinds.iter().any(|k| k == "session.ended.v1"));
     }
 }

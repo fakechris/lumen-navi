@@ -70,24 +70,23 @@ impl InteractionCoalescer {
                     ));
                 } else if command || control {
                     out.extend(self.flush_text(now));
-                    if let Some(name) = shortcut_name(keycode) {
-                        out.push(attach(
-                            event_kind::KEYBOARD_SHORTCUT_V1,
-                            &ctx,
-                            json!({
-                                "payload_version": 1,
-                                "keyboard": {
-                                    "key_equivalent": name,
-                                    "modifiers": mods,
-                                }
-                            }),
-                        ));
-                    }
+                    let name = shortcut_name(keycode)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("0x{keycode:02x}"));
+                    out.push(attach(
+                        event_kind::KEYBOARD_SHORTCUT_V1,
+                        &ctx,
+                        json!({
+                            "payload_version": 1,
+                            "keyboard": {
+                                "key_equivalent": name,
+                                "modifiers": mods,
+                            }
+                        }),
+                    ));
                 } else if let Some(ch) = unicode.filter(|s| !s.is_empty() && s.chars().any(|c| !c.is_control()))
                 {
-                    if self.text_ctx.as_ref().map(|c| c.bundle_id.as_deref())
-                        != Some(ctx.bundle_id.as_deref())
-                    {
+                    if self.text_ctx.as_ref().map(text_identity) != Some(text_identity(&ctx)) {
                         out.extend(self.flush_text(now));
                     }
                     self.text.push_str(&ch);
@@ -126,7 +125,7 @@ impl InteractionCoalescer {
                                 }
                             }),
                         ));
-                    } else if button == 1 {
+                    } else if button == 1 || (button == 0 && raw.control) {
                         out.push(attach(
                             event_kind::MOUSE_CONTEXT_MENU_V1,
                             &ctx,
@@ -154,6 +153,12 @@ impl InteractionCoalescer {
             }
         }
         out
+    }
+
+    pub fn discard_text(&mut self) {
+        self.text.clear();
+        self.text_ctx = None;
+        self.last_text_at = None;
     }
 
     pub fn flush_due(&mut self, now: Instant) -> Vec<SourceEvent> {
@@ -186,6 +191,15 @@ impl InteractionCoalescer {
             }),
         )]
     }
+}
+
+fn text_identity(ctx: &InteractionContext) -> (Option<&str>, Option<&str>, Option<&str>, Option<Uuid>) {
+    (
+        ctx.bundle_id.as_deref().or(ctx.app_name.as_deref()),
+        ctx.window_title.as_deref(),
+        ctx.url.as_deref(),
+        ctx.session_id,
+    )
 }
 
 fn attach(kind: &str, ctx: &InteractionContext, mut payload: serde_json::Value) -> SourceEvent {
@@ -248,6 +262,7 @@ fn button_name(button: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     fn ctx() -> InteractionContext {
         InteractionContext {
@@ -286,6 +301,52 @@ mod tests {
         assert_eq!(flushed.len(), 1);
         assert_eq!(flushed[0].kind, event_kind::KEYBOARD_TEXT_INPUT_V1);
         assert_eq!(flushed[0].payload["keyboard"]["text"], "hi");
+        assert!(flushed[0].session_id.is_none());
+    }
+
+    #[test]
+    fn binds_session_id_and_control_click_is_context_menu() {
+        let mut c = InteractionCoalescer::default();
+        let sid = Uuid::new_v4();
+        let mut ctx = ctx();
+        ctx.session_id = Some(sid);
+        let t0 = Instant::now();
+        c.push(
+            ObserveHidEvent {
+                kind: ObserveHidKind::MouseDown,
+                keycode: 0,
+                unicode: None,
+                command: false,
+                control: true,
+                shift: false,
+                option: false,
+                button: 0,
+                x: 1.0,
+                y: 1.0,
+                click_count: 1,
+            },
+            ctx.clone(),
+            t0,
+        );
+        let evs = c.push(
+            ObserveHidEvent {
+                kind: ObserveHidKind::MouseUp,
+                keycode: 0,
+                unicode: None,
+                command: false,
+                control: true,
+                shift: false,
+                option: false,
+                button: 0,
+                x: 1.0,
+                y: 1.0,
+                click_count: 1,
+            },
+            ctx,
+            t0,
+        );
+        assert_eq!(evs[0].kind, event_kind::MOUSE_CONTEXT_MENU_V1);
+        assert_eq!(evs[0].session_id, Some(sid));
     }
 
     #[test]

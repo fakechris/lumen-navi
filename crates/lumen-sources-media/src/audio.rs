@@ -346,6 +346,7 @@ mod tests {
             PrivacyConfig {
                 paused: true,
                 closed_eyes: false,
+                app_blocklist: Vec::new(),
             },
         );
         assert!(orch

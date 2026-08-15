@@ -5,7 +5,7 @@
 mod control_server;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -30,11 +30,12 @@ use lumen_process::{
 };
 use lumen_sources_browser::BrowserIngestPolicy;
 use lumen_sources_media::{
-    AudioOrchestrator, CaptureOrchestrator, CapturedBatch, InteractionCoalescer,
+    ActivityPoll, AudioOrchestrator, CaptureOrchestrator, CapturedBatch, InteractionCoalescer,
     InteractionContext,
 };
 use lumen_store::{EventStore, ReclaimKind, RecoveryPolicy, SCHEMA_VERSION, SqliteStore};
-use lumen_types::{event_kind, SourceEvent, SourceKind, TriggerReason};
+use lumen_types::{event_kind, SessionStatus, SourceEvent, SourceKind, TriggerReason};
+use uuid::Uuid;
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn, Level};
@@ -83,6 +84,57 @@ fn default_data_dir() -> std::path::PathBuf {
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         std::path::PathBuf::from(home).join(".lumen-navi")
+    }
+}
+
+fn persist_interaction_events(store: &SqliteStore, events: Vec<SourceEvent>) {
+    for ev in events {
+        if let Err(e) = store.append_event(ev) {
+            warn!(error = %e, "append interaction event failed");
+        } else {
+            note_write();
+        }
+    }
+}
+
+fn attach_selection(ctx: &InteractionContext, text: String) -> SourceEvent {
+    let payload = json!({
+        "payload_version": 1,
+        "app_name": ctx.app_name,
+        "bundle_id": ctx.bundle_id,
+        "window_title": ctx.window_title,
+        "url": ctx.url,
+        "selection": { "text": text },
+    });
+    let mut ev = SourceEvent::new(SourceKind::Screen, event_kind::SELECTION_CHANGED_V1, payload);
+    ev.session_id = ctx.session_id;
+    ev
+}
+
+fn persist_activity_poll(
+    store: &SqliteStore,
+    poll: ActivityPoll,
+    current_session: &Mutex<Option<Uuid>>,
+) {
+    let mut sid = current_session.lock().ok().and_then(|g| *g);
+    for session in poll.upsert_sessions {
+        if let Err(e) = store.upsert_session(&session) {
+            warn!(error = %e, "upsert activity session failed");
+        }
+        match session.status {
+            SessionStatus::Open => sid = Some(session.id),
+            SessionStatus::Closed if sid == Some(session.id) => sid = None,
+            SessionStatus::Closed => {}
+        }
+    }
+    if let Ok(mut g) = current_session.lock() {
+        *g = sid;
+    }
+    for ev in poll.events {
+        match store.append_event(ev) {
+            Ok(()) => note_write(),
+            Err(e) => warn!(error = %e, "append activity event failed"),
+        }
     }
 }
 
@@ -250,6 +302,10 @@ async fn main() -> Result<()> {
         schema = SCHEMA_VERSION,
         "durable store open"
     );
+
+    let observe_paused = Arc::new(std::sync::atomic::AtomicBool::new(config.privacy.paused));
+    let observe_closed_eyes = Arc::new(std::sync::atomic::AtomicBool::new(config.privacy.closed_eyes));
+    let current_session: Arc<Mutex<Option<Uuid>>> = Arc::new(Mutex::new(None));
 
     let recovery = store
         .recover_after_unclean_shutdown(&recovery_policy_from_config(&config))
@@ -461,7 +517,7 @@ async fn main() -> Result<()> {
     // A single static state: the CGEventTap callback holds a &'static ref.
     static INPUT_STATE: std::sync::OnceLock<lumen_platform_macos::InputCounterState> =
         std::sync::OnceLock::new();
-    let tap_wanted = config.input.enabled || config.input.observe_interactions;
+    let tap_wanted = config.input.enabled;
     let _input_handle = if tap_wanted {
         let state = INPUT_STATE.get_or_init(lumen_platform_macos::InputCounterState::default);
         match lumen_platform_macos::start_input_counter(state) {
@@ -478,8 +534,10 @@ async fn main() -> Result<()> {
                 let stats_on = config.input.enabled;
                 let observe_on = config.input.observe_interactions;
                 let record_text = config.input.record_text;
-                let paused = config.privacy.paused;
-                let closed_eyes = config.privacy.closed_eyes;
+                let blocklist = config.privacy.app_blocklist.clone();
+                let observe_paused = Arc::clone(&observe_paused);
+                let observe_closed_eyes = Arc::clone(&observe_closed_eyes);
+                let current_session = Arc::clone(&current_session);
                 Some(tokio::spawn(async move {
                     let mut stats_tick = tokio::time::interval(flush_every);
                     stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -507,65 +565,73 @@ async fn main() -> Result<()> {
                                 }
                             }
                             _ = hid_tick.tick() => {
-                                if !observe_on || paused || closed_eyes {
+                                let paused = observe_paused.load(Ordering::Relaxed);
+                                let closed_eyes = observe_closed_eyes.load(Ordering::Relaxed);
+                                let locked = host::is_screen_locked();
+                                if !observe_on || paused || closed_eyes || locked {
                                     let _ = lumen_platform_macos::input_drain_hid(state);
+                                    coal.discard_text();
                                     continue;
                                 }
                                 let raw = lumen_platform_macos::input_drain_hid(state);
                                 if raw.is_empty() {
-                                    for ev in coal.flush_due(std::time::Instant::now()) {
-                                        let _ = store_in.append_event(ev);
+                                    if record_text {
+                                        persist_interaction_events(
+                                            &store_in,
+                                            coal.flush_due(std::time::Instant::now()),
+                                        );
+                                    } else {
+                                        coal.discard_text();
                                     }
                                     continue;
                                 }
                                 let frontmost = front.frontmost().await.ok().flatten();
+                                if blocklist.iter().any(|b| {
+                                    frontmost
+                                        .as_ref()
+                                        .and_then(|f| f.bundle_id.as_deref())
+                                        == Some(b.as_str())
+                                }) {
+                                    coal.discard_text();
+                                    continue;
+                                }
+                                let session_id = current_session.lock().ok().and_then(|g| *g);
                                 let ctx = InteractionContext {
                                     app_name: frontmost.as_ref().map(|f| f.app_name.clone()),
                                     bundle_id: frontmost.as_ref().and_then(|f| f.bundle_id.clone()),
                                     window_title: frontmost.as_ref().and_then(|f| f.window_title.clone()),
                                     url: frontmost.as_ref().and_then(|f| f.tab_url.clone()),
-                                    session_id: None,
+                                    session_id,
                                 };
                                 let now = std::time::Instant::now();
+                                let mut last_selection: Option<String> = None;
                                 for hid in raw {
-                                    let mut evs = coal.push(hid.clone(), ctx.clone(), now);
+                                    let mut evs = coal.push(hid, ctx.clone(), now);
                                     if !record_text {
                                         evs.retain(|e| e.kind != event_kind::KEYBOARD_TEXT_INPUT_V1);
                                     }
                                     for ev in evs {
-                                        if ev.kind == event_kind::MOUSE_CLICK_V1
+                                        let is_sel_trigger = ev.kind == event_kind::MOUSE_CLICK_V1
                                             || ev.kind == event_kind::MOUSE_CONTEXT_MENU_V1
-                                        {
+                                            || ev.kind == event_kind::MOUSE_DRAG_V1;
+                                        if record_text && is_sel_trigger {
                                             if let Some(sel) = lumen_platform_macos::focused_selection() {
-                                                if !sel.text.trim().is_empty() {
-                                                    let text = sel.text;
-                                                    let mut payload = ev.payload.clone();
-                                                    if let Some(obj) = payload.as_object_mut() {
-                                                        obj.insert(
-                                                            "selection".into(),
-                                                            serde_json::json!({ "text": text }),
-                                                        );
-                                                    }
-                                                    let sel_ev = SourceEvent::new(
-                                                        SourceKind::Screen,
-                                                        event_kind::SELECTION_CHANGED_V1,
-                                                        payload,
-                                                    );
-                                                    let _ = store_in.append_event(sel_ev);
+                                                if !sel.text.trim().is_empty()
+                                                    && last_selection.as_deref() != Some(sel.text.as_str())
+                                                {
+                                                    last_selection = Some(sel.text.clone());
+                                                    let sel_ev = attach_selection(&ctx, sel.text);
+                                                    persist_interaction_events(&store_in, vec![sel_ev]);
                                                 }
                                             }
                                         }
-                                        if let Err(e) = store_in.append_event(ev) {
-                                            warn!(error = %e, "append interaction event failed");
-                                        } else {
-                                            note_write();
-                                        }
+                                        persist_interaction_events(&store_in, vec![ev]);
                                     }
                                 }
-                                for ev in coal.flush_due(now) {
-                                    if record_text {
-                                        let _ = store_in.append_event(ev);
-                                    }
+                                if record_text {
+                                    persist_interaction_events(&store_in, coal.flush_due(now));
+                                } else {
+                                    coal.discard_text();
                                 }
                             }
                         }
@@ -649,7 +715,7 @@ async fn main() -> Result<()> {
     let _api_handle: Option<tokio::task::JoinHandle<()>> = if config.api.enabled {
         let control_state = control_server::ControlState::new(
             Arc::clone(&store),
-            config.privacy.paused,
+            Arc::clone(&observe_paused),
             config.privacy.closed_eyes,
             config.retention.max_blob_mb.saturating_mul(1024 * 1024),
             vec![
@@ -807,6 +873,9 @@ async fn main() -> Result<()> {
         ));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let act_cancel = observe_cancel_rx.clone();
+        let current_session = Arc::clone(&current_session);
+        let observe_paused = Arc::clone(&observe_paused);
+        let observe_closed_eyes = Arc::clone(&observe_closed_eyes);
         tokio::spawn(async move {
             tick.tick().await; // initial
             info!("activity tracker running (screen capture unavailable, tracking time only)");
@@ -816,17 +885,32 @@ async fn main() -> Result<()> {
             let _ = act_cancel;
             loop {
                 tick.tick().await;
-                for ev in orch.poll_activity().await {
-                    match store_act.append_event(ev) {
-                        Ok(()) => note_write(),
-                        Err(e) => warn!(error = %e, "append activity event failed"),
-                    }
-                }
+                orch.set_paused(observe_paused.load(Ordering::Relaxed));
+                orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
+                persist_activity_poll(
+                    &store_act,
+                    orch.poll_activity().await,
+                    &current_session,
+                );
                 if let Some(closed) = orch.close_idle_session() {
-                    let _ = store_act.upsert_session(&closed);
-                    for ev in orch.drain_session_lifecycle() {
-                        let _ = store_act.append_event(ev);
+                    if current_session
+                        .lock()
+                        .ok()
+                        .and_then(|g| *g)
+                        == Some(closed.id)
+                    {
+                        if let Ok(mut g) = current_session.lock() {
+                            *g = None;
+                        }
                     }
+                    persist_activity_poll(
+                        &store_act,
+                        ActivityPoll {
+                            events: orch.drain_session_lifecycle(),
+                            upsert_sessions: vec![closed],
+                        },
+                        &current_session,
+                    );
                 }
             }
         });
@@ -932,16 +1016,13 @@ async fn main() -> Result<()> {
                     break;
                 }
                 _ = focus_tick.tick() => {
-                    // Activity tracking: emit a lightweight activity.focus.v1
-                    // heartbeat independent of the screenshot path. This is the
-                    // data source for the time-tracking projection — survives
-                    // even when screenshots are visually-debounced away.
-                    for ev in orch.poll_activity().await {
-                        match store.append_event(ev) {
-                            Ok(()) => note_write(),
-                            Err(e) => warn!(error = %e, "append activity event failed"),
-                        }
-                    }
+                    orch.set_paused(observe_paused.load(Ordering::Relaxed));
+                    orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
+                    persist_activity_poll(
+                        &store,
+                        orch.poll_activity().await,
+                        &current_session,
+                    );
 
                     // Capture is gated on Cua readiness: while Cua is down the
                     // loop keeps tracking activity only, and starts capturing
@@ -965,13 +1046,14 @@ async fn main() -> Result<()> {
                         }
                     }
                     if let Some(closed) = orch.close_idle_session() {
-                        let _ = store.upsert_session(&closed);
-                    }
-                    for ev in orch.drain_session_lifecycle() {
-                        match store.append_event(ev) {
-                            Ok(()) => note_write(),
-                            Err(e) => warn!(error = %e, "append session event failed"),
-                        }
+                        persist_activity_poll(
+                            &store,
+                            ActivityPoll {
+                                events: orch.drain_session_lifecycle(),
+                                upsert_sessions: vec![closed],
+                            },
+                            &current_session,
+                        );
                     }
                 }
                 _ = capture_tick.tick() => {
@@ -997,7 +1079,14 @@ async fn main() -> Result<()> {
         }
 
         if let Some(s) = orch.force_close_session() {
-            let _ = store.upsert_session(&s);
+            persist_activity_poll(
+                &store,
+                ActivityPoll {
+                    events: orch.drain_session_lifecycle(),
+                    upsert_sessions: vec![s],
+                },
+                &current_session,
+            );
         }
         drop(tx);
         let _ = persist.await;

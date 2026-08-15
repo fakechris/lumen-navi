@@ -233,16 +233,17 @@ unsafe extern "C" fn tap_callback(
             }
             let loc = CGEventGetLocation(event);
             let clicks = CGEventGetIntegerValueField(event, K_CG_EVENT_CLICK_STATE).max(1) as u32;
+            let flags = CGEventGetFlags(event);
             enqueue_hid(
                 counter,
                 ObserveHidEvent {
                     kind: ObserveHidKind::MouseDown,
                     keycode: 0,
                     unicode: None,
-                    command: false,
-                    control: false,
-                    shift: false,
-                    option: false,
+                    command: (flags & FLAG_CMD) != 0,
+                    control: (flags & FLAG_CTRL) != 0,
+                    shift: (flags & FLAG_SHIFT) != 0,
+                    option: (flags & FLAG_OPTION) != 0,
                     button,
                     x: loc.x,
                     y: loc.y,
@@ -257,16 +258,17 @@ unsafe extern "C" fn tap_callback(
                 _ => 2,
             };
             let loc = CGEventGetLocation(event);
+            let flags = CGEventGetFlags(event);
             enqueue_hid(
                 counter,
                 ObserveHidEvent {
                     kind: ObserveHidKind::MouseUp,
                     keycode: 0,
                     unicode: None,
-                    command: false,
-                    control: false,
-                    shift: false,
-                    option: false,
+                    command: (flags & FLAG_CMD) != 0,
+                    control: (flags & FLAG_CTRL) != 0,
+                    shift: (flags & FLAG_SHIFT) != 0,
+                    option: (flags & FLAG_OPTION) != 0,
                     button,
                     x: loc.x,
                     y: loc.y,

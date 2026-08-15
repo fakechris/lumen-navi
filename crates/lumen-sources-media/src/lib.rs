@@ -13,6 +13,6 @@ pub use activity::{ActivityAccumulator, ActivitySample, ActivityTick};
 pub use audio::{
     synthetic_silence_chunk, synthetic_tone_chunk, AudioOrchestrator, AudioStats, CapturedAudio,
 };
-pub use orchestrator::{CaptureOrchestrator, CaptureStats, CapturedBatch};
+pub use orchestrator::{ActivityPoll, CaptureOrchestrator, CaptureStats, CapturedBatch};
 pub use interaction::{InteractionCoalescer, InteractionContext};
 pub use session::SessionManager;

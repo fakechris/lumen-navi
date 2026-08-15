@@ -52,6 +52,7 @@ struct ActivityKey {
     /// github.com → gmail.com within one Safari window opens a new segment,
     /// each accruing its own duration → per-website time tracking.
     tab_url: Option<String>,
+    window_id: Option<u64>,
     is_idle: bool,
     is_locked: bool,
 }
@@ -65,9 +66,20 @@ impl ActivityKey {
             bundle_id: sample.frontmost.as_ref().and_then(|f| f.bundle_id.clone()),
             window_title: sample.frontmost.as_ref().and_then(|f| f.window_title.clone()),
             tab_url: sample.frontmost.as_ref().and_then(|f| f.tab_url.clone()),
+            window_id: sample.frontmost.as_ref().and_then(|f| f.window_id),
             is_idle,
             is_locked: sample.is_locked,
         }
+    }
+
+    fn window_identity(&self) -> (&Option<String>, &Option<String>, &Option<String>, &Option<String>, Option<u64>) {
+        (
+            &self.app_name,
+            &self.bundle_id,
+            &self.window_title,
+            &self.tab_url,
+            self.window_id,
+        )
     }
 }
 
@@ -101,6 +113,10 @@ impl ActivityAccumulator {
         now: chrono::DateTime<Utc>,
     ) -> ActivityTick {
         let key = ActivityKey::from(&sample, self.idle_threshold);
+        let window_identity_changed = match &self.last_key {
+            None => true,
+            Some(prev) => prev.window_identity() != key.window_identity(),
+        };
         let changed = match &self.last_key {
             None => true,
             Some(prev) => prev != &key,
@@ -119,7 +135,7 @@ impl ActivityAccumulator {
         self.last_key = Some(key.clone());
         self.last_emit = Some(now);
         let focus = Some(make_event(&sample, &key, now));
-        let window_changed = if changed && !key.is_idle && !key.is_locked {
+        let window_changed = if window_identity_changed && !key.is_idle && !key.is_locked {
             Some(make_window_changed(&sample, &key, now))
         } else {
             None
@@ -182,7 +198,7 @@ fn make_window_changed(
 mod tests {
     use super::*;
 
-    fn sample(app: &str, title: Option<&str>, idle: f64) -> ActivitySample {
+    fn sample_window(app: &str, title: Option<&str>, idle: f64, window_id: Option<u64>) -> ActivitySample {
         ActivitySample {
             frontmost: Some(FrontmostApp {
                 app_name: app.into(),
@@ -191,12 +207,16 @@ mod tests {
                 ls_category_type: None,
                 tab_url: None,
                 pid: None,
-                window_id: None,
+                window_id,
             }),
             idle_seconds: idle,
             is_locked: false,
             display_sleep_prevented: false,
         }
+    }
+
+    fn sample(app: &str, title: Option<&str>, idle: f64) -> ActivitySample {
+        sample_window(app, title, idle, None)
     }
 
     #[test]
@@ -274,5 +294,19 @@ mod tests {
         // Past heartbeat → emit even though state unchanged.
         now += chrono::Duration::seconds(3);
         assert!(acc.ingest(sample("Safari", Some("Hello"), 1.0), now).is_some());
+    }
+
+    #[test]
+    fn window_id_change_emits_window_changed_idle_does_not() {
+        let mut acc = ActivityAccumulator::new(Duration::from_secs(180), Duration::from_secs(60));
+        let mut now = Utc::now();
+        acc.ingest(sample_window("Safari", Some("Doc"), 1.0, Some(1)), now);
+        now += chrono::Duration::seconds(1);
+        let tick = acc.ingest_detailed(sample_window("Safari", Some("Doc"), 1.0, Some(2)), now);
+        assert!(tick.window_changed.is_some());
+        now += chrono::Duration::seconds(1);
+        let idle = acc.ingest_detailed(sample_window("Safari", Some("Doc"), 200.0, Some(2)), now);
+        assert!(idle.focus.is_some());
+        assert!(idle.window_changed.is_none());
     }
 }

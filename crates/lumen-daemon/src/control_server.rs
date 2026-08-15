@@ -66,7 +66,7 @@ pub struct BrowserRuntimeState {
 impl ControlState {
     pub fn new(
         store: Arc<SqliteStore>,
-        paused: bool,
+        paused: Arc<AtomicBool>,
         closed_eyes: bool,
         max_blob_bytes: u64,
         sources: Vec<SourceStatus>,
@@ -74,7 +74,7 @@ impl ControlState {
     ) -> Self {
         Self {
             store,
-            paused: Arc::new(AtomicBool::new(paused)),
+            paused,
             closed_eyes,
             max_blob_bytes,
             screen_locked: Arc::new(lumen_platform_host::is_screen_locked),
@@ -856,6 +856,7 @@ pub fn spawn_tcp(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
     use axum::body::Body;
@@ -878,7 +879,7 @@ mod tests {
         let store = Arc::new(lumen_store::SqliteStore::open(dir.path()).unwrap());
         let mut state = ControlState::new(
             store,
-            false,
+            Arc::new(AtomicBool::new(false)),
             false,
             1024 * 1024,
             vec![],

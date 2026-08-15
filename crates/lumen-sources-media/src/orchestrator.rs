@@ -40,6 +40,12 @@ pub struct CaptureStats {
     pub dropped_backpressure: u64,
 }
 
+#[derive(Debug, Default)]
+pub struct ActivityPoll {
+    pub events: Vec<SourceEvent>,
+    pub upsert_sessions: Vec<ActivitySession>,
+}
+
 pub struct CaptureOrchestrator {
     displays: Arc<dyn DisplayEnumerator>,
     capturer: Arc<dyn ScreenCapturer>,
@@ -173,6 +179,10 @@ impl CaptureOrchestrator {
         self.sessions.drain_lifecycle()
     }
 
+    pub fn current_session_id(&self) -> Option<Uuid> {
+        self.sessions.current().map(|s| s.id)
+    }
+
     /// Poll frontmost app; returns a focus/title trigger if changed.
     pub async fn poll_focus_trigger(&mut self) -> Option<TriggerReason> {
         let cur = self.frontmost.frontmost().await.ok().flatten()?;
@@ -207,38 +217,49 @@ impl CaptureOrchestrator {
     /// Respects pause/closed-eyes (no event emitted while user opted out) but
     /// **not** screen-lock (a lock is itself meaningful activity context, so we
     /// record it with `is_locked=true`).
-    pub async fn poll_activity(&mut self) -> Vec<SourceEvent> {
+    pub async fn poll_activity(&mut self) -> ActivityPoll {
         if self.paused.load(Ordering::Relaxed) || self.privacy.paused {
-            return Vec::new();
+            return ActivityPoll::default();
         }
         if self.closed_eyes.load(Ordering::Relaxed) || self.privacy.closed_eyes {
-            return Vec::new();
+            return ActivityPoll::default();
         }
 
         let frontmost = self.frontmost.frontmost().await.ok().flatten();
+        if self.privacy.blocks_bundle(frontmost.as_ref().and_then(|f| f.bundle_id.as_deref())) {
+            return ActivityPoll::default();
+        }
         let idle_seconds = self.idle.idle_seconds().await.unwrap_or(0.0).max(0.0);
         let is_locked = self.lock.is_locked().await.unwrap_or(false);
         let display_sleep_prevented = self.power.display_sleep_prevented().await.unwrap_or(false);
+        let sample = ActivitySample {
+            frontmost: frontmost.clone(),
+            idle_seconds,
+            is_locked,
+            display_sleep_prevented,
+        };
+        let key_idle = is_locked
+            || (idle_seconds >= (self.capture.idle_session_ms as f64 / 1000.0)
+                && !display_sleep_prevented);
 
+        let mut upserts = Vec::new();
         if let Some(ref front) = frontmost {
-            if !is_locked {
-                let _ = self.sessions.touch(
+            if !is_locked && !key_idle {
+                let (_, closed) = self.sessions.touch(
                     Some(front.app_name.as_str()),
                     front.bundle_id.as_deref(),
                     "focus_change",
                 );
+                if let Some(closed) = closed {
+                    upserts.push(closed);
+                }
+                if let Some(open) = self.sessions.current().cloned() {
+                    upserts.push(open);
+                }
             }
         }
 
-        let tick = self.activity.ingest_detailed(
-            ActivitySample {
-                frontmost,
-                idle_seconds,
-                is_locked,
-                display_sleep_prevented,
-            },
-            chrono::Utc::now(),
-        );
+        let tick = self.activity.ingest_detailed(sample, chrono::Utc::now());
         let sid = self.sessions.current().map(|s| s.id);
         let bind = |mut ev: SourceEvent| {
             if let Some(id) = sid {
@@ -253,7 +274,10 @@ impl CaptureOrchestrator {
         if let Some(ev) = tick.focus {
             out.push(bind(ev));
         }
-        out
+        ActivityPoll {
+            events: out,
+            upsert_sessions: upserts,
+        }
     }
 
     /// Run one capture decision for `reason`. Returns None if gated/skipped.
