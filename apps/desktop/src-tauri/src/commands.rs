@@ -648,6 +648,66 @@ pub struct LlmReply {
     pub reasoning: Option<String>,
 }
 
+/// Some OpenAI-compatible providers (MiniMax, Qwen, GLM…) leave the model's
+/// chain-of-thought inline in content as `<think>…</think>` instead of a
+/// separate field. Split those blocks out so the UI can render them
+/// collapsed instead of spilling thinking into the answer.
+fn split_inline_think(content: &str) -> (String, Option<String>) {
+    const TAGS: [(&str, &str); 2] = [("<think>", "</think>"), ("<thinking>", "</thinking>")];
+    let lower = content.to_ascii_lowercase();
+    let mut thoughts: Vec<String> = Vec::new();
+    let mut clean = String::with_capacity(content.len());
+    let mut cursor = 0usize;
+    while cursor < content.len() {
+        // Earliest opening tag from here.
+        let next = TAGS
+            .iter()
+            .filter_map(|(open, close)| {
+                lower[cursor..]
+                    .find(open)
+                    .map(|i| (cursor + i, open.len(), close))
+            })
+            .min_by_key(|(pos, _, _)| *pos);
+        match next {
+            None => {
+                clean.push_str(&content[cursor..]);
+                break;
+            }
+            Some((pos, open_len, close)) => {
+                clean.push_str(&content[cursor..pos]);
+                match lower[pos..].find(close) {
+                    Some(c) => {
+                        thoughts.push(content[pos + open_len..pos + c].trim().to_string());
+                        cursor = pos + c + close.len();
+                    }
+                    None => {
+                        // Unterminated think block: treat the rest as thought.
+                        thoughts.push(content[pos + open_len..].trim().to_string());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let reasoning = if thoughts.is_empty() {
+        None
+    } else {
+        let joined = thoughts.join("\n\n");
+        if joined.is_empty() { None } else { Some(joined) }
+    };
+    (clean.trim().to_string(), reasoning)
+}
+
+/// Merge field-based reasoning (reasoning_content) with inline <think>
+/// blocks extracted from content; dedupes when both carry the same text.
+fn merge_reasoning(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) if a.trim() == b.trim() => Some(a),
+        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+        (x, None) | (None, x) => x,
+    }
+}
+
 /// Send a chat completion (non-streaming) and extract the assistant text.
 /// Handles both OpenAI-compat and Anthropic-native response shapes.
 async fn llm_chat_complete(
@@ -745,7 +805,16 @@ async fn llm_chat_complete(
         }
     };
     let content = content.ok_or_else(|| "LLM 响应缺少 content".to_string())?;
-    Ok(LlmReply { content, reasoning })
+    // Field-based reasoning first; then also strip inline <think> blocks
+    // some providers leave inside content.
+    let (clean, inline) = split_inline_think(&content);
+    if clean.is_empty() && inline.is_none() {
+        return Err("LLM 响应缺少 content".to_string());
+    }
+    Ok(LlmReply {
+        content: clean,
+        reasoning: merge_reasoning(reasoning, inline),
+    })
 }
 
 #[tauri::command]
@@ -1865,4 +1934,50 @@ pub fn selection_popup_hide(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn selection_popup_current() -> Result<Option<String>, String> {
     Ok(selection_popup::take_pending_text())
+}
+
+#[cfg(test)]
+mod llm_think_tests {
+    use super::{merge_reasoning, split_inline_think};
+
+    #[test]
+    fn splits_think_block_from_answer() {
+        let (content, reasoning) = split_inline_think(
+            "<think>plan the greeting</think>Hello there! 👋",
+        );
+        assert_eq!(content, "Hello there! 👋");
+        assert_eq!(reasoning.as_deref(), Some("plan the greeting"));
+    }
+
+    #[test]
+    fn splits_thinking_variant_and_multiple_blocks() {
+        let (content, reasoning) = split_inline_think(
+            "<THINKING>first</THINKING>mid<thinking>second</thinking>end",
+        );
+        assert_eq!(content, "midend");
+        assert_eq!(reasoning.as_deref(), Some("first\n\nsecond"));
+    }
+
+    #[test]
+    fn unterminated_block_takes_the_rest() {
+        let (content, reasoning) = split_inline_think("intro<think>trailing thought");
+        assert_eq!(content, "intro");
+        assert_eq!(reasoning.as_deref(), Some("trailing thought"));
+    }
+
+    #[test]
+    fn plain_content_untouched() {
+        let (content, reasoning) = split_inline_think("just an answer, no tags");
+        assert_eq!(content, "just an answer, no tags");
+        assert!(reasoning.is_none());
+    }
+
+    #[test]
+    fn merge_dedupes_identical_reasoning() {
+        let m = merge_reasoning(Some("same".into()), Some("same".into()));
+        assert_eq!(m.as_deref(), Some("same"));
+        let m = merge_reasoning(Some("a".into()), Some("b".into()));
+        assert_eq!(m.as_deref(), Some("a\n\nb"));
+        assert!(merge_reasoning(None, None).is_none());
+    }
 }
