@@ -1,7 +1,8 @@
 //! Text-selection capture (Accessibility API) + global mouse-up monitor.
 //!
-//! Powers the desktop selection popup (划词弹窗, PopClip-style). This is a
-//! user-triggered UI surface only — Observe capture never uses it.
+//! Powers the desktop selection popup (划词弹窗, PopClip-style). Observe
+//! may also read `focused_selection` when `input.record_text` is explicitly
+//! enabled; the default is off.
 //!
 //! Requires macOS Accessibility permission (`accessibility_trusted`).
 

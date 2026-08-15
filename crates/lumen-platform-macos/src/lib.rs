@@ -26,7 +26,7 @@ mod selection;
 pub use asr::MacSpeechAsr;
 pub use ax_tree::MacAxTreeWalker;
 pub use input_counter::{
-    start_input_counter, InputCounterState, InputCounts,
+    start_input_counter, tap_reenable_count, tap_should_reenable, InputCounterState, InputCounts,
 };
 /// Convenience wrappers matching the daemon's call sites.
 pub fn input_snapshot(state: &InputCounterState) -> InputCounts {

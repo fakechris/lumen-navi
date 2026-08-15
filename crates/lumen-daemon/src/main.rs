@@ -5,7 +5,7 @@
 mod control_server;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -17,29 +17,27 @@ use lumen_asr_engine::{
 };
 use lumen_config::{AsrConfig, AudioConfig, Config, PrivacyConfig};
 use lumen_cua::{CuaCaptureAdapter, CuaClient};
-use lumen_platform::{
-    DisplayEnumerator, MicOpenConfig, PlatformError, ScreenCapturer,
-};
+use lumen_platform::{DisplayEnumerator, MicOpenConfig, PlatformError, ScreenCapturer};
+use lumen_platform_host as host;
 #[cfg(target_os = "macos")]
 #[allow(unused_imports)]
 use lumen_platform_macos;
-use lumen_platform_host as host;
 use lumen_process::{
-    AxWorker, AxWorkerConfig, OcrWorker, OcrWorkerConfig, TranscribeWorker,
-    TranscribeWorkerConfig, JOB_KIND_TRANSCRIBE_AUDIO,
+    AxWorker, AxWorkerConfig, OcrWorker, OcrWorkerConfig, TranscribeWorker, TranscribeWorkerConfig,
+    JOB_KIND_TRANSCRIBE_AUDIO,
 };
 use lumen_sources_browser::BrowserIngestPolicy;
 use lumen_sources_media::{
-    ActivityPoll, AudioOrchestrator, CaptureOrchestrator, CapturedBatch, InteractionCoalescer,
-    InteractionContext,
+    session_matches_frontmost, ActivityPoll, AudioOrchestrator, CaptureOrchestrator, CapturedBatch,
+    InteractionCoalescer, InteractionContext, SessionTransition, SharedSessionBinder,
 };
-use lumen_store::{EventStore, ReclaimKind, RecoveryPolicy, SCHEMA_VERSION, SqliteStore};
-use lumen_types::{event_kind, SessionStatus, SourceEvent, SourceKind, TriggerReason};
-use uuid::Uuid;
+use lumen_store::{EventStore, ReclaimKind, RecoveryPolicy, SqliteStore, SCHEMA_VERSION};
+use lumen_types::{event_kind, SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
+use uuid::Uuid;
 
 const CUA_SOCKET_ENV: &str = "LUMEN_CUA_SOCKET";
 const CUA_TOKEN_FILE_ENV: &str = "LUMEN_CUA_TOKEN_FILE";
@@ -112,34 +110,56 @@ fn attach_selection(ctx: &InteractionContext, text: String) -> SourceEvent {
         "url": ctx.url,
         "selection": { "text": text },
     });
-    let mut ev = SourceEvent::new(SourceKind::Screen, event_kind::SELECTION_CHANGED_V1, payload);
+    let mut ev = SourceEvent::new(
+        SourceKind::Screen,
+        event_kind::SELECTION_CHANGED_V1,
+        payload,
+    );
     ev.session_id = ctx.session_id;
     ev
 }
 
-fn persist_activity_poll(
-    store: &SqliteStore,
-    poll: ActivityPoll,
-    current_session: &Mutex<Option<Uuid>>,
-) {
-    let mut sid = current_session.lock().ok().and_then(|g| *g);
-    for session in &poll.upsert_sessions {
-        match session.status {
-            SessionStatus::Open => sid = Some(session.id),
-            SessionStatus::Closed if sid == Some(session.id) => sid = None,
-            SessionStatus::Closed => {}
-        }
+fn persist_activity_poll(store: &SqliteStore, poll: ActivityPoll) {
+    if poll.upsert_sessions.is_empty() && poll.events.is_empty() {
+        return;
     }
     if let Err(e) = store.apply_activity_transition(&poll.upsert_sessions, &poll.events) {
         warn!(error = %e, "apply activity transition failed");
         return;
     }
-    if !poll.events.is_empty() || !poll.upsert_sessions.is_empty() {
-        note_write();
+    note_write();
+}
+
+fn persist_session_transition(store: &SqliteStore, trans: SessionTransition) {
+    persist_activity_poll(
+        store,
+        ActivityPoll {
+            events: trans.events,
+            upsert_sessions: trans.upserts,
+        },
+    );
+}
+
+fn observe_hard_gated(paused: bool, closed_eyes: bool, locked: bool) -> bool {
+    paused || closed_eyes || locked
+}
+
+/// Open a session only when none exists. App switches stay with the activity
+/// owner so HID cannot race a poll and flip the session backwards.
+fn ensure_session_if_absent(
+    store: &SqliteStore,
+    sessions: &SharedSessionBinder,
+    app: Option<&str>,
+    bundle: Option<&str>,
+) -> Option<Uuid> {
+    if let Some(current) = sessions.current() {
+        if session_matches_frontmost(&current, app, bundle) {
+            return Some(current.id);
+        }
+        return None;
     }
-    if let Ok(mut g) = current_session.lock() {
-        *g = sid;
-    }
+    persist_session_transition(store, sessions.bind(app, bundle, "interaction"));
+    sessions.current_id()
 }
 
 fn recovery_policy_from_config(config: &Config) -> RecoveryPolicy {
@@ -159,10 +179,7 @@ fn recovery_policy_from_config(config: &Config) -> RecoveryPolicy {
             stale_running: chrono::Duration::milliseconds(config.asr.stale_running_ms as i64),
         });
     } else {
-        skip_kinds.push((
-            "transcribe_audio".into(),
-            "asr_disabled_on_boot".into(),
-        ));
+        skip_kinds.push(("transcribe_audio".into(), "asr_disabled_on_boot".into()));
     }
     if config.ax.enabled {
         reclaim_kinds.push(ReclaimKind {
@@ -192,9 +209,7 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|v| v.to_ascii_uppercase().parse::<tracing::Level>().ok())
         .unwrap_or(Level::INFO);
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(max_level)
-        .finish();
+    let subscriber = FmtSubscriber::builder().with_max_level(max_level).finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
     info!(
@@ -308,8 +323,10 @@ async fn main() -> Result<()> {
     );
 
     let observe_paused = Arc::new(std::sync::atomic::AtomicBool::new(config.privacy.paused));
-    let observe_closed_eyes = Arc::new(std::sync::atomic::AtomicBool::new(config.privacy.closed_eyes));
-    let current_session: Arc<Mutex<Option<Uuid>>> = Arc::new(Mutex::new(None));
+    let observe_closed_eyes = Arc::new(std::sync::atomic::AtomicBool::new(
+        config.privacy.closed_eyes,
+    ));
+    let session_binder = SharedSessionBinder::new(config.capture.idle_session_ms);
 
     let recovery = store
         .recover_after_unclean_shutdown(&recovery_policy_from_config(&config))
@@ -363,7 +380,8 @@ async fn main() -> Result<()> {
                     let client = client.clone();
                     match tokio::task::spawn_blocking(move || client.status()).await {
                         Ok(Ok(status))
-                            if status.screen_recording == lumen_platform::PermissionState::Granted =>
+                            if status.screen_recording
+                                == lumen_platform::PermissionState::Granted =>
                         {
                             (true, None)
                         }
@@ -383,7 +401,10 @@ async fn main() -> Result<()> {
         } else if status.can_capture_screen() {
             (true, None)
         } else {
-            (false, Some("Screen capture permission is unavailable".into()))
+            (
+                false,
+                Some("Screen capture permission is unavailable".into()),
+            )
         }
     } else {
         (false, None)
@@ -475,8 +496,9 @@ async fn main() -> Result<()> {
     // available (dev mode without screen_ready), the AX worker stays idle.
     let (ax_cancel_tx, ax_cancel_rx) = watch::channel(false);
     let ax_handle = if config.ax.enabled && cua_client.is_some() {
-        let walker: Arc<dyn lumen_platform::AxTreeWalker> =
-            Arc::new(lumen_cua::CuaAxTreeAdapter::new(cua_client.clone().unwrap()));
+        let walker: Arc<dyn lumen_platform::AxTreeWalker> = Arc::new(
+            lumen_cua::CuaAxTreeAdapter::new(cua_client.clone().unwrap()),
+        );
         if walker.is_supported() {
             let worker = Arc::new(AxWorker::new(
                 Arc::clone(&store),
@@ -533,15 +555,14 @@ async fn main() -> Result<()> {
                     "input tap started"
                 );
                 let store_in = Arc::clone(&store);
-                let flush_every =
-                    Duration::from_secs(config.input.flush_interval_s.max(30));
+                let flush_every = Duration::from_secs(config.input.flush_interval_s.max(30));
                 let stats_on = config.input.enabled;
                 let observe_on = config.input.observe_interactions;
                 let record_text = config.input.record_text;
                 let blocklist = config.privacy.app_blocklist.clone();
                 let observe_paused = Arc::clone(&observe_paused);
                 let observe_closed_eyes = Arc::clone(&observe_closed_eyes);
-                let current_session = Arc::clone(&current_session);
+                let session_binder = Arc::clone(&session_binder);
                 Some(tokio::spawn(async move {
                     let mut stats_tick = tokio::time::interval(flush_every);
                     stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -557,22 +578,46 @@ async fn main() -> Result<()> {
                                 if !stats_on {
                                     continue;
                                 }
+                                let paused = observe_paused.load(Ordering::Relaxed);
+                                let closed_eyes = observe_closed_eyes.load(Ordering::Relaxed);
+                                let locked = host::is_screen_locked();
+                                if observe_hard_gated(paused, closed_eyes, locked) {
+                                    lumen_platform_macos::input_reset(state);
+                                    continue;
+                                }
+                                let frontmost = front.frontmost().await.ok().flatten();
+                                if blocklist.iter().any(|b| {
+                                    frontmost
+                                        .as_ref()
+                                        .and_then(|f| f.bundle_id.as_deref())
+                                        == Some(b.as_str())
+                                }) {
+                                    lumen_platform_macos::input_reset(state);
+                                    continue;
+                                }
+                                let session_id = session_binder.current_id();
+                                if session_id.is_none() {
+                                    continue;
+                                }
                                 let counts = lumen_platform_macos::input_snapshot(state);
                                 lumen_platform_macos::input_reset(state);
-                                let event = SourceEvent::new(
+                                let mut event = SourceEvent::new(
                                     SourceKind::Screen,
                                     event_kind::INPUT_STATS_V1,
                                     serde_json::to_value(&counts).unwrap_or_default(),
                                 );
+                                event.session_id = session_id;
                                 if let Err(e) = store_in.append_event(event) {
                                     warn!(error = %e, "append input.stats.v1 failed");
+                                } else {
+                                    note_write();
                                 }
                             }
                             _ = hid_tick.tick() => {
                                 let paused = observe_paused.load(Ordering::Relaxed);
                                 let closed_eyes = observe_closed_eyes.load(Ordering::Relaxed);
                                 let locked = host::is_screen_locked();
-                                if !observe_on || paused || closed_eyes || locked {
+                                if !observe_on || observe_hard_gated(paused, closed_eyes, locked) {
                                     let _ = lumen_platform_macos::input_drain_hid(state);
                                     coal.discard_text();
                                     continue;
@@ -599,7 +644,12 @@ async fn main() -> Result<()> {
                                     coal.discard_text();
                                     continue;
                                 }
-                                let session_id = current_session.lock().ok().and_then(|g| *g);
+                                let session_id = ensure_session_if_absent(
+                                    &store_in,
+                                    &session_binder,
+                                    frontmost.as_ref().map(|f| f.app_name.as_str()),
+                                    frontmost.as_ref().and_then(|f| f.bundle_id.as_deref()),
+                                );
                                 if session_id.is_none() {
                                     coal.discard_text();
                                     continue;
@@ -724,7 +774,7 @@ async fn main() -> Result<()> {
         let control_state = control_server::ControlState::new(
             Arc::clone(&store),
             Arc::clone(&observe_paused),
-            config.privacy.closed_eyes,
+            Arc::clone(&observe_closed_eyes),
             config.retention.max_blob_mb.saturating_mul(1024 * 1024),
             vec![
                 screen_status.clone(),
@@ -756,12 +806,7 @@ async fn main() -> Result<()> {
                 // Best-effort TCP listener for the browser extension. Tries
                 // 7420, then increments; writes actual port to daemon.tcp_port.
                 let port_file = config.data_dir.join("daemon.tcp_port");
-                let _ = control_server::spawn_tcp(
-                    &config.api.bind,
-                    20,
-                    &port_file,
-                    control_state,
-                );
+                let _ = control_server::spawn_tcp(&config.api.bind, 20, &port_file, control_state);
                 Some(handle)
             }
             Err(e) => {
@@ -866,7 +911,7 @@ async fn main() -> Result<()> {
     // activity tracking.)
     if !screen_ready && !cua_retry {
         let store_act = Arc::clone(&store);
-        let mut orch = CaptureOrchestrator::new(
+        let mut orch = CaptureOrchestrator::with_sessions(
             Arc::new(lumen_platform::NullDisplays),
             Arc::new(lumen_platform::NullCapturer),
             host::frontmost(),
@@ -875,54 +920,31 @@ async fn main() -> Result<()> {
             host::display_sleep(),
             config.capture.clone(),
             config.privacy.clone(),
+            Arc::clone(&session_binder),
         );
-        let mut tick = tokio::time::interval(Duration::from_millis(
-            config.capture.focus_poll_ms.max(500),
-        ));
+        let mut tick =
+            tokio::time::interval(Duration::from_millis(config.capture.focus_poll_ms.max(500)));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut act_cancel = observe_cancel_rx.clone();
-        let current_session = Arc::clone(&current_session);
         let observe_paused = Arc::clone(&observe_paused);
         let observe_closed_eyes = Arc::clone(&observe_closed_eyes);
         tokio::spawn(async move {
-            tick.tick().await; // initial
+            tick.tick().await; // consume the immediate tick
             info!("activity tracker running (screen capture unavailable, tracking time only)");
-            // Activity tracking is always-on. It does NOT honor observe_cancel
-            // (that signal is for winding down screen/audio workers mid-run);
-            // this task runs until the process exits.
+            orch.set_paused(observe_paused.load(Ordering::Relaxed));
+            orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
+            persist_activity_poll(&store_act, orch.poll_activity().await);
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
                         orch.set_paused(observe_paused.load(Ordering::Relaxed));
                         orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
-                        persist_activity_poll(
-                            &store_act,
-                            orch.poll_activity().await,
-                            &current_session,
-                        );
-                        if let Some(closed) = orch.close_idle_session() {
-                            persist_activity_poll(
-                                &store_act,
-                                ActivityPoll {
-                                    events: orch.drain_session_lifecycle(),
-                                    upsert_sessions: vec![closed],
-                                },
-                                &current_session,
-                            );
-                        }
+                        persist_activity_poll(&store_act, orch.poll_activity().await);
+                        persist_session_transition(&store_act, orch.close_idle_session());
                     }
                     _ = act_cancel.changed() => {
                         if *act_cancel.borrow() {
-                            if let Some(closed) = orch.force_close_session() {
-                                persist_activity_poll(
-                                    &store_act,
-                                    ActivityPoll {
-                                        events: orch.drain_session_lifecycle(),
-                                        upsert_sessions: vec![closed],
-                                    },
-                                    &current_session,
-                                );
-                            }
+                            persist_session_transition(&store_act, orch.force_close_session());
                             break;
                         }
                     }
@@ -942,7 +964,7 @@ async fn main() -> Result<()> {
             } else {
                 (host::displays(), host::screen_capturer())
             };
-        let mut orch = CaptureOrchestrator::new(
+        let mut orch = CaptureOrchestrator::with_sessions(
             displays,
             capturer,
             host::frontmost(),
@@ -951,6 +973,7 @@ async fn main() -> Result<()> {
             host::display_sleep(),
             config.capture.clone(),
             config.privacy.clone(),
+            Arc::clone(&session_binder),
         );
 
         let (tx, mut rx) = mpsc::channel::<CapturedBatch>(config.capture.queue_capacity);
@@ -1011,10 +1034,15 @@ async fn main() -> Result<()> {
         capture_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         focus_tick.tick().await;
         capture_tick.tick().await;
+        orch.set_paused(observe_paused.load(Ordering::Relaxed));
+        orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
+        persist_activity_poll(&store, orch.poll_activity().await);
 
         info!("observe screen loop running (Ctrl+C to stop if ticks=0)");
         if !cua_ready.load(Ordering::Relaxed) {
-            info!("Lumen Cua not ready; loop is activity-only until the retry task enables capture");
+            info!(
+                "Lumen Cua not ready; loop is activity-only until the retry task enables capture"
+            );
         }
         if max_ticks == 0 {
             ran_long_loop = true;
@@ -1033,11 +1061,7 @@ async fn main() -> Result<()> {
                 _ = focus_tick.tick() => {
                     orch.set_paused(observe_paused.load(Ordering::Relaxed));
                     orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
-                    persist_activity_poll(
-                        &store,
-                        orch.poll_activity().await,
-                        &current_session,
-                    );
+                    persist_activity_poll(&store, orch.poll_activity().await);
 
                     // Capture is gated on Cua readiness: while Cua is down the
                     // loop keeps tracking activity only, and starts capturing
@@ -1060,16 +1084,7 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
-                    if let Some(closed) = orch.close_idle_session() {
-                        persist_activity_poll(
-                            &store,
-                            ActivityPoll {
-                                events: orch.drain_session_lifecycle(),
-                                upsert_sessions: vec![closed],
-                            },
-                            &current_session,
-                        );
-                    }
+                    persist_session_transition(&store, orch.close_idle_session());
                 }
                 _ = capture_tick.tick() => {
                     if cua_ready.load(Ordering::Relaxed) {
@@ -1093,16 +1108,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        if let Some(s) = orch.force_close_session() {
-            persist_activity_poll(
-                &store,
-                ActivityPoll {
-                    events: orch.drain_session_lifecycle(),
-                    upsert_sessions: vec![s],
-                },
-                &current_session,
-            );
-        }
+        persist_session_transition(&store, orch.force_close_session());
         drop(tx);
         let _ = persist.await;
         screen_status.running = false;
@@ -1125,7 +1131,10 @@ async fn main() -> Result<()> {
         info!("Ctrl+C");
     } else if config.sources.audio && config.audio.ticks > 0 {
         // Finite audio smoke without screen: wait for audio task / cancel after grace.
-        let wait_ms = config.audio.chunk_ms.saturating_mul(config.audio.ticks.saturating_add(2));
+        let wait_ms = config
+            .audio
+            .chunk_ms
+            .saturating_mul(config.audio.ticks.saturating_add(2));
         tokio::time::sleep(Duration::from_millis(wait_ms.max(2_000))).await;
     }
 
@@ -1240,11 +1249,7 @@ async fn main() -> Result<()> {
         );
         tokio::signal::ctrl_c().await?;
         info!("Ctrl+C");
-    } else if config.api.enabled
-        && !expect_long
-        && !screen_ready
-        && !config.sources.audio
-    {
+    } else if config.api.enabled && !expect_long && !screen_ready && !config.sources.audio {
         info!(
             bind = %config.api.bind,
             "control API only; Ctrl+C to stop"
@@ -1282,7 +1287,8 @@ async fn run_audio_loop(
     config: AudioConfig,
     privacy: PrivacyConfig,
     mut cancel: watch::Receiver<bool>,
-) -> Result<lumen_sources_media::AudioStats> {    let open_cfg = MicOpenConfig {
+) -> Result<lumen_sources_media::AudioStats> {
+    let open_cfg = MicOpenConfig {
         preferred_sample_rate: config.sample_rate,
         preferred_channels: config.channels,
         chunk_ms: config.effective_chunk_ms(),
@@ -1389,8 +1395,7 @@ fn resolve_model_dir(
     models_root: Option<&std::path::Path>,
 ) -> Option<std::path::PathBuf> {
     let configured = configured.trim();
-    let configured_path =
-        (!configured.is_empty()).then(|| std::path::PathBuf::from(configured));
+    let configured_path = (!configured.is_empty()).then(|| std::path::PathBuf::from(configured));
     match kind {
         EngineKind::SenseVoice => Some(match configured_path {
             Some(p) if lumen_models::sensevoice_ready(&p) => p,
@@ -1455,9 +1460,10 @@ fn build_asr_engine(asr: &AsrConfig) -> Result<Arc<dyn AsrEngine>, String> {
             // The `speech` fallback only exists where the OS ships a
             // recognizer. On Windows there is none, so surface the real
             // engine error instead of swapping in an unsupported engine.
-            Err(e) if asr.fallback_speech
-                && other != EngineKind::OpenAiAudio
-                && host::capabilities().system_speech_asr =>
+            Err(e)
+                if asr.fallback_speech
+                    && other != EngineKind::OpenAiAudio
+                    && host::capabilities().system_speech_asr =>
             {
                 warn!(
                     error = %e,
@@ -1506,7 +1512,10 @@ impl AsrEngine for SpeechEngineAdapter {
     async fn transcribe(&self, req: AsrRequest) -> Result<AsrResult, AsrError> {
         // PCM path: Speech.framework consumes files/blobs, so re-encode.
         let wav = samples_to_wav_mono_i16(&req.samples, req.sample_rate);
-        let locale = req.language_hint.clone().unwrap_or_else(|| self.locale.clone());
+        let locale = req
+            .language_hint
+            .clone()
+            .unwrap_or_else(|| self.locale.clone());
         self.transcribe_wav(&wav, &locale).await
     }
 
@@ -1613,5 +1622,46 @@ mod tests {
         bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
             (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
         })
+    }
+
+    #[test]
+    fn hard_gates_cover_pause_closed_eyes_and_lock() {
+        assert!(!observe_hard_gated(false, false, false));
+        assert!(observe_hard_gated(true, false, false));
+        assert!(observe_hard_gated(false, true, false));
+        assert!(observe_hard_gated(false, false, true));
+    }
+
+    #[test]
+    fn hid_opens_missing_session_but_does_not_steal_on_focus_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let binder = SharedSessionBinder::new(60_000);
+
+        let opened =
+            ensure_session_if_absent(&store, &binder, Some("Safari"), Some("com.apple.Safari"));
+        assert!(opened.is_some());
+        let safari = opened.unwrap();
+        assert_eq!(binder.current_id(), Some(safari));
+
+        let same =
+            ensure_session_if_absent(&store, &binder, Some("Safari"), Some("com.apple.Safari"));
+        assert_eq!(same, Some(safari));
+
+        let mismatch =
+            ensure_session_if_absent(&store, &binder, Some("Mail"), Some("com.apple.mail"));
+        assert!(mismatch.is_none(), "focus change is owned by activity poll");
+        assert_eq!(binder.current_id(), Some(safari));
+
+        persist_session_transition(
+            &store,
+            binder.bind(Some("Mail"), Some("com.apple.mail"), "focus_change"),
+        );
+        let mail = binder.current_id().unwrap();
+        assert_ne!(mail, safari);
+        assert_eq!(
+            ensure_session_if_absent(&store, &binder, Some("Mail"), Some("com.apple.mail")),
+            Some(mail)
+        );
     }
 }

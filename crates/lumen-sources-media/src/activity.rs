@@ -61,18 +61,42 @@ impl ActivityKey {
     fn from(sample: &ActivitySample, idle_threshold: f64) -> Self {
         let is_idle = sample.is_locked
             || (sample.idle_seconds >= idle_threshold && !sample.display_sleep_prevented);
+        // Lock is a hard capture gate: the lock-transition fact must not
+        // carry the last-seen app, window title, or URL.
+        if sample.is_locked {
+            return Self {
+                app_name: None,
+                bundle_id: None,
+                window_title: None,
+                tab_url: None,
+                window_id: None,
+                is_idle: true,
+                is_locked: true,
+            };
+        }
         Self {
             app_name: sample.frontmost.as_ref().map(|f| f.app_name.clone()),
             bundle_id: sample.frontmost.as_ref().and_then(|f| f.bundle_id.clone()),
-            window_title: sample.frontmost.as_ref().and_then(|f| f.window_title.clone()),
+            window_title: sample
+                .frontmost
+                .as_ref()
+                .and_then(|f| f.window_title.clone()),
             tab_url: sample.frontmost.as_ref().and_then(|f| f.tab_url.clone()),
             window_id: sample.frontmost.as_ref().and_then(|f| f.window_id),
             is_idle,
-            is_locked: sample.is_locked,
+            is_locked: false,
         }
     }
 
-    fn window_identity(&self) -> (&Option<String>, &Option<String>, &Option<String>, &Option<String>, Option<u64>) {
+    fn window_identity(
+        &self,
+    ) -> (
+        &Option<String>,
+        &Option<String>,
+        &Option<String>,
+        &Option<String>,
+        Option<u64>,
+    ) {
         (
             &self.app_name,
             &self.bundle_id,
@@ -103,7 +127,11 @@ impl ActivityAccumulator {
     }
 
     /// Ingest a sample; returns a focus heartbeat/change row when worth keeping.
-    pub fn ingest(&mut self, sample: ActivitySample, now: chrono::DateTime<Utc>) -> Option<SourceEvent> {
+    pub fn ingest(
+        &mut self,
+        sample: ActivitySample,
+        now: chrono::DateTime<Utc>,
+    ) -> Option<SourceEvent> {
         self.ingest_detailed(sample, now).focus
     }
 
@@ -153,7 +181,11 @@ pub struct ActivityTick {
     pub window_changed: Option<SourceEvent>,
 }
 
-fn make_event(sample: &ActivitySample, key: &ActivityKey, ts: chrono::DateTime<Utc>) -> SourceEvent {
+fn make_event(
+    sample: &ActivitySample,
+    key: &ActivityKey,
+    ts: chrono::DateTime<Utc>,
+) -> SourceEvent {
     let ls_category_type = sample
         .frontmost
         .as_ref()
@@ -198,7 +230,12 @@ fn make_window_changed(
 mod tests {
     use super::*;
 
-    fn sample_window(app: &str, title: Option<&str>, idle: f64, window_id: Option<u64>) -> ActivitySample {
+    fn sample_window(
+        app: &str,
+        title: Option<&str>,
+        idle: f64,
+        window_id: Option<u64>,
+    ) -> ActivitySample {
         ActivitySample {
             frontmost: Some(FrontmostApp {
                 app_name: app.into(),
@@ -234,7 +271,9 @@ mod tests {
         acc.ingest(sample("Safari", Some("Hello"), 1.0), now);
         now += chrono::Duration::seconds(1);
         // Same app+title → no heartbeat within 60s.
-        assert!(acc.ingest(sample("Safari", Some("Hello"), 1.0), now).is_none());
+        assert!(acc
+            .ingest(sample("Safari", Some("Hello"), 1.0), now)
+            .is_none());
         // App change → emit.
         now += chrono::Duration::seconds(1);
         let tick = acc.ingest_detailed(sample("Mail", None, 1.0), now);
@@ -252,10 +291,14 @@ mod tests {
         acc.ingest(sample("Safari", Some("Hello"), 1.0), now);
         now += chrono::Duration::seconds(1);
         // Still active, same app → no emit.
-        assert!(acc.ingest(sample("Safari", Some("Hello"), 1.0), now).is_none());
+        assert!(acc
+            .ingest(sample("Safari", Some("Hello"), 1.0), now)
+            .is_none());
         // Cross idle threshold → emit (idle boundary).
         now += chrono::Duration::seconds(1);
-        let e = acc.ingest(sample("Safari", Some("Hello"), 200.0), now).unwrap();
+        let e = acc
+            .ingest(sample("Safari", Some("Hello"), 200.0), now)
+            .unwrap();
         assert_eq!(e.payload["is_idle"], serde_json::json!(true));
     }
 
@@ -270,7 +313,9 @@ mod tests {
 
         // Long idle, no assertion → goes idle (boundary emit).
         now += chrono::Duration::seconds(1);
-        let e = acc.ingest(sample("Safari", Some("Netflix"), 200.0), now).unwrap();
+        let e = acc
+            .ingest(sample("Safari", Some("Netflix"), 200.0), now)
+            .unwrap();
         assert_eq!(e.payload["is_idle"], serde_json::json!(true));
 
         // Now a power assertion is active (video playing). Same long idle, but
@@ -282,7 +327,6 @@ mod tests {
         assert_eq!(e.payload["is_idle"], serde_json::json!(false));
     }
 
-
     #[test]
     fn heartbeat_emits_on_steady_run() {
         let mut acc = ActivityAccumulator::new(Duration::from_secs(180), Duration::from_secs(5));
@@ -290,10 +334,14 @@ mod tests {
         acc.ingest(sample("Safari", Some("Hello"), 1.0), now);
         // Within heartbeat window → no emit.
         now += chrono::Duration::seconds(3);
-        assert!(acc.ingest(sample("Safari", Some("Hello"), 1.0), now).is_none());
+        assert!(acc
+            .ingest(sample("Safari", Some("Hello"), 1.0), now)
+            .is_none());
         // Past heartbeat → emit even though state unchanged.
         now += chrono::Duration::seconds(3);
-        assert!(acc.ingest(sample("Safari", Some("Hello"), 1.0), now).is_some());
+        assert!(acc
+            .ingest(sample("Safari", Some("Hello"), 1.0), now)
+            .is_some());
     }
 
     #[test]
@@ -308,5 +356,20 @@ mod tests {
         let idle = acc.ingest_detailed(sample_window("Safari", Some("Doc"), 200.0, Some(2)), now);
         assert!(idle.focus.is_some());
         assert!(idle.window_changed.is_none());
+    }
+
+    #[test]
+    fn lock_fact_does_not_carry_app_window_or_url() {
+        let mut acc = ActivityAccumulator::new(Duration::from_secs(180), Duration::from_secs(60));
+        let now = Utc::now();
+        let mut locked = sample("Safari", Some("Secret"), 1.0);
+        locked.is_locked = true;
+        locked.frontmost.as_mut().unwrap().tab_url = Some("https://mail.example/inbox".into());
+        let ev = acc.ingest(locked, now).unwrap();
+        assert_eq!(ev.payload["is_locked"], serde_json::json!(true));
+        assert!(ev.payload["app_name"].is_null());
+        assert!(ev.payload["bundle_id"].is_null());
+        assert!(ev.payload["window_title"].is_null());
+        assert!(ev.payload["url"].is_null());
     }
 }

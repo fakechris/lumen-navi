@@ -126,6 +126,7 @@ export interface Health {
   product: string;
   sources: SourceStatus[];
   paused: boolean;
+  closed_eyes?: boolean;
   stored_events: number;
   ocr_docs: number;
   schema_version: number;

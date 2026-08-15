@@ -32,7 +32,7 @@ use tracing::{error, info, warn};
 pub struct ControlState {
     pub store: Arc<SqliteStore>,
     pub paused: Arc<AtomicBool>,
-    closed_eyes: bool,
+    closed_eyes: Arc<AtomicBool>,
     max_blob_bytes: u64,
     screen_locked: Arc<dyn Fn() -> bool + Send + Sync>,
     pub sources: Vec<SourceStatus>,
@@ -67,7 +67,7 @@ impl ControlState {
     pub fn new(
         store: Arc<SqliteStore>,
         paused: Arc<AtomicBool>,
-        closed_eyes: bool,
+        closed_eyes: Arc<AtomicBool>,
         max_blob_bytes: u64,
         sources: Vec<SourceStatus>,
         browser: BrowserRuntimeConfig,
@@ -190,7 +190,9 @@ pub async fn serve_tcp(
     let _ = std::fs::write(port_file, port_line);
 
     info!(addr = %bound_addr, "control API listening (tcp, for browser extension)");
-    axum::serve(listener, app).await.map_err(|e| anyhow::anyhow!("control tcp serve: {e}"))
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| anyhow::anyhow!("control tcp serve: {e}"))
 }
 
 pub fn router(state: ControlState) -> Router {
@@ -206,8 +208,14 @@ pub fn router(state: ControlState) -> Router {
         .route("/v1/activity/scenes", get(get_activity_scenes))
         .route("/v1/activity/stats", get(get_activity_stats))
         .route("/v1/activity/range", get(get_activity_range))
-        .route("/v1/activity/rules", get(get_activity_rules).post(post_activity_rules))
-        .route("/v1/activity/segment", post(post_activity_segment).delete(delete_activity_segment))
+        .route(
+            "/v1/activity/rules",
+            get(get_activity_rules).post(post_activity_rules),
+        )
+        .route(
+            "/v1/activity/segment",
+            post(post_activity_segment).delete(delete_activity_segment),
+        )
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
 }
@@ -223,7 +231,7 @@ async fn get_browser_policy(
         schema_version: BROWSER_SCHEMA_VERSION,
         capture_allowed: !st.paused.load(Ordering::Relaxed)
             && !st.browser.paused.load(Ordering::Relaxed)
-            && !st.closed_eyes
+            && !st.closed_eyes.load(Ordering::Relaxed)
             && !(st.screen_locked)(),
         content_allow_hosts: st.browser.policy.content_allow_hosts.clone(),
         excluded_hosts: st.browser.policy.excluded_hosts.clone(),
@@ -243,7 +251,7 @@ async fn post_browser_batch(
     }
     if st.paused.load(Ordering::Relaxed)
         || st.browser.paused.load(Ordering::Relaxed)
-        || st.closed_eyes
+        || st.closed_eyes.load(Ordering::Relaxed)
         || (st.screen_locked)()
     {
         return StatusCode::LOCKED.into_response();
@@ -282,15 +290,16 @@ async fn post_browser_batch(
             event,
         })
         .collect();
-    let rejected_artifacts = records.iter().map(|record| record.artifacts.len()).sum::<usize>();
+    let rejected_artifacts = records
+        .iter()
+        .map(|record| record.artifacts.len())
+        .sum::<usize>();
     let fallback_records = records.clone();
     let (outcome, rejected_artifacts) = match st
         .store
         .append_idempotent_with_artifacts_up_to(records, st.max_blob_bytes)
     {
-        Ok(BlobLimitedAppendOutcome::Appended(value)) => {
-            (value, validation_rejected_artifacts)
-        }
+        Ok(BlobLimitedAppendOutcome::Appended(value)) => (value, validation_rejected_artifacts),
         Ok(BlobLimitedAppendOutcome::LimitExceeded) => {
             let metadata_only = fallback_records
                 .into_iter()
@@ -303,10 +312,7 @@ async fn post_browser_batch(
                             .get_mut("data")
                             .and_then(serde_json::Value::as_object_mut)
                         {
-                            data.insert(
-                                "extraction_status".into(),
-                                json!("retention_blocked"),
-                            );
+                            data.insert("extraction_status".into(), json!("retention_blocked"));
                             data.insert("privacy_gate".into(), json!("metadata_only"));
                         }
                     }
@@ -592,7 +598,10 @@ async fn get_activity_stats(
     State(st): State<ControlState>,
     Query(q): Query<ActivityDayQuery>,
 ) -> impl IntoResponse {
-    match st.store.activity_day_stats(&q.day, parse_group_by(q.group_by.as_deref())) {
+    match st
+        .store
+        .activity_day_stats(&q.day, parse_group_by(q.group_by.as_deref()))
+    {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -608,7 +617,10 @@ async fn get_activity_range(
     State(st): State<ControlState>,
     Query(q): Query<ActivityRangeQuery>,
 ) -> impl IntoResponse {
-    match st.store.activity_range_stats(&q.from, &q.to, parse_group_by(q.group_by.as_deref())) {
+    match st
+        .store
+        .activity_range_stats(&q.from, &q.to, parse_group_by(q.group_by.as_deref()))
+    {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -632,11 +644,18 @@ async fn post_activity_segment(
         req.category.as_deref(),
         req.productivity_level.as_deref(),
     ) {
-        Ok(seg_id) => (StatusCode::OK, Json(serde_json::json!({ "seg_id": seg_id }))).into_response(),
+        Ok(seg_id) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "seg_id": seg_id })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ControlResponse::Error { message: e.to_string() }),
-        ).into_response(),
+            Json(ControlResponse::Error {
+                message: e.to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 
@@ -648,14 +667,15 @@ async fn delete_activity_segment(
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ControlResponse::Error { message: e.to_string() }),
-        ).into_response(),
+            Json(ControlResponse::Error {
+                message: e.to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 
-async fn get_activity_rules(
-    State(st): State<ControlState>,
-) -> impl IntoResponse {
+async fn get_activity_rules(State(st): State<ControlState>) -> impl IntoResponse {
     match st.store.list_category_rules() {
         Ok(rules) => (StatusCode::OK, Json(rules)).into_response(),
         Err(e) => (
@@ -764,6 +784,10 @@ async fn handle_control(
             }
             Ok(ControlResponse::Ack)
         }
+        ControlRequest::ClosedEyes { enabled } => {
+            st.closed_eyes.store(enabled, Ordering::Relaxed);
+            Ok(ControlResponse::Ack)
+        }
         ControlRequest::Permissions => Ok(ControlResponse::Error {
             message: "permissions probe not exposed on HTTP yet".into(),
         }),
@@ -783,6 +807,7 @@ async fn build_health(st: &ControlState) -> Result<HealthResponse, anyhow::Error
         product: "lumen-navi".into(),
         sources: st.sources.clone(),
         paused: st.paused.load(Ordering::Relaxed),
+        closed_eyes: st.closed_eyes.load(Ordering::Relaxed),
         stored_events: stored,
         ocr_docs,
         schema_version: SCHEMA_VERSION,
@@ -825,7 +850,10 @@ fn search_ocr(
 /// shell depends on this socket, so if it can't come up we'd rather exit and
 /// let the supervisor (lib.rs) alert + restart than run a daemon the shell
 /// can't talk to. Stale-socket detection happens inside `serve`.
-pub fn spawn(socket_path: &Path, state: ControlState) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+pub fn spawn(
+    socket_path: &Path,
+    state: ControlState,
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let path = socket_path.to_path_buf();
     Ok(tokio::spawn(async move {
         if let Err(e) = serve(&path, state).await {
@@ -856,7 +884,7 @@ pub fn spawn_tcp(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use axum::body::Body;
@@ -880,7 +908,7 @@ mod tests {
         let mut state = ControlState::new(
             store,
             Arc::new(AtomicBool::new(false)),
-            false,
+            Arc::new(AtomicBool::new(false)),
             1024 * 1024,
             vec![],
             BrowserRuntimeConfig {
@@ -1007,9 +1035,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_closed_eyes_control_reaches_the_hard_gate() {
+        let (_dir, state) = state();
+        let app = router(state);
+        let enabled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/control")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"op":"closed_eyes","enabled":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(enabled.status(), StatusCode::OK);
+        let blocked = app
+            .oneshot(ingest_request(Some("fixture-browser-token")))
+            .await
+            .unwrap();
+        assert_eq!(blocked.status(), StatusCode::LOCKED);
+    }
+
+    #[tokio::test]
     async fn closed_eyes_is_a_hard_browser_write_gate() {
-        let (_dir, mut state) = state();
-        state.closed_eyes = true;
+        let (_dir, state) = state();
+        state.closed_eyes.store(true, Ordering::Relaxed);
         let response = router(state)
             .oneshot(ingest_request(Some("fixture-browser-token")))
             .await

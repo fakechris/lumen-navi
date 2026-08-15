@@ -147,6 +147,10 @@ pub async fn get_health(state: State<'_, AppState>) -> Result<HealthResponse, St
             daemon_health.as_ref(),
         ),
         paused,
+        closed_eyes: daemon_health
+            .as_ref()
+            .map(|h| h.closed_eyes)
+            .unwrap_or(cfg.privacy.closed_eyes),
         stored_events: n,
         ocr_docs,
         schema_version: SCHEMA_VERSION,
@@ -1152,6 +1156,7 @@ mod command_tests {
                 last_error: Some("Screen Recording permission is required".into()),
             }],
             paused: false,
+            closed_eyes: false,
             stored_events: 0,
             ocr_docs: 0,
             schema_version: 0,

@@ -16,6 +16,9 @@ pub struct HealthResponse {
     pub product: String,
     pub sources: Vec<SourceStatus>,
     pub paused: bool,
+    /// Live closed-eyes hard gate (mirrors `privacy.closed_eyes`).
+    #[serde(default)]
+    pub closed_eyes: bool,
     pub stored_events: usize,
     /// Indexed OCR documents (`ocr_docs` / FTS).
     #[serde(default)]
@@ -89,6 +92,10 @@ pub enum ControlRequest {
     },
     /// Rebuild `ocr_docs` from all `derived` ocr.v1 rows.
     ReindexOcr,
+    /// Flip the live closed-eyes hard gate without restarting Observe.
+    ClosedEyes {
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +150,7 @@ impl HealthResponse {
             product: "lumen-navi".into(),
             sources,
             paused,
+            closed_eyes: false,
             stored_events,
             ocr_docs,
             schema_version,
