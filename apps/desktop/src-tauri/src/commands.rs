@@ -549,6 +549,56 @@ pub async fn roast_day(
         .ok_or_else(|| "LLM 响应缺少 content".to_string())
 }
 
+/// AI chat: multi-turn conversation with the configured assistant LLM
+/// (same config as the selection popup — one LLM config app-wide).
+#[tauri::command]
+pub async fn ai_chat(
+    state: State<'_, AppState>,
+    messages: Vec<serde_json::Value>,
+) -> Result<String, String> {
+    let cfg = state.load_config().map_err(err)?.assistant;
+    if cfg.base_url.trim().is_empty() || cfg.model.trim().is_empty() {
+        return Err("LLM 未配置 — 请在 设置 → 划词助手 中配置 base_url 和 model".into());
+    }
+    let api_key = std::env::var("LUMEN_NAVI_LLM_API_KEY")
+        .or_else(|_| std::env::var("OPENAI_API_KEY"))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            let k = cfg.api_key.trim().to_string();
+            if k.is_empty() { None } else { Some(k) }
+        });
+    if api_key.is_none() && cfg.base_url.contains("openai.com") {
+        return Err("401: 未配置 API key。请在 设置 → 划词助手 中设置".into());
+    }
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": cfg.model,
+        "messages": messages,
+        "temperature": 0.7,
+        "stream": false,
+    });
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(cfg.timeout_ms.max(30_000)))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let mut req = client.post(&url).json(&body);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+    let resp = req.send().await.map_err(|e| format!("LLM 请求失败: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("LLM 返回 {status}: {text}"));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应: {e}"))?;
+    json.pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "LLM 响应缺少 content".to_string())
+}
+
 #[tauri::command]
 pub fn activity_stats(
     state: State<'_, AppState>,

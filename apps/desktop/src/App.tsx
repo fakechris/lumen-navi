@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./api";
 import { Onboarding } from "./Onboarding";
 import { DashboardView } from "./views/Dashboard";
+import { AIView } from "./views/AIView";
 import {
   Button,
   EmptyState,
@@ -74,6 +75,14 @@ const NAV: {
     eyebrow: "Activity",
     title: "时间线",
     blurb: "缩略图 · OCR/转写预览 · 按类型或应用过滤",
+  },
+  {
+    id: "ai",
+    label: "AI",
+    icon: "star",
+    eyebrow: "AI",
+    title: "AI 助手",
+    blurb: "Roast 我的一天 · AI Chat · LLM 状态",
   },
   {
     id: "settings",
@@ -897,6 +906,8 @@ export default function App() {
               </div>
             </div>
           )}
+
+          {tab === "ai" && <AIView assistant={assistant} />}
 
           {tab === "activity" && (
             <div className="stack">
