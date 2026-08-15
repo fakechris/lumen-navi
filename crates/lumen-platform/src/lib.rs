@@ -117,6 +117,30 @@ pub trait FrontmostAppProbe: Send + Sync {
 
 /// System-wide idle (AFK) detector — seconds since the last keyboard/mouse
 /// input. Needs no TCC permission on macOS (`CGEventSourceSecondsSinceLastEventType`).
+/// One HID sample from the listen-only event tap. No app metadata — the
+/// Observe loop attaches frontmost context after draining.
+#[derive(Debug, Clone)]
+pub struct ObserveHidEvent {
+    pub kind: ObserveHidKind,
+    pub keycode: u32,
+    pub unicode: Option<String>,
+    pub command: bool,
+    pub control: bool,
+    pub shift: bool,
+    pub option: bool,
+    pub button: u8,
+    pub x: f64,
+    pub y: f64,
+    pub click_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObserveHidKind {
+    KeyDown,
+    MouseDown,
+    MouseUp,
+}
+
 #[async_trait]
 pub trait IdleProbe: Send + Sync {
     async fn idle_seconds(&self) -> Result<f64, PlatformError>;

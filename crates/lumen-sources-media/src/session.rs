@@ -1,13 +1,15 @@
 //! Observe-level activity sessions (open on work, close on idle).
 
 use chrono::{DateTime, Utc};
-use lumen_types::{ActivitySession, SessionStatus};
+use lumen_types::{event_kind, ActivitySession, SessionStatus, SourceEvent, SourceKind};
+use serde_json::json;
 use uuid::Uuid;
 
 pub struct SessionManager {
     open: Option<ActivitySession>,
     last_activity: Option<DateTime<Utc>>,
     idle_ms: u64,
+    lifecycle: Vec<SourceEvent>,
 }
 
 impl SessionManager {
@@ -16,6 +18,7 @@ impl SessionManager {
             open: None,
             last_activity: None,
             idle_ms,
+            lifecycle: Vec::new(),
         }
     }
 
@@ -34,14 +37,25 @@ impl SessionManager {
         let mut closed = None;
 
         if let Some(ref mut s) = self.open {
+            let app_switched = bundle.is_some()
+                && s.primary_bundle.is_some()
+                && s.primary_bundle.as_deref() != bundle;
             if let Some(last) = self.last_activity {
                 let idle = (now - last).num_milliseconds().max(0) as u64;
-                if idle >= self.idle_ms {
+                if idle >= self.idle_ms || app_switched {
                     s.ended_at = Some(now);
                     s.status = SessionStatus::Closed;
                     closed = self.open.take();
                 }
+            } else if app_switched {
+                s.ended_at = Some(now);
+                s.status = SessionStatus::Closed;
+                closed = self.open.take();
             }
+        }
+        if let Some(ref closed_session) = closed {
+            self.lifecycle
+                .push(session_event(event_kind::SESSION_ENDED_V1, closed_session, now));
         }
 
         if self.open.is_none() {
@@ -55,6 +69,10 @@ impl SessionManager {
                 snapshot_count: 0,
                 status: SessionStatus::Open,
             });
+            if let Some(ref opened) = self.open {
+                self.lifecycle
+                    .push(session_event(event_kind::SESSION_STARTED_V1, opened, now));
+            }
         }
 
         if let Some(ref mut s) = self.open {
@@ -81,6 +99,8 @@ impl SessionManager {
         if let Some(mut s) = self.open.take() {
             s.ended_at = Some(now);
             s.status = SessionStatus::Closed;
+            self.lifecycle
+                .push(session_event(event_kind::SESSION_ENDED_V1, &s, now));
             return Some(s);
         }
         None
@@ -91,10 +111,30 @@ impl SessionManager {
         if let Some(mut s) = self.open.take() {
             s.ended_at = Some(now);
             s.status = SessionStatus::Closed;
+            self.lifecycle
+                .push(session_event(event_kind::SESSION_ENDED_V1, &s, now));
             return Some(s);
         }
         None
     }
+
+    pub fn drain_lifecycle(&mut self) -> Vec<SourceEvent> {
+        std::mem::take(&mut self.lifecycle)
+    }
+}
+
+fn session_event(kind: &str, session: &ActivitySession, ts: DateTime<Utc>) -> SourceEvent {
+    let payload = json!({
+        "payload_version": 1,
+        "application_session_id": session.id,
+        "app_name": session.primary_app,
+        "bundle_id": session.primary_bundle,
+        "trigger": session.trigger,
+        "snapshot_count": session.snapshot_count,
+    });
+    let mut event = SourceEvent::new(SourceKind::Activity, kind, payload).with_session(session.id);
+    event.ts = ts;
+    event
 }
 
 #[cfg(test)]
@@ -109,5 +149,25 @@ mod tests {
         let (id2, _) = m.touch(Some("Safari"), Some("com.apple.Safari"), "interval");
         assert_eq!(id1, id2);
         assert_eq!(m.current().unwrap().snapshot_count, 2);
+    }
+
+    #[test]
+    fn app_switch_closes_and_emits_lifecycle() {
+        let mut m = SessionManager::new(60_000);
+        let (safari, closed) = m.touch(Some("Safari"), Some("com.apple.Safari"), "focus_change");
+        assert!(closed.is_none());
+        let (term, closed) = m.touch(Some("Ghostty"), Some("com.mitchellh.ghostty"), "focus_change");
+        assert!(closed.is_some());
+        assert_ne!(safari, term);
+        let evs = m.drain_lifecycle();
+        let kinds: Vec<_> = evs.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            [
+                "session.started.v1",
+                "session.ended.v1",
+                "session.started.v1"
+            ]
+        );
     }
 }

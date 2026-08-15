@@ -35,6 +35,9 @@ pub fn input_snapshot(state: &InputCounterState) -> InputCounts {
 pub fn input_reset(state: &InputCounterState) {
     input_counter::reset(state);
 }
+pub fn input_drain_hid(state: &InputCounterState) -> Vec<lumen_platform::ObserveHidEvent> {
+    input_counter::drain_hid(state)
+}
 pub use capture::{MacDisplays, MacScreenCapturer};
 pub use clipboard::clipboard_grab_selection;
 pub use frontmost::MacFrontmost;

@@ -169,6 +169,10 @@ impl CaptureOrchestrator {
         self.sessions.close_if_idle()
     }
 
+    pub fn drain_session_lifecycle(&mut self) -> Vec<lumen_types::SourceEvent> {
+        self.sessions.drain_lifecycle()
+    }
+
     /// Poll frontmost app; returns a focus/title trigger if changed.
     pub async fn poll_focus_trigger(&mut self) -> Option<TriggerReason> {
         let cur = self.frontmost.frontmost().await.ok().flatten()?;
@@ -203,12 +207,12 @@ impl CaptureOrchestrator {
     /// Respects pause/closed-eyes (no event emitted while user opted out) but
     /// **not** screen-lock (a lock is itself meaningful activity context, so we
     /// record it with `is_locked=true`).
-    pub async fn poll_activity(&mut self) -> Option<SourceEvent> {
+    pub async fn poll_activity(&mut self) -> Vec<SourceEvent> {
         if self.paused.load(Ordering::Relaxed) || self.privacy.paused {
-            return None;
+            return Vec::new();
         }
         if self.closed_eyes.load(Ordering::Relaxed) || self.privacy.closed_eyes {
-            return None;
+            return Vec::new();
         }
 
         let frontmost = self.frontmost.frontmost().await.ok().flatten();
@@ -216,7 +220,17 @@ impl CaptureOrchestrator {
         let is_locked = self.lock.is_locked().await.unwrap_or(false);
         let display_sleep_prevented = self.power.display_sleep_prevented().await.unwrap_or(false);
 
-        self.activity.ingest(
+        if let Some(ref front) = frontmost {
+            if !is_locked {
+                let _ = self.sessions.touch(
+                    Some(front.app_name.as_str()),
+                    front.bundle_id.as_deref(),
+                    "focus_change",
+                );
+            }
+        }
+
+        let tick = self.activity.ingest_detailed(
             ActivitySample {
                 frontmost,
                 idle_seconds,
@@ -224,7 +238,22 @@ impl CaptureOrchestrator {
                 display_sleep_prevented,
             },
             chrono::Utc::now(),
-        )
+        );
+        let sid = self.sessions.current().map(|s| s.id);
+        let bind = |mut ev: SourceEvent| {
+            if let Some(id) = sid {
+                ev.session_id = Some(id);
+            }
+            ev
+        };
+        let mut out = self.sessions.drain_lifecycle();
+        if let Some(ev) = tick.window_changed {
+            out.push(bind(ev));
+        }
+        if let Some(ev) = tick.focus {
+            out.push(bind(ev));
+        }
+        out
     }
 
     /// Run one capture decision for `reason`. Returns None if gated/skipped.

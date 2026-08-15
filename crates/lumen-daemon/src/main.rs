@@ -29,7 +29,10 @@ use lumen_process::{
     TranscribeWorkerConfig, JOB_KIND_TRANSCRIBE_AUDIO,
 };
 use lumen_sources_browser::BrowserIngestPolicy;
-use lumen_sources_media::{AudioOrchestrator, CaptureOrchestrator, CapturedBatch};
+use lumen_sources_media::{
+    AudioOrchestrator, CaptureOrchestrator, CapturedBatch, InteractionCoalescer,
+    InteractionContext,
+};
 use lumen_store::{EventStore, ReclaimKind, RecoveryPolicy, SCHEMA_VERSION, SqliteStore};
 use lumen_types::{event_kind, SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
@@ -458,32 +461,113 @@ async fn main() -> Result<()> {
     // A single static state: the CGEventTap callback holds a &'static ref.
     static INPUT_STATE: std::sync::OnceLock<lumen_platform_macos::InputCounterState> =
         std::sync::OnceLock::new();
-    let input_handle = if config.input.enabled {
+    let tap_wanted = config.input.enabled || config.input.observe_interactions;
+    let _input_handle = if tap_wanted {
         let state = INPUT_STATE.get_or_init(lumen_platform_macos::InputCounterState::default);
         match lumen_platform_macos::start_input_counter(state) {
             Ok(()) => {
                 info!(
                     flush_s = config.input.flush_interval_s,
-                    "input counter started (behavioral keys + clicks only)"
+                    observe = config.input.observe_interactions,
+                    record_text = config.input.record_text,
+                    "input tap started"
                 );
                 let store_in = Arc::clone(&store);
                 let flush_every =
                     Duration::from_secs(config.input.flush_interval_s.max(30));
+                let stats_on = config.input.enabled;
+                let observe_on = config.input.observe_interactions;
+                let record_text = config.input.record_text;
+                let paused = config.privacy.paused;
+                let closed_eyes = config.privacy.closed_eyes;
                 Some(tokio::spawn(async move {
-                    let mut tick = tokio::time::interval(flush_every);
-                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    tick.tick().await; // initial
+                    let mut stats_tick = tokio::time::interval(flush_every);
+                    stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    let mut hid_tick = tokio::time::interval(Duration::from_millis(50));
+                    hid_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    stats_tick.tick().await;
+                    hid_tick.tick().await;
+                    let mut coal = InteractionCoalescer::default();
+                    let front = host::frontmost();
                     loop {
-                        tick.tick().await;
-                        let counts = lumen_platform_macos::input_snapshot(state);
-                        lumen_platform_macos::input_reset(state);
-                        let event = SourceEvent::new(
-                            SourceKind::Screen,
-                            event_kind::INPUT_STATS_V1,
-                            serde_json::to_value(&counts).unwrap_or_default(),
-                        );
-                        if let Err(e) = store_in.append_event(event) {
-                            warn!(error = %e, "append input.stats.v1 failed");
+                        tokio::select! {
+                            _ = stats_tick.tick() => {
+                                if !stats_on {
+                                    continue;
+                                }
+                                let counts = lumen_platform_macos::input_snapshot(state);
+                                lumen_platform_macos::input_reset(state);
+                                let event = SourceEvent::new(
+                                    SourceKind::Screen,
+                                    event_kind::INPUT_STATS_V1,
+                                    serde_json::to_value(&counts).unwrap_or_default(),
+                                );
+                                if let Err(e) = store_in.append_event(event) {
+                                    warn!(error = %e, "append input.stats.v1 failed");
+                                }
+                            }
+                            _ = hid_tick.tick() => {
+                                if !observe_on || paused || closed_eyes {
+                                    let _ = lumen_platform_macos::input_drain_hid(state);
+                                    continue;
+                                }
+                                let raw = lumen_platform_macos::input_drain_hid(state);
+                                if raw.is_empty() {
+                                    for ev in coal.flush_due(std::time::Instant::now()) {
+                                        let _ = store_in.append_event(ev);
+                                    }
+                                    continue;
+                                }
+                                let frontmost = front.frontmost().await.ok().flatten();
+                                let ctx = InteractionContext {
+                                    app_name: frontmost.as_ref().map(|f| f.app_name.clone()),
+                                    bundle_id: frontmost.as_ref().and_then(|f| f.bundle_id.clone()),
+                                    window_title: frontmost.as_ref().and_then(|f| f.window_title.clone()),
+                                    url: frontmost.as_ref().and_then(|f| f.tab_url.clone()),
+                                    session_id: None,
+                                };
+                                let now = std::time::Instant::now();
+                                for hid in raw {
+                                    let mut evs = coal.push(hid.clone(), ctx.clone(), now);
+                                    if !record_text {
+                                        evs.retain(|e| e.kind != event_kind::KEYBOARD_TEXT_INPUT_V1);
+                                    }
+                                    for ev in evs {
+                                        if ev.kind == event_kind::MOUSE_CLICK_V1
+                                            || ev.kind == event_kind::MOUSE_CONTEXT_MENU_V1
+                                        {
+                                            if let Some(sel) = lumen_platform_macos::focused_selection() {
+                                                if !sel.text.trim().is_empty() {
+                                                    let text = sel.text;
+                                                    let mut payload = ev.payload.clone();
+                                                    if let Some(obj) = payload.as_object_mut() {
+                                                        obj.insert(
+                                                            "selection".into(),
+                                                            serde_json::json!({ "text": text }),
+                                                        );
+                                                    }
+                                                    let sel_ev = SourceEvent::new(
+                                                        SourceKind::Screen,
+                                                        event_kind::SELECTION_CHANGED_V1,
+                                                        payload,
+                                                    );
+                                                    let _ = store_in.append_event(sel_ev);
+                                                }
+                                            }
+                                        }
+                                        if let Err(e) = store_in.append_event(ev) {
+                                            warn!(error = %e, "append interaction event failed");
+                                        } else {
+                                            note_write();
+                                        }
+                                    }
+                                }
+                                for ev in coal.flush_due(now) {
+                                    if record_text {
+                                        let _ = store_in.append_event(ev);
+                                    }
+                                }
+                            }
                         }
                     }
                 }))
@@ -732,7 +816,7 @@ async fn main() -> Result<()> {
             let _ = act_cancel;
             loop {
                 tick.tick().await;
-                if let Some(ev) = orch.poll_activity().await {
+                for ev in orch.poll_activity().await {
                     match store_act.append_event(ev) {
                         Ok(()) => note_write(),
                         Err(e) => warn!(error = %e, "append activity event failed"),
@@ -740,6 +824,9 @@ async fn main() -> Result<()> {
                 }
                 if let Some(closed) = orch.close_idle_session() {
                     let _ = store_act.upsert_session(&closed);
+                    for ev in orch.drain_session_lifecycle() {
+                        let _ = store_act.append_event(ev);
+                    }
                 }
             }
         });
@@ -849,7 +936,7 @@ async fn main() -> Result<()> {
                     // heartbeat independent of the screenshot path. This is the
                     // data source for the time-tracking projection — survives
                     // even when screenshots are visually-debounced away.
-                    if let Some(ev) = orch.poll_activity().await {
+                    for ev in orch.poll_activity().await {
                         match store.append_event(ev) {
                             Ok(()) => note_write(),
                             Err(e) => warn!(error = %e, "append activity event failed"),
@@ -879,6 +966,12 @@ async fn main() -> Result<()> {
                     }
                     if let Some(closed) = orch.close_idle_session() {
                         let _ = store.upsert_session(&closed);
+                    }
+                    for ev in orch.drain_session_lifecycle() {
+                        match store.append_event(ev) {
+                            Ok(()) => note_write(),
+                            Err(e) => warn!(error = %e, "append session event failed"),
+                        }
                     }
                 }
                 _ = capture_tick.tick() => {

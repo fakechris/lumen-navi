@@ -562,6 +562,10 @@ pub struct InputConfig {
     pub enabled: bool,
     /// How often to flush counters as an `input.stats.v1` event (seconds).
     pub flush_interval_s: u64,
+    /// Persist discrete click / shortcut / text / drag events (Observe).
+    pub observe_interactions: bool,
+    /// Include coalesced typed text on `keyboard.text_input.v1`.
+    pub record_text: bool,
 }
 
 impl Default for InputConfig {
@@ -569,6 +573,8 @@ impl Default for InputConfig {
         Self {
             enabled: false,
             flush_interval_s: 300, // 5 minutes
+            observe_interactions: true,
+            record_text: true,
         }
     }
 }

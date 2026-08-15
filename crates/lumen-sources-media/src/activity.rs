@@ -90,27 +90,51 @@ impl ActivityAccumulator {
         }
     }
 
-    /// Ingest a sample; returns an event to persist if this poll should leave a
-    /// row (state change or heartbeat due).
+    /// Ingest a sample; returns a focus heartbeat/change row when worth keeping.
     pub fn ingest(&mut self, sample: ActivitySample, now: chrono::DateTime<Utc>) -> Option<SourceEvent> {
+        self.ingest_detailed(sample, now).focus
+    }
+
+    pub fn ingest_detailed(
+        &mut self,
+        sample: ActivitySample,
+        now: chrono::DateTime<Utc>,
+    ) -> ActivityTick {
         let key = ActivityKey::from(&sample, self.idle_threshold);
-
-        let emit = match (&self.last_key, self.last_emit) {
-            (None, _) => true,
-            (Some(prev), _) if *prev != key => true,
-            (Some(_), Some(last)) => now.signed_duration_since(last).to_std().ok()? >= self.heartbeat,
-            (Some(_), None) => true,
+        let changed = match &self.last_key {
+            None => true,
+            Some(prev) => prev != &key,
         };
-
-        if !emit {
-            return None;
+        let heartbeat_due = match self.last_emit {
+            Some(last) => now
+                .signed_duration_since(last)
+                .to_std()
+                .map(|d| d >= self.heartbeat)
+                .unwrap_or(true),
+            None => true,
+        };
+        if !changed && !heartbeat_due {
+            return ActivityTick::default();
         }
-
         self.last_key = Some(key.clone());
         self.last_emit = Some(now);
-
-        Some(make_event(&sample, &key, now))
+        let focus = Some(make_event(&sample, &key, now));
+        let window_changed = if changed && !key.is_idle && !key.is_locked {
+            Some(make_window_changed(&sample, &key, now))
+        } else {
+            None
+        };
+        ActivityTick {
+            focus,
+            window_changed,
+        }
     }
+}
+
+#[derive(Debug, Default)]
+pub struct ActivityTick {
+    pub focus: Option<SourceEvent>,
+    pub window_changed: Option<SourceEvent>,
 }
 
 fn make_event(sample: &ActivitySample, key: &ActivityKey, ts: chrono::DateTime<Utc>) -> SourceEvent {
@@ -131,6 +155,25 @@ fn make_event(sample: &ActivitySample, key: &ActivityKey, ts: chrono::DateTime<U
     });
     let mut event = SourceEvent::new(SourceKind::Activity, event_kind::ACTIVITY_FOCUS_V1, payload);
     event.id = Uuid::new_v4();
+    event.ts = ts;
+    event
+}
+
+fn make_window_changed(
+    sample: &ActivitySample,
+    key: &ActivityKey,
+    ts: chrono::DateTime<Utc>,
+) -> SourceEvent {
+    let payload = json!({
+        "payload_version": 1,
+        "app_name": key.app_name,
+        "bundle_id": key.bundle_id,
+        "window_title": key.window_title,
+        "url": key.tab_url,
+        "window_id": sample.frontmost.as_ref().and_then(|f| f.window_id),
+        "pid": sample.frontmost.as_ref().and_then(|f| f.pid),
+    });
+    let mut event = SourceEvent::new(SourceKind::Activity, event_kind::WINDOW_CHANGED_V1, payload);
     event.ts = ts;
     event
 }
@@ -174,8 +217,12 @@ mod tests {
         assert!(acc.ingest(sample("Safari", Some("Hello"), 1.0), now).is_none());
         // App change → emit.
         now += chrono::Duration::seconds(1);
-        let e = acc.ingest(sample("Mail", None, 1.0), now);
-        assert!(e.is_some());
+        let tick = acc.ingest_detailed(sample("Mail", None, 1.0), now);
+        assert!(tick.focus.is_some());
+        assert_eq!(
+            tick.window_changed.as_ref().map(|e| e.kind.as_str()),
+            Some(event_kind::WINDOW_CHANGED_V1)
+        );
     }
 
     #[test]
