@@ -30,79 +30,79 @@ function fmtTime(iso: string): string {
   });
 }
 
-// ── LLM Status Card（不重复配置表单 — 设置页的「LLM 配置」就是同一份 config）──
+// Some providers leave the CoT inline as <think>…</think>. The backend splits
+// new completions; this also fixes records saved before that existed.
+const THINK_RE = /<(think|thinking)>([\s\S]*?)<\/\1>/gi;
 
-function LlmStatusCard({ cfg }: { cfg: AssistantConfig | null }) {
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<string | null>(null);
+function splitInlineThink(text: string): { content: string; reasoning: string | null } {
+  const thoughts: string[] = [];
+  const content = text.replace(THINK_RE, (_m, _tag: string, inner: string) => {
+    const t = inner.trim();
+    if (t) thoughts.push(t);
+    return "";
+  });
+  return {
+    content: content.trim(),
+    reasoning: thoughts.length ? thoughts.join("\n\n") : null,
+  };
+}
 
-  const providerLabel = (() => {
-    if (!cfg) return "";
-    const pid = cfg.provider_id || "custom";
-    if (pid === "custom") return cfg.base_url || "自定义（未填 URL）";
-    return getProvider(pid)?.label ?? pid;
-  })();
-  const configured = cfg != null && cfg.model.trim() !== "" && providerLabel !== "";
-  const hasKey = cfg?.api_key_set ?? false;
+/** A reply body: collapsed CoT block + markdown answer. */
+function ReplyBody({ content, reasoning }: { content: string; reasoning?: string | null }) {
+  const split = splitInlineThink(content);
+  const cot =
+    [reasoning?.trim() || null, split.reasoning]
+      .filter((x): x is string => x != null && x !== "")
+      .join("\n\n") || null;
+  return (
+    <>
+      {cot && (
+        <details className="cot">
+          <summary>思考过程</summary>
+          <Markdown text={cot} />
+        </details>
+      )}
+      <Markdown text={split.content} />
+    </>
+  );
+}
 
-  const runTest = useCallback(async () => {
-    setTesting(true);
-    setTestResult(null);
-    try {
-      const r = await api.llmTest();
-      setTestResult(`✓ ${r}`);
-    } catch (e) {
-      setTestResult(`✗ ${String(e)}`);
-    } finally {
-      setTesting(false);
-    }
-  }, []);
+// ── LLM status chip（正常时一行小标签；有问题时提示并跳转设置）─────────
+
+function LlmChip({
+  cfg,
+  onOpenSettings,
+}: {
+  cfg: AssistantConfig | null;
+  onOpenSettings: () => void;
+}) {
+  if (cfg == null) return null;
+  const pid = cfg.provider_id || "custom";
+  const providerLabel = pid === "custom" ? cfg.base_url || "自定义（未填 URL）" : getProvider(pid)?.label ?? pid;
+  const configured = cfg.model.trim() !== "" && providerLabel !== "";
+  const problem = !configured || !cfg.api_key_set;
 
   return (
-    <Card pad={16}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
-        <h3 style={{ margin: 0 }}>LLM</h3>
-        {configured && (
-          <Button variant="secondary" disabled={testing} onClick={() => void runTest()}>
-            {testing ? "测试中…" : "测试连接"}
-          </Button>
-        )}
-      </div>
-      {cfg == null ? (
-        <div style={{ color: "var(--text-tertiary)", fontSize: "var(--text-sm)" }}>
-          加载中…
-        </div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: "var(--text-sm)" }}>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <StatusDot status={configured ? "done" : "idle"} />
-            <span>
-              {providerLabel} · {cfg.model || "（未选模型）"}
-            </span>
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <StatusDot status={hasKey ? "done" : "idle"} />
-            <span>API Key {hasKey ? "已设置" : "未设置"}</span>
-          </div>
-          {testResult && (
-            <div
-              style={{
-                fontSize: "var(--text-xs)",
-                color: testResult.startsWith("✓") ? "var(--success)" : "var(--danger)",
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {testResult}
-            </div>
-          )}
-          {!configured || !hasKey ? (
-            <div style={{ color: "var(--warn, var(--text-secondary))", fontSize: "var(--text-xs)" }}>
-              Roast 和 Chat 需要 LLM。请在 设置 → LLM 配置 选择 provider 并配置 key（同一个 LLM 配置全局共用）。
-            </div>
-          ) : null}
-        </div>
-      )}
-    </Card>
+    <button
+      onClick={onOpenSettings}
+      title={problem ? "LLM 配置不完整 — 点击前往设置" : "LLM 配置 — 点击前往设置"}
+      style={{
+        alignSelf: "flex-start",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        border: "1px solid var(--border)",
+        borderRadius: 999,
+        background: "transparent",
+        padding: "3px 10px",
+        fontSize: "var(--text-xs)",
+        color: problem ? "var(--warn, var(--text-secondary))" : "var(--text-tertiary)",
+        cursor: "pointer",
+      }}
+    >
+      <StatusDot status={problem ? "idle" : "done"} />
+      {problem ? "LLM 未配置完整 · 点击前往设置" : `${providerLabel} · ${cfg.model}`}
+    </button>
   );
 }
 
@@ -292,13 +292,7 @@ function RoastCard() {
                   padding: "14px 16px",
                 }}
               >
-                {selected.reasoning && (
-                  <details className="cot">
-                    <summary>思考过程</summary>
-                    <Markdown text={selected.reasoning} />
-                  </details>
-                )}
-                <Markdown text={selected.content} />
+                <ReplyBody content={selected.content} reasoning={selected.reasoning} />
               </div>
             </>
           ) : (
@@ -484,13 +478,7 @@ function ChatCard() {
                 color: "var(--text)",
               }}
             >
-              {m.reasoning && (
-                <details className="cot">
-                  <summary>思考过程</summary>
-                  <Markdown text={m.reasoning} />
-                </details>
-              )}
-              <Markdown text={m.content} />
+              <ReplyBody content={m.content} reasoning={m.reasoning} />
             </div>
           ),
         )}
@@ -524,10 +512,16 @@ function ChatCard() {
 
 // ── Main ────────────────────────────────────────────────────────────────
 
-export function AIView({ assistant }: { assistant: AssistantConfig | null }) {
+export function AIView({
+  assistant,
+  onOpenSettings,
+}: {
+  assistant: AssistantConfig | null;
+  onOpenSettings: () => void;
+}) {
   return (
     <div className="stack">
-      <LlmStatusCard cfg={assistant} />
+      <LlmChip cfg={assistant} onOpenSettings={onOpenSettings} />
       <RoastCard />
       <ChatCard />
     </div>

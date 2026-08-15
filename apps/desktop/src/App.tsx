@@ -948,7 +948,9 @@ export default function App() {
             </div>
           )}
 
-          {tab === "ai" && <AIView assistant={assistant} />}
+          {tab === "ai" && (
+            <AIView assistant={assistant} onOpenSettings={() => setTab("settings")} />
+          )}
 
           {tab === "activity" && (
             <div className="stack">
