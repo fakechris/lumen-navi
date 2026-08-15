@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { api } from "../api";
+import { Markdown } from "../components/Markdown";
 import { Button, Card, StatusDot } from "../design";
 import { getProvider } from "../llm/catalog";
 import type { AssistantConfig } from "../types";
@@ -71,7 +72,7 @@ function LlmStatusCard({ cfg }: { cfg: AssistantConfig | null }) {
           )}
           {!configured || !hasKey ? (
             <div style={{ color: "var(--warn, var(--text-secondary))", fontSize: "var(--text-xs)" }}>
-              Roast 和 Chat 需要 LLM。请在 设置 → 划词助手 中选择 provider 并配置 key（同一个 LLM 配置全局共用）。
+              Roast 和 Chat 需要 LLM。请在 设置 → LLM 配置 选择 provider 并配置 key（同一个 LLM 配置全局共用）。
             </div>
           ) : null}
         </div>
@@ -85,17 +86,17 @@ function LlmStatusCard({ cfg }: { cfg: AssistantConfig | null }) {
 function RoastCard() {
   const now = new Date();
   const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-  const [roast, setRoast] = useState<string | null>(null);
+  const [reply, setReply] = useState<{ content: string; reasoning: string | null } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const run = useCallback(async () => {
     setLoading(true);
     setError(null);
-    setRoast(null);
+    setReply(null);
     try {
-      const text = await api.roastDay(day);
-      setRoast(text);
+      const r = await api.roastDay(day);
+      setReply(r);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -119,10 +120,9 @@ function RoastCard() {
       {error && (
         <div style={{ color: "var(--danger)", fontSize: "var(--text-sm)", whiteSpace: "pre-wrap" }}>{error}</div>
       )}
-      {roast && (
+      {reply && (
         <div
           style={{
-            whiteSpace: "pre-wrap",
             fontSize: "var(--text-sm)",
             lineHeight: 1.8,
             background: "var(--surface-2, var(--surface))",
@@ -130,7 +130,13 @@ function RoastCard() {
             padding: "14px 16px",
           }}
         >
-          {roast}
+          {reply.reasoning && (
+            <details className="cot">
+              <summary>思考过程</summary>
+              <Markdown text={reply.reasoning} />
+            </details>
+          )}
+          <Markdown text={reply.content} />
         </div>
       )}
     </Card>
@@ -142,6 +148,7 @@ function RoastCard() {
 interface ChatMsg {
   role: "user" | "assistant";
   content: string;
+  reasoning?: string | null;
 }
 
 function ChatCard() {
@@ -160,7 +167,10 @@ function ChatCard() {
       const reply = await api.aiChat(
         next.map((m) => ({ role: m.role, content: m.content })),
       );
-      setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: reply.content, reasoning: reply.reasoning },
+      ]);
     } catch (e) {
       setMessages((prev) => [...prev, { role: "assistant", content: `⚠️ ${String(e)}` }]);
     } finally {
@@ -187,27 +197,48 @@ function ChatCard() {
             使用上方配置的 LLM 对话。你的行为数据不会被发送，除非你主动粘贴。
           </div>
         )}
-        {messages.map((m, i) => (
-          <div
-            key={i}
-            style={{
-              alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-              maxWidth: "85%",
-              padding: "8px 12px",
-              borderRadius: "var(--radius-md)",
-              fontSize: "var(--text-sm)",
-              lineHeight: 1.6,
-              whiteSpace: "pre-wrap",
-              background:
-                m.role === "user"
-                  ? "var(--accent)"
-                  : "var(--surface-2, var(--surface))",
-              color: m.role === "user" ? "#fff" : "var(--text)",
-            }}
-          >
-            {m.content}
-          </div>
-        ))}
+        {messages.map((m, i) =>
+          m.role === "user" ? (
+            <div
+              key={i}
+              style={{
+                alignSelf: "flex-end",
+                maxWidth: "85%",
+                padding: "8px 12px",
+                borderRadius: "var(--radius-md)",
+                fontSize: "var(--text-sm)",
+                lineHeight: 1.6,
+                whiteSpace: "pre-wrap",
+                background: "var(--accent)",
+                color: "#fff",
+              }}
+            >
+              {m.content}
+            </div>
+          ) : (
+            <div
+              key={i}
+              style={{
+                alignSelf: "flex-start",
+                maxWidth: "85%",
+                padding: "8px 12px",
+                borderRadius: "var(--radius-md)",
+                fontSize: "var(--text-sm)",
+                lineHeight: 1.6,
+                background: "var(--surface-2, var(--surface))",
+                color: "var(--text)",
+              }}
+            >
+              {m.reasoning && (
+                <details className="cot">
+                  <summary>思考过程</summary>
+                  <Markdown text={m.reasoning} />
+                </details>
+              )}
+              <Markdown text={m.content} />
+            </div>
+          ),
+        )}
         {loading && (
           <div style={{ color: "var(--text-tertiary)", fontSize: "var(--text-xs)", alignSelf: "flex-start" }}>
             思考中…

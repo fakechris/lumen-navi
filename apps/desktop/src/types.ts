@@ -314,9 +314,14 @@ export interface AsrDownloadProgress {
   percent: number | null;
 }
 
+/** LLM completion result: visible answer + separate chain-of-thought. */
+export interface LlmReply {
+  content: string;
+  reasoning: string | null;
+}
+
 /** Selection-popup assistant config (navi.toml `[assistant]`). */
-export interface AssistantConfig {
-  enabled: boolean;
+export interface AssistantConfig {  enabled: boolean;
   popup_enabled: boolean;
   /** Provider preset id ("custom" = hand-filled base_url). */
   provider_id: string;
