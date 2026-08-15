@@ -5,7 +5,10 @@ use std::process::{Command, Stdio};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chrono::{DateTime, Utc};
-use lumen_api::{EventSummary, HealthResponse, OcrSearchHitDto, SourceStatus, API_VERSION};
+use lumen_api::{
+    AiMessageDto, AiThreadDto, EventSummary, HealthResponse, OcrSearchHitDto, RoastIndexDto,
+    RoastRecordDto, SourceStatus, API_VERSION,
+};
 use lumen_config::Config;
 use lumen_platform_host as host;
 use lumen_store::{EventStore, SCHEMA_VERSION, TimelineQuery};
@@ -766,28 +769,109 @@ pub async fn roast_day(
          - 直接输出 roast 内容，不要前言后语\n\n\
          数据：\n{data}"
     );
-    llm_chat_complete(
+    let reply = llm_chat_complete(
         &cfg,
         &endpoint,
         vec![serde_json::json!({"role": "user", "content": prompt})],
         0.8,
     )
-    .await
+    .await?;
+    // Archive every roast so the calendar can replay past days.
+    state
+        .store
+        .roast_save(&day, &cfg.model, &reply.content, reply.reasoning.as_deref())
+        .map_err(err)?;
+    Ok(reply)
 }
 
-/// AI chat: multi-turn conversation with the configured assistant LLM
-/// (same config as the selection popup — one LLM config app-wide).
+/// Archived roasts for one day, newest first.
 #[tauri::command]
-pub async fn ai_chat(
+pub fn roast_list(state: State<'_, AppState>, day: String) -> Result<Vec<RoastRecordDto>, String> {
+    state.store.roast_list_for_day(&day).map_err(err)
+}
+
+/// Which days have roasts (calendar markers).
+#[tauri::command]
+pub fn roast_index(state: State<'_, AppState>) -> Result<Vec<RoastIndexDto>, String> {
+    state.store.roast_index().map_err(err)
+}
+
+/// Result of ai_send: which thread the exchange landed in (created on first
+/// send) plus the reply.
+#[derive(Debug, Serialize)]
+pub struct AiSendResult {
+    pub thread_id: String,
+    pub content: String,
+    pub reasoning: Option<String>,
+}
+
+/// AI chat send: persists the exchange into an ai_threads/ai_messages
+/// conversation. Thread context is rebuilt from stored history so switching
+/// tabs or restarting the app resumes where you left off.
+#[tauri::command]
+pub async fn ai_send(
     state: State<'_, AppState>,
-    messages: Vec<serde_json::Value>,
-) -> Result<LlmReply, String> {
+    thread_id: Option<String>,
+    content: String,
+) -> Result<AiSendResult, String> {
+    let user = content.trim().to_string();
+    if user.is_empty() {
+        return Err("空消息".into());
+    }
     let cfg = state.load_config().map_err(err)?.assistant;
     if cfg.model.trim().is_empty() {
         return Err("LLM 未配置 — 请在 设置 → LLM 配置 选择 model".into());
     }
+
+    // Rebuild conversation context from persisted history.
+    let mut msgs: Vec<serde_json::Value> = Vec::new();
+    if let Some(tid) = thread_id.as_deref() {
+        for m in state.store.ai_list_messages(tid).map_err(err)? {
+            if m.role == "user" || m.role == "assistant" {
+                msgs.push(serde_json::json!({"role": m.role, "content": m.content}));
+            }
+        }
+    }
+    msgs.push(serde_json::json!({"role": "user", "content": user}));
+
     let endpoint = resolve_llm_endpoint(&cfg)?;
-    llm_chat_complete(&cfg, &endpoint, messages, 0.7).await
+    let reply = llm_chat_complete(&cfg, &endpoint, msgs, 0.7).await?;
+
+    // Persist only on success — failed sends stay ephemeral.
+    let tid = match thread_id {
+        Some(t) => t,
+        None => state.store.ai_create_thread("").map_err(err)?.id,
+    };
+    state
+        .store
+        .ai_append_exchange(&tid, &user, &reply.content, reply.reasoning.as_deref())
+        .map_err(err)?;
+    Ok(AiSendResult {
+        thread_id: tid,
+        content: reply.content,
+        reasoning: reply.reasoning,
+    })
+}
+
+#[tauri::command]
+pub fn ai_thread_list(state: State<'_, AppState>) -> Result<Vec<AiThreadDto>, String> {
+    state.store.ai_list_threads(100).map_err(err)
+}
+
+#[tauri::command]
+pub fn ai_thread_messages(
+    state: State<'_, AppState>,
+    thread_id: String,
+) -> Result<Vec<AiMessageDto>, String> {
+    state.store.ai_list_messages(&thread_id).map_err(err)
+}
+
+#[tauri::command]
+pub fn ai_thread_delete(
+    state: State<'_, AppState>,
+    thread_id: String,
+) -> Result<(), String> {
+    state.store.ai_delete_thread(&thread_id).map_err(err)
 }
 
 /// Test the LLM connection with a minimal ping.

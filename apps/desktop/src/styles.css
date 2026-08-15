@@ -415,3 +415,27 @@ input[type="password"]:focus {
 }
 .cot .md-render { font-size: 0.92em; color: var(--text-secondary); }
 .cot[open] summary { margin-bottom: 0.4em; }
+
+/* Mini month calendar in the AI tab (roast history). */
+.cal {
+  display: grid; grid-template-columns: repeat(7, 30px); gap: 2px;
+}
+.cal-dow {
+  text-align: center; font-size: var(--text-xs);
+  color: var(--text-tertiary); padding: 2px 0;
+}
+.cal-day {
+  position: relative; height: 26px; border: none; border-radius: var(--radius-sm, 4px);
+  background: transparent; color: var(--text); font-size: var(--text-xs);
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.cal-day:hover { background: var(--graph-grid); }
+.cal-day.today { border: 1px solid var(--border-strong); }
+.cal-day.sel { background: var(--accent); color: #fff; }
+.cal-day.sel:hover { background: var(--accent); opacity: 0.9; }
+.cal-dot {
+  position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%);
+  width: 4px; height: 4px; border-radius: 50%;
+  background: var(--danger, #e5484d);
+}
+.cal-day.sel .cal-dot { background: #fff; }

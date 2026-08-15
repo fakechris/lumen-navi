@@ -1,6 +1,6 @@
 //! SQLite schema for meta/navi.db
 
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 pub const MIGRATE_V1: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -222,4 +222,38 @@ CREATE TABLE IF NOT EXISTS brew_cask_by_bundle (
 );
 
 CREATE INDEX IF NOT EXISTS idx_brew_cask_token ON brew_cask_by_bundle(cask_token);
+"#;
+
+/// AI tab persistence: chat threads/messages and roast archives. Written by
+/// the desktop app only (the daemon never touches these tables).
+pub const MIGRATE_V10: &str = r#"
+CREATE TABLE IF NOT EXISTS ai_threads (
+  id TEXT PRIMARY KEY NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_messages (
+  id TEXT PRIMARY KEY NOT NULL,
+  thread_id TEXT NOT NULL REFERENCES ai_threads(id) ON DELETE CASCADE,
+  -- 'user' | 'assistant'
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  reasoning TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_messages_thread ON ai_messages(thread_id, created_at);
+
+CREATE TABLE IF NOT EXISTS roasts (
+  id TEXT PRIMARY KEY NOT NULL,
+  day TEXT NOT NULL,
+  model TEXT NOT NULL,
+  content TEXT NOT NULL,
+  reasoning TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_roasts_day ON roasts(day, created_at);
 "#;

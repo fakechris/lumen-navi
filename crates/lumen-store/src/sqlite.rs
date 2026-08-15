@@ -7,9 +7,10 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use lumen_api::{
-    ActivitySegmentDto, AppTotal, CategoryTotal, DayRoastSummaryDto, DayRollupDto, DayStatsDto,
-    HistorySlotDto, RangeStatsDto, RoastAppTotal, RoastDomainTotal, RoastHour, RoastInputCounts,
-    RoastSceneTotal, RoastTitleTotal, SceneDayDto,
+    ActivitySegmentDto, AiMessageDto, AiThreadDto, AppTotal, CategoryTotal, DayRoastSummaryDto,
+    DayRollupDto, DayStatsDto, HistorySlotDto, RangeStatsDto, RoastAppTotal, RoastDomainTotal,
+    RoastHour, RoastIndexDto, RoastInputCounts, RoastRecordDto, RoastSceneTotal, RoastTitleTotal,
+    SceneDayDto,
 };
 use lumen_types::{
     event_kind, ActivitySession, ArtifactRef, SessionStatus, SourceEvent, SourceKind,
@@ -24,7 +25,7 @@ use crate::categorization::{
 use crate::enrichment::{self, BrewCaskRow};
 use crate::schema::{
     MIGRATE_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, MIGRATE_V5, MIGRATE_V6, MIGRATE_V7,
-    MIGRATE_V8, MIGRATE_V9, SCHEMA_VERSION,
+    MIGRATE_V10, MIGRATE_V8, MIGRATE_V9, SCHEMA_VERSION,
 };
 use crate::{EventStore, JobRecord, JobStatus, RecoveryPolicy, RecoveryReport, StoreError};
 #[cfg(test)]
@@ -1598,6 +1599,252 @@ impl SqliteStore {
             hour_histogram,
         })
     }
+
+    // ── AI tab persistence: chat threads/messages + roast archives ──────
+
+    pub fn ai_create_thread(&self, title: &str) -> Result<AiThreadDto, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO ai_threads (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+            params![id, title, now],
+        )
+        .map_err(StoreError::db)?;
+        Ok(AiThreadDto {
+            id,
+            title: title.to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+            message_count: 0,
+        })
+    }
+
+    pub fn ai_list_threads(&self, limit: u32) -> Result<Vec<AiThreadDto>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.id, t.title, t.created_at, t.updated_at,
+                        (SELECT COUNT(*) FROM ai_messages m WHERE m.thread_id = t.id) AS n
+                 FROM ai_threads t
+                 ORDER BY t.updated_at DESC
+                 LIMIT ?1",
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map(params![limit], |r| {
+                Ok(AiThreadDto {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    created_at: r.get(2)?,
+                    updated_at: r.get(3)?,
+                    message_count: r.get(4)?,
+                })
+            })
+            .map_err(StoreError::db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::db)
+    }
+
+    pub fn ai_list_messages(&self, thread_id: &str) -> Result<Vec<AiMessageDto>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, thread_id, role, content, reasoning, created_at
+                 FROM ai_messages
+                 WHERE thread_id = ?1
+                 ORDER BY created_at, rowid",
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map(params![thread_id], |r| {
+                Ok(AiMessageDto {
+                    id: r.get(0)?,
+                    thread_id: r.get(1)?,
+                    role: r.get(2)?,
+                    content: r.get(3)?,
+                    reasoning: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })
+            .map_err(StoreError::db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::db)
+    }
+
+    /// Append one user turn and the assistant reply; backfills the thread
+    /// title from the first user message when it is still empty.
+    /// Millis that never repeat or go backwards within this process, so
+    /// message ordering by created_at string is stable across rapid calls.
+    fn monotonic_now_ms() -> i64 {
+        static LAST_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        let now = Utc::now().timestamp_millis();
+        let prev = LAST_MS.load(std::sync::atomic::Ordering::Relaxed);
+        let ms = if now > prev { now } else { prev + 1 };
+        LAST_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+        ms
+    }
+
+    fn ms_to_rfc3339(ms: i64) -> String {
+        use chrono::TimeZone;
+        Utc.timestamp_millis(ms).to_rfc3339()
+    }
+
+    pub fn ai_append_exchange(
+        &self,
+        thread_id: &str,
+        user_content: &str,
+        assistant_content: &str,
+        assistant_reasoning: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let now = Self::ms_to_rfc3339(Self::monotonic_now_ms());
+        // Second tick is guaranteed > the user message's, and the next
+        // exchange's call bumps past both — reply sorts after user, next
+        // user after this reply.
+        let now_reply = Self::ms_to_rfc3339(Self::monotonic_now_ms());
+        let tx = conn.unchecked_transaction().map_err(StoreError::db)?;
+        // Recreate the thread row if it was deleted mid-conversation.
+        tx.execute(
+            "INSERT OR IGNORE INTO ai_threads (id, title, created_at, updated_at) VALUES (?1, '', ?2, ?2)",
+            params![thread_id, now],
+        )
+        .map_err(StoreError::db)?;
+        tx.execute(
+            "INSERT INTO ai_messages (id, thread_id, role, content, reasoning, created_at)
+             VALUES (?1, ?2, 'user', ?3, NULL, ?4)",
+            params![Uuid::new_v4().to_string(), thread_id, user_content, now],
+        )
+        .map_err(StoreError::db)?;
+        tx.execute(
+            "INSERT INTO ai_messages (id, thread_id, role, content, reasoning, created_at)
+             VALUES (?1, ?2, 'assistant', ?3, ?4, ?5)",
+            params![
+                Uuid::new_v4().to_string(),
+                thread_id,
+                assistant_content,
+                assistant_reasoning,
+                now_reply
+            ],
+        )
+        .map_err(StoreError::db)?;
+        // Title from the first user message (trim to keep the thread list readable).
+        let title: String = user_content.chars().take(40).collect();
+        tx.execute(
+            "UPDATE ai_threads SET title = ?2, updated_at = ?3
+             WHERE id = ?1 AND (title = '' OR title IS NULL)",
+            params![thread_id, title, now],
+        )
+        .map_err(StoreError::db)?;
+        tx.execute(
+            "UPDATE ai_threads SET updated_at = ?2 WHERE id = ?1",
+            params![thread_id, now],
+        )
+        .map_err(StoreError::db)?;
+        tx.commit().map_err(StoreError::db)
+    }
+
+    pub fn ai_delete_thread(&self, thread_id: &str) -> Result<(), StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.execute("DELETE FROM ai_messages WHERE thread_id = ?1", params![thread_id])
+            .map_err(StoreError::db)?;
+        conn.execute("DELETE FROM ai_threads WHERE id = ?1", params![thread_id])
+            .map_err(StoreError::db)?;
+        Ok(())
+    }
+
+    pub fn roast_save(
+        &self,
+        day: &str,
+        model: &str,
+        content: &str,
+        reasoning: Option<&str>,
+    ) -> Result<RoastRecordDto, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let id = Uuid::new_v4().to_string();
+        let now = Self::ms_to_rfc3339(Self::monotonic_now_ms());
+        conn.execute(
+            "INSERT INTO roasts (id, day, model, content, reasoning, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, day, model, content, reasoning, now],
+        )
+        .map_err(StoreError::db)?;
+        Ok(RoastRecordDto {
+            id,
+            day: day.to_string(),
+            model: model.to_string(),
+            content: content.to_string(),
+            reasoning: reasoning.map(|s| s.to_string()),
+            created_at: now,
+        })
+    }
+
+    pub fn roast_list_for_day(&self, day: &str) -> Result<Vec<RoastRecordDto>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, day, model, content, reasoning, created_at
+                 FROM roasts WHERE day = ?1
+                 ORDER BY created_at DESC, rowid DESC",
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map(params![day], |r| {
+                Ok(RoastRecordDto {
+                    id: r.get(0)?,
+                    day: r.get(1)?,
+                    model: r.get(2)?,
+                    content: r.get(3)?,
+                    reasoning: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })
+            .map_err(StoreError::db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::db)
+    }
+
+    /// Days that have at least one roast, for calendar markers.
+    pub fn roast_index(&self) -> Result<Vec<RoastIndexDto>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT day, COUNT(*) AS n FROM roasts
+                 GROUP BY day ORDER BY day DESC LIMIT 400",
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(RoastIndexDto {
+                    day: r.get(0)?,
+                    count: r.get(1)?,
+                })
+            })
+            .map_err(StoreError::db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::db)
+    }
+
     /// start time. Returns the dashboard's timeline data.
     pub fn list_activity_segments(&self, day: &str) -> Result<Vec<ActivitySegmentDto>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
@@ -3224,6 +3471,16 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
         )
         .map_err(StoreError::db)?;
         v = 9;
+    }
+
+    if v < 10 {
+        conn.execute_batch(MIGRATE_V10).map_err(StoreError::db)?;
+        conn.execute(
+            "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
+            params!["10"],
+        )
+        .map_err(StoreError::db)?;
+        v = 10;
     }
 
     let _ = v;
@@ -5576,5 +5833,58 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(80));
         blocker.execute_batch("COMMIT;").unwrap();
         handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn ai_threads_and_roast_archive_roundtrip() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+
+        // Chat: create → append exchange → list/messages/title backfill.
+        let t = store.ai_create_thread("").unwrap();
+        store
+            .ai_append_exchange(&t.id, "帮我总结今天", "好的，这是总结", Some("先想想"))
+            .unwrap();
+        store
+            .ai_append_exchange(&t.id, "再详细一点", "补充如下", None)
+            .unwrap();
+
+        let threads = store.ai_list_threads(10).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, t.id);
+        assert_eq!(threads[0].title, "帮我总结今天");
+        assert_eq!(threads[0].message_count, 4);
+
+        let msgs = store.ai_list_messages(&t.id).unwrap();
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].content, "帮我总结今天");
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].reasoning.as_deref(), Some("先想想"));
+        // User message must sort before its reply.
+        assert!(msgs[0].created_at <= msgs[1].created_at);
+
+        // Append into a deleted thread recreates it instead of FK-failing.
+        store.ai_delete_thread(&t.id).unwrap();
+        assert!(store.ai_list_threads(10).unwrap().is_empty());
+        store
+            .ai_append_exchange(&t.id, "继续", "继续了", None)
+            .unwrap();
+        assert_eq!(store.ai_list_messages(&t.id).unwrap().len(), 2);
+
+        // Roast archive: save → per-day list (newest first) → index.
+        let r1 = store.roast_save("2026-08-14", "glm-4.7", "第一条", None).unwrap();
+        let r2 = store.roast_save("2026-08-14", "glm-4.7", "第二条", Some("想过了")).unwrap();
+        store.roast_save("2026-08-13", "glm-4.7", "昨天", None).unwrap();
+
+        let day_list = store.roast_list_for_day("2026-08-14").unwrap();
+        assert_eq!(day_list.len(), 2);
+        assert_eq!(day_list[0].id, r2.id);
+        assert_eq!(day_list[1].id, r1.id);
+
+        let index = store.roast_index().unwrap();
+        assert_eq!(index.len(), 2);
+        let aug14 = index.iter().find(|e| e.day == "2026-08-14").unwrap();
+        assert_eq!(aug14.count, 2);
     }
 }
