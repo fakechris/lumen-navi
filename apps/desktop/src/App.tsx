@@ -1625,6 +1625,34 @@ export default function App() {
                     无 AX 应用（钉钉文档 / 终端）用复制键兜底取词（读取后立即恢复剪贴板）
                   </label>
                   <label className="field">
+                    <span className="meta">翻译目标语言</span>
+                    <input
+                      className="input"
+                      placeholder="中文"
+                      value={assistant?.target_lang ?? ""}
+                      onChange={(e) => {
+                        const target_lang = e.target.value;
+                        setAssistant((prev) =>
+                          prev ? { ...prev, target_lang } : prev,
+                        );
+                      }}
+                      onBlur={() =>
+                        void updateAssistant({ target_lang: assistant?.target_lang ?? "" })
+                      }
+                    />
+                  </label>
+                  <p className="meta">
+                    LLM 提供商 / 模型 / 密钥在下方「LLM 配置」卡片统一设置。选中文字仅在你点击「翻译 / 提问」时发送，不会被采集或存储。
+                  </p>
+                </div>
+              </div>
+              <div className="card">
+                <h3>LLM 配置（全局）</h3>
+                <p className="meta">
+                  全应用共用一份配置：划词助手、Roast 我的一天、AI Chat。
+                </p>
+                <div className="stack mt">
+                  <label className="field">
                     <span className="meta">LLM Provider</span>
                     <select
                       className="input"
@@ -1758,23 +1786,6 @@ export default function App() {
                     </div>
                   </label>
                   <label className="field">
-                    <span className="meta">翻译目标语言</span>
-                    <input
-                      className="input"
-                      placeholder="中文"
-                      value={assistant?.target_lang ?? ""}
-                      onChange={(e) => {
-                        const target_lang = e.target.value;
-                        setAssistant((prev) =>
-                          prev ? { ...prev, target_lang } : prev,
-                        );
-                      }}
-                      onBlur={() =>
-                        void updateAssistant({ target_lang: assistant?.target_lang ?? "" })
-                      }
-                    />
-                  </label>
-                  <label className="field">
                     <span className="meta">
                       API key（{assistant?.api_key_set ? "已配置，输入以更换" : "未配置"}）
                     </span>
@@ -1793,8 +1804,8 @@ export default function App() {
                       }}
                     />
                   </label>
-                  {assistant?.api_key_set && (
-                    <div className="row">
+                  <div className="row">
+                    {assistant?.api_key_set && (
                       <button
                         className="btn"
                         disabled={busy}
@@ -1802,25 +1813,24 @@ export default function App() {
                       >
                         清除 API key
                       </button>
-                      <Button
-                        variant="secondary"
-                        disabled={busy}
-                        onClick={() => {
-                          void api
-                            .llmTest()
-                            .then((r) => setStatusNote(`✓ ${r}`))
-                            .catch((e) => setError(`连接测试失败：${String(e)}`));
-                        }}
-                      >
-                        测试连接
-                      </Button>
-                    </div>
-                  )}
+                    )}
+                    <Button
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() => {
+                        void api
+                          .llmTest()
+                          .then((r) => setStatusNote(`✓ ${r}`))
+                          .catch((e) => setError(`连接测试失败：${String(e)}`));
+                      }}
+                    >
+                      测试连接
+                    </Button>
+                  </div>
                   <p className="meta">
                     写入 <span className="mono">navi.toml</span> 的{" "}
                     <span className="mono">assistant</span> 段；也可用环境变量{" "}
-                    <span className="mono">LUMEN_NAVI_LLM_API_KEY</span>。选中文字仅在
-                    你点击「翻译 / 提问」时发送，不会被采集或存储。
+                    <span className="mono">LUMEN_NAVI_LLM_API_KEY</span>。
                   </p>
                 </div>
               </div>

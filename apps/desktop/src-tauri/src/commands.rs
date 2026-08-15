@@ -585,7 +585,7 @@ fn resolve_llm_endpoint(cfg: &lumen_config::AssistantConfig) -> Result<LlmEndpoi
             // Custom: base_url must be set; treat as OpenAI-compat.
             let b = cfg.base_url.trim().trim_end_matches('/').to_string();
             if b.is_empty() {
-                return Err("LLM 未配置 — 请在 设置 → 划词助手 选择 provider 或填写 base_url".into());
+                return Err("LLM 未配置 — 请在 设置 → LLM 配置 选择 provider 或填写 base_url".into());
             }
             (b, "/chat/completions".to_string(), LlmStyle::OpenAiCompat, None, None, None)
         }
@@ -625,7 +625,7 @@ fn resolve_llm_endpoint(cfg: &lumen_config::AssistantConfig) -> Result<LlmEndpoi
             }
         }
     } else if preset.as_ref().map(|p| p.needs_key).unwrap_or(false) {
-        return Err(format!("401: {} 需要 API key，请在 设置 → 划词助手 中配置", cfg.provider_id));
+        return Err(format!("401: {} 需要 API key，请在 设置 → LLM 配置 中配置", cfg.provider_id));
     }
     if let Some(extra) = extra {
         for (k, v) in extra {
@@ -637,6 +637,14 @@ fn resolve_llm_endpoint(cfg: &lumen_config::AssistantConfig) -> Result<LlmEndpoi
     Ok(LlmEndpoint { url, base, headers, style })
 }
 
+/// A completion result: the visible answer plus the model's chain-of-thought
+/// when the provider returns it in a separate field (reasoning models).
+#[derive(Debug, Serialize)]
+pub struct LlmReply {
+    pub content: String,
+    pub reasoning: Option<String>,
+}
+
 /// Send a chat completion (non-streaming) and extract the assistant text.
 /// Handles both OpenAI-compat and Anthropic-native response shapes.
 async fn llm_chat_complete(
@@ -644,7 +652,7 @@ async fn llm_chat_complete(
     endpoint: &LlmEndpoint,
     messages: Vec<serde_json::Value>,
     temperature: f64,
-) -> Result<String, String> {
+) -> Result<LlmReply, String> {
     let body = match endpoint.style {
         LlmStyle::OpenAiCompat => serde_json::json!({
             "model": cfg.model,
@@ -688,28 +696,64 @@ async fn llm_chat_complete(
         return Err(format!("LLM 返回 {status}: {text}"));
     }
     let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应: {e}"))?;
-    let content = match endpoint.style {
-        LlmStyle::OpenAiCompat => json
-            .pointer("/choices/0/message/content")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        LlmStyle::Anthropic => json
-            .pointer("/content/0/text")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+    let (content, reasoning) = match endpoint.style {
+        LlmStyle::OpenAiCompat => {
+            // Reasoning models (DeepSeek-R1 / GLM / Qwen) expose CoT separately.
+            let reasoning = ["reasoning_content", "reasoning"]
+                .iter()
+                .filter_map(|k| {
+                    json.pointer(&format!("/choices/0/message/{k}"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .find(|s| !s.trim().is_empty());
+            (
+                json.pointer("/choices/0/message/content")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                reasoning,
+            )
+        }
+        LlmStyle::Anthropic => {
+            // Content is an array of blocks; thinking blocks carry the CoT.
+            let mut text = String::new();
+            let mut thinking = String::new();
+            if let Some(blocks) = json.get("content").and_then(|c| c.as_array()) {
+                for b in blocks {
+                    match b.get("type").and_then(|t| t.as_str()) {
+                        Some("thinking") => {
+                            if let Some(t) = b.get("thinking").and_then(|v| v.as_str()) {
+                                thinking.push_str(t);
+                            }
+                        }
+                        Some("text") => {
+                            if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
+                                text.push_str(t);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            (
+                if text.is_empty() { None } else { Some(text) },
+                if thinking.trim().is_empty() { None } else { Some(thinking) },
+            )
+        }
     };
-    content.ok_or_else(|| "LLM 响应缺少 content".to_string())
+    let content = content.ok_or_else(|| "LLM 响应缺少 content".to_string())?;
+    Ok(LlmReply { content, reasoning })
 }
 
 #[tauri::command]
 pub async fn roast_day(
     state: State<'_, AppState>,
     day: String,
-) -> Result<String, String> {
+) -> Result<LlmReply, String> {
     let summary = state.store.day_roast_summary(&day).map_err(err)?;
     let cfg = state.load_config().map_err(err)?.assistant;
     if cfg.model.trim().is_empty() {
-        return Err("LLM 未配置 — 请在 设置 → 划词助手 选择 model".into());
+        return Err("LLM 未配置 — 请在 设置 → LLM 配置 选择 model".into());
     }
     let endpoint = resolve_llm_endpoint(&cfg)?;
     let data = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
@@ -737,10 +781,10 @@ pub async fn roast_day(
 pub async fn ai_chat(
     state: State<'_, AppState>,
     messages: Vec<serde_json::Value>,
-) -> Result<String, String> {
+) -> Result<LlmReply, String> {
     let cfg = state.load_config().map_err(err)?.assistant;
     if cfg.model.trim().is_empty() {
-        return Err("LLM 未配置 — 请在 设置 → 划词助手 选择 model".into());
+        return Err("LLM 未配置 — 请在 设置 → LLM 配置 选择 model".into());
     }
     let endpoint = resolve_llm_endpoint(&cfg)?;
     llm_chat_complete(&cfg, &endpoint, messages, 0.7).await
