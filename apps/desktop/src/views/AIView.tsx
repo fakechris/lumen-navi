@@ -1,18 +1,47 @@
 import { useCallback, useState } from "react";
 import { api } from "../api";
 import { Button, Card, StatusDot } from "../design";
+import { getProvider } from "../llm/catalog";
 import type { AssistantConfig } from "../types";
 
 // ── LLM Status Card（不重复配置表单 — 设置页的“划词助手”就是同一份 config）──
 
 function LlmStatusCard({ cfg }: { cfg: AssistantConfig | null }) {
-  const configured =
-    cfg != null && cfg.base_url.trim() !== "" && cfg.model.trim() !== "";
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<string | null>(null);
+
+  const providerLabel = (() => {
+    if (!cfg) return "";
+    const pid = cfg.provider_id || "custom";
+    if (pid === "custom") return cfg.base_url || "自定义（未填 URL）";
+    return getProvider(pid)?.label ?? pid;
+  })();
+  const configured = cfg != null && cfg.model.trim() !== "" && providerLabel !== "";
   const hasKey = cfg?.api_key_set ?? false;
+
+  const runTest = useCallback(async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const r = await api.llmTest();
+      setTestResult(`✓ ${r}`);
+    } catch (e) {
+      setTestResult(`✗ ${String(e)}`);
+    } finally {
+      setTesting(false);
+    }
+  }, []);
 
   return (
     <Card pad={16}>
-      <h3 style={{ margin: 0, marginBottom: 8 }}>LLM</h3>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+        <h3 style={{ margin: 0 }}>LLM</h3>
+        {configured && (
+          <Button variant="secondary" disabled={testing} onClick={() => void runTest()}>
+            {testing ? "测试中…" : "测试连接"}
+          </Button>
+        )}
+      </div>
       {cfg == null ? (
         <div style={{ color: "var(--text-tertiary)", fontSize: "var(--text-sm)" }}>
           加载中…
@@ -22,16 +51,27 @@ function LlmStatusCard({ cfg }: { cfg: AssistantConfig | null }) {
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <StatusDot status={configured ? "done" : "idle"} />
             <span>
-              {configured ? "已配置" : "未配置"} — {cfg.base_url || "（空）"} · {cfg.model || "（空）"}
+              {providerLabel} · {cfg.model || "（未选模型）"}
             </span>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <StatusDot status={hasKey ? "done" : "idle"} />
             <span>API Key {hasKey ? "已设置" : "未设置"}</span>
           </div>
+          {testResult && (
+            <div
+              style={{
+                fontSize: "var(--text-xs)",
+                color: testResult.startsWith("✓") ? "var(--success)" : "var(--danger)",
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {testResult}
+            </div>
+          )}
           {!configured || !hasKey ? (
             <div style={{ color: "var(--warn, var(--text-secondary))", fontSize: "var(--text-xs)" }}>
-              Roast 和 Chat 需要 LLM。请在 设置 → 划词助手 中配置（同一个 LLM 配置全局共用）。
+              Roast 和 Chat 需要 LLM。请在 设置 → 划词助手 中选择 provider 并配置 key（同一个 LLM 配置全局共用）。
             </div>
           ) : null}
         </div>

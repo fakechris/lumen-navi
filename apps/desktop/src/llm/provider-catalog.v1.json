@@ -1,0 +1,623 @@
+{
+  "$schema": "./provider-catalog.schema.json",
+  "spec": "lumen.provider-catalog/v1",
+  "version": "1.0.0",
+  "generated_from": [
+    "lumen-translation/packages/engines/src/providers.ts",
+    "lumen-cut/src/llmProviders.ts",
+    "lumen-asr/apps/desktop/src-tauri/src/provider_presets.rs (+ crates/lumen-corrector/src/openai_compat.rs)",
+    "lumen-translation/apps/popclip-window/LumenTranslation/Preferences.swift"
+  ],
+  "providers": [
+    {
+      "id": "openai",
+      "aliases": ["openai", "openai_audio"],
+      "display_name": { "en": "OpenAI", "zh": "OpenAI" },
+      "api_style": "openai_compat",
+      "region": "global",
+      "capabilities": ["chat", "audio_transcription"],
+      "endpoints": {
+        "global": { "base_url": "https://api.openai.com/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "gpt-4.1-mini",
+      "models": ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
+      "needs_key": true,
+      "docs_url": "https://platform.openai.com/api-keys",
+      "asr": {
+        "api_style": "openai_audio",
+        "base_url": "https://api.openai.com/v1",
+        "default_model": "whisper-1",
+        "models": ["whisper-1", "gpt-4o-mini-transcribe"],
+        "status": "wired",
+        "notes": "POST /audio/transcriptions；文件批式"
+      }
+    },
+    {
+      "id": "anthropic",
+      "aliases": ["anthropic"],
+      "display_name": { "en": "Anthropic Claude", "zh": "Anthropic Claude" },
+      "api_style": "anthropic",
+      "region": "global",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "global": { "base_url": "https://api.anthropic.com/v1" }
+      },
+      "chat_path": "/messages",
+      "default_model": "claude-sonnet-4-5",
+      "models": [
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6",
+        "claude-haiku-4-5",
+        "claude-3-5-haiku-latest"
+      ],
+      "needs_key": true,
+      "auth": { "header": "x-api-key", "value_template": "{key}" },
+      "extra_headers": { "anthropic-version": "2023-06-01" },
+      "notes": "原生 Messages API（请求/响应 schema 与 OpenAI 不同）。lumen-asr 目前把它当 openai_compatible 使用（很可能不工作，源码注释也承认是兼容层占位）；popclip Swift 版则改经 OpenRouter 路由。auth 头为 Anthropic 官方规范（四处源码均未实现原生鉴权，此处为规范补全）。"
+    },
+    {
+      "id": "gemini",
+      "aliases": ["gemini"],
+      "display_name": { "en": "Google Gemini", "zh": "Google Gemini" },
+      "api_style": "openai_compat",
+      "region": "global",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "global": { "base_url": "https://generativelanguage.googleapis.com/v1beta/openai" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "gemini-2.0-flash",
+      "models": ["gemini-2.0-flash", "gemini-2.5-flash"],
+      "needs_key": true,
+      "quirks": {
+        "no_thinking": {
+          "strategy": "body_params",
+          "body_params": {
+            "extra_body": { "google": { "thinking_config": { "thinking_budget": 0 } } }
+          },
+          "notes": "部分版本支持 thinkingBudget 0 关闭思考"
+        }
+      },
+      "notes": "Google 官方 OpenAI 兼容端点（仅 lumen-asr 收录）"
+    },
+    {
+      "id": "deepseek",
+      "aliases": ["deepseek"],
+      "display_name": { "en": "DeepSeek", "zh": "深度求索" },
+      "api_style": "openai_compat",
+      "region": "cn",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "cn": { "base_url": "https://api.deepseek.com/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "deepseek-chat",
+      "models": ["deepseek-chat", "deepseek-reasoner", "deepseek-coder", "deepseek-v4-flash"],
+      "needs_key": true,
+      "docs_url": "https://platform.deepseek.com/api-keys",
+      "quirks": {
+        "no_thinking": {
+          "strategy": "body_params",
+          "body_params": { "thinking": { "type": "disabled" } },
+          "model_filter": ["reasoner", "r1", "thinking"],
+          "notes": "仅对 reasoner/思考类模型注入"
+        },
+        "strip_thinking_tags": true
+      }
+    },
+    {
+      "id": "glm",
+      "aliases": ["glm", "glm-cn", "glm-global", "zhipu"],
+      "display_name": { "en": "Zhipu GLM (BigModel)", "zh": "智谱 GLM" },
+      "api_style": "openai_compat",
+      "region": "both",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "cn": { "base_url": "https://open.bigmodel.cn/api/paas/v4" },
+        "global": { "base_url": "https://api.z.ai/api/paas/v4", "notes": "Z.AI 海外端点" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "glm-4-flash",
+      "models": [
+        "glm-4-flash",
+        "glm-4-plus",
+        "glm-4-air",
+        "glm-4-long",
+        "glm-4",
+        "glm-4.7",
+        "glm-4.7-flash",
+        "glm-5",
+        "glm-5-turbo",
+        "glm-5.1",
+        "glm-5.2"
+      ],
+      "needs_key": true,
+      "docs_url": "https://open.bigmodel.cn/usercenter/apikeys"
+    },
+    {
+      "id": "kimi",
+      "aliases": ["kimi"],
+      "display_name": { "en": "Kimi (Moonshot AI)", "zh": "Kimi 月之暗面" },
+      "api_style": "openai_compat",
+      "region": "cn",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "cn": { "base_url": "https://api.moonshot.cn/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "kimi-latest",
+      "models": [
+        "kimi-latest",
+        "kimi-k2.5",
+        "kimi-k2.6",
+        "moonshot-v1-8k",
+        "moonshot-v1-32k",
+        "moonshot-v1-128k"
+      ],
+      "needs_key": true,
+      "docs_url": "https://platform.moonshot.cn/console/api-keys"
+    },
+    {
+      "id": "minimax",
+      "aliases": ["minimax", "minimax-cn", "minimax-global"],
+      "display_name": { "en": "MiniMax", "zh": "MiniMax 大模型" },
+      "api_style": "openai_compat",
+      "region": "both",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "cn": { "base_url": "https://api.minimaxi.com/v1" },
+        "global": { "base_url": "https://api.minimax.io/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "MiniMax-M3",
+      "models": [
+        "MiniMax-M3",
+        "MiniMax-M2.7",
+        "MiniMax-M2.7-highspeed",
+        "MiniMax-M2.5",
+        "MiniMax-M2.5-highspeed",
+        "MiniMax-Text-01",
+        "abab6.5s-chat",
+        "abab6.5-chat",
+        "abab6-chat"
+      ],
+      "needs_key": true,
+      "docs_url": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+      "quirks": {
+        "no_thinking": {
+          "strategy": "body_params",
+          "body_params": { "thinking": { "type": "disabled" }, "reasoning_split": true },
+          "notes": "M3 走 OpenAI 路径时省略 thinking ⇒ 默认开启，必须显式 disabled；reasoning_split 使正文留在 content"
+        },
+        "thinking_not_disableable_models": [
+          "MiniMax-M2.5",
+          "MiniMax-M2.5-highspeed",
+          "MiniMax-M2.7",
+          "MiniMax-M2.7-highspeed"
+        ],
+        "strip_thinking_tags": true,
+        "legacy_endpoints": {
+          "cn": "https://api.minimaxi.com/v1/text/chatcompletion_v2",
+          "global": "https://api.minimax.chat/v1/text/chatcompletion_v2"
+        },
+        "notes": "legacy_endpoints 为 lumen-translation / popclip Swift 仍在用的旧版 text/chatcompletion_v2 完整 URL（含旧海外域名 api.minimax.chat）"
+      }
+    },
+    {
+      "id": "doubao",
+      "aliases": ["doubao", "volcengine"],
+      "display_name": { "en": "Doubao (Volcengine Ark)", "zh": "豆包（火山方舟）" },
+      "api_style": "openai_compat",
+      "region": "cn",
+      "capabilities": ["chat", "audio_transcription"],
+      "endpoints": {
+        "cn": { "base_url": "https://ark.cn-beijing.volces.com/api/v3" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "doubao-pro-32k",
+      "models": [
+        "doubao-pro-32k",
+        "doubao-pro-128k",
+        "doubao-lite-32k",
+        "doubao-lite-128k",
+        "doubao-1-5-pro-32k-250115",
+        "doubao-1-5-lite-32k-250115",
+        "doubao-seed-2-0-lite",
+        "doubao-seed-2-0-lite-260428"
+      ],
+      "needs_key": true,
+      "docs_url": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+      "asr": {
+        "api_style": "websocket",
+        "base_url": "",
+        "default_model": "",
+        "models": [],
+        "status": "config_only",
+        "notes": "需要 app_id + access_token；流式客户端待接"
+      },
+      "notes": "带日期后缀的 snapshot 模型会过期停服；非日期别名（如 doubao-pro-32k）由火山保持指向当前生产档。模型名也可填接入点 ID。"
+    },
+    {
+      "id": "qwen",
+      "aliases": ["qwen", "aliyun_qwen"],
+      "display_name": { "en": "Qwen (Alibaba DashScope)", "zh": "通义千问（阿里云百炼）" },
+      "api_style": "openai_compat",
+      "region": "cn",
+      "capabilities": ["chat", "audio_transcription"],
+      "endpoints": {
+        "cn": { "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "qwen-plus",
+      "models": [
+        "qwen-plus",
+        "qwen-max",
+        "qwen-turbo",
+        "qwen-long",
+        "qwen2.5-72b-instruct",
+        "qwen3.5-flash",
+        "qwen3.6-flash"
+      ],
+      "needs_key": true,
+      "docs_url": "https://dashscope.console.aliyun.com/apiKey",
+      "quirks": {
+        "no_thinking": {
+          "strategy": "body_params",
+          "body_params": { "enable_thinking": false, "think": false },
+          "notes": "DashScope 兼容模式 / Qwen3 系列"
+        },
+        "strip_thinking_tags": true
+      },
+      "asr": {
+        "api_style": "websocket",
+        "base_url": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+        "default_model": "qwen-audio-asr",
+        "models": [],
+        "status": "config_only",
+        "notes": "DashScope realtime WebSocket；流式客户端待接"
+      }
+    },
+    {
+      "id": "hunyuan",
+      "aliases": ["hunyuan"],
+      "display_name": { "en": "Tencent Hunyuan", "zh": "腾讯混元" },
+      "api_style": "openai_compat",
+      "region": "cn",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "cn": { "base_url": "https://api.hunyuan.cloud.tencent.com/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "hunyuan-turbo",
+      "models": ["hunyuan-turbo", "hunyuan-pro", "hunyuan-standard", "hunyuan-lite"],
+      "needs_key": true,
+      "docs_url": "https://console.cloud.tencent.com/hunyuan/api-key"
+    },
+    {
+      "id": "ernie",
+      "aliases": ["ernie"],
+      "display_name": { "en": "Baidu ERNIE (Qianfan)", "zh": "百度文心（千帆）" },
+      "api_style": "openai_compat",
+      "region": "cn",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "cn": { "base_url": "https://qianfan.baidubce.com/v2" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "ernie-4.0-8k-latest",
+      "models": [
+        "ernie-4.0-8k-latest",
+        "ernie-3.5-8k-latest",
+        "ernie-speed-8k",
+        "ernie-speed-128k",
+        "ernie-lite-8k"
+      ],
+      "needs_key": true,
+      "docs_url": "https://console.bce.baidu.com/qianfan/ais/console/applicationConsole/application"
+    },
+    {
+      "id": "spark",
+      "aliases": ["spark"],
+      "display_name": { "en": "iFlytek Spark", "zh": "讯飞星火" },
+      "api_style": "openai_compat",
+      "region": "cn",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "cn": { "base_url": "https://spark-api-open.xf-yun.com/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "4.0Ultra",
+      "models": ["4.0Ultra", "max-32k", "pro-128k", "lite"],
+      "needs_key": true,
+      "docs_url": "https://www.xfyun.cn/doc/spark/HTTP%E8%B0%83%E7%94%A8%E6%96%87%E6%A1%A3.html",
+      "notes": "generalv3.5（Max）与 generalv3 已于 2026-03-10 退役；当前兼容端点仅服务 4.0Ultra / max-32k / pro-128k / lite"
+    },
+    {
+      "id": "baichuan",
+      "aliases": ["baichuan"],
+      "display_name": { "en": "Baichuan", "zh": "百川智能" },
+      "api_style": "openai_compat",
+      "region": "cn",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "cn": { "base_url": "https://api.baichuan-ai.com/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "Baichuan4-Turbo",
+      "models": ["Baichuan4-Turbo", "Baichuan4", "Baichuan3-Turbo", "Baichuan3-Turbo-128k"],
+      "needs_key": true,
+      "docs_url": "https://platform.baichuan-ai.com/console/apikey"
+    },
+    {
+      "id": "yi",
+      "aliases": ["yi"],
+      "display_name": { "en": "01.AI Yi", "zh": "零一万物" },
+      "api_style": "openai_compat",
+      "region": "cn",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "cn": { "base_url": "https://api.lingyiwanwu.com/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "yi-large",
+      "models": ["yi-large", "yi-medium", "yi-spark", "yi-lightning"],
+      "needs_key": true,
+      "docs_url": "https://platform.lingyiwanwu.com/apikeys"
+    },
+    {
+      "id": "siliconflow",
+      "aliases": ["siliconflow"],
+      "display_name": { "en": "SiliconFlow (aggregator)", "zh": "硅基流动（聚合）" },
+      "api_style": "openai_compat",
+      "region": "both",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "cn": { "base_url": "https://api.siliconflow.cn/v1" },
+        "global": { "base_url": "https://api.siliconflow.com/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "deepseek-ai/DeepSeek-V3",
+      "models": [
+        "deepseek-ai/DeepSeek-V3",
+        "deepseek-ai/DeepSeek-V3.2",
+        "deepseek-ai/DeepSeek-R1",
+        "Qwen/Qwen2.5-72B-Instruct",
+        "Qwen/Qwen2.5-Coder-32B-Instruct",
+        "Qwen/Qwen2.5-7B-Instruct",
+        "meta-llama/Meta-Llama-3.1-405B-Instruct",
+        "glm-4-9b-chat"
+      ],
+      "needs_key": true,
+      "docs_url": "https://cloud.siliconflow.cn/account/ak",
+      "quirks": {
+        "strip_thinking_tags": true
+      }
+    },
+    {
+      "id": "openrouter",
+      "aliases": ["openrouter"],
+      "display_name": { "en": "OpenRouter (aggregator)", "zh": "OpenRouter（海外聚合）" },
+      "api_style": "openai_compat",
+      "region": "global",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "global": { "base_url": "https://openrouter.ai/api/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "openai/gpt-4o-mini",
+      "models": [
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o",
+        "openai/gpt-5.2",
+        "anthropic/claude-3.5-sonnet",
+        "anthropic/claude-3.5-haiku",
+        "anthropic/claude-3-opus",
+        "anthropic/claude-sonnet-4",
+        "anthropic/claude-sonnet-4.6",
+        "anthropic/claude-haiku-4.5",
+        "google/gemini-flash-1.5",
+        "deepseek/deepseek-chat"
+      ],
+      "needs_key": true,
+      "docs_url": "https://openrouter.ai/keys",
+      "extra_headers": {
+        "HTTP-Referer": "https://github.com/fakechris/lumen-translation",
+        "X-Title": "Lumen Translation"
+      },
+      "quirks": {
+        "no_thinking": {
+          "strategy": "body_params",
+          "body_params": { "reasoning": { "effort": "none", "exclude": true } }
+        },
+        "attribution_headers_configurable": true,
+        "notes": "HTTP-Referer + X-Title 归因头可换取更高限流；调用方可覆盖（默认值为仓库 URL 与产品名）"
+      }
+    },
+    {
+      "id": "stepfun",
+      "aliases": ["stepfun"],
+      "display_name": { "en": "StepFun", "zh": "阶跃星辰" },
+      "api_style": "openai_compat",
+      "region": "cn",
+      "capabilities": ["chat", "audio_transcription"],
+      "endpoints": {
+        "cn": { "base_url": "https://api.stepfun.com/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "step-3.7-flash",
+      "models": ["step-3.7-flash", "step-3.7"],
+      "needs_key": true,
+      "asr": {
+        "api_style": "http_batch",
+        "base_url": "https://api.stepfun.com/v1",
+        "default_model": "stepaudio-2.5-asr",
+        "models": ["stepaudio-2.5-asr"],
+        "status": "config_only",
+        "notes": "批式 HTTP"
+      }
+    },
+    {
+      "id": "mimo",
+      "aliases": ["mimo"],
+      "display_name": { "en": "Xiaomi MiMo", "zh": "小米 MiMo" },
+      "api_style": "openai_compat",
+      "region": "cn",
+      "capabilities": ["chat", "audio_transcription"],
+      "endpoints": {
+        "cn": { "base_url": "https://api.xiaomimimo.com/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "mimo-v2.5",
+      "models": ["mimo-v2.5"],
+      "needs_key": true,
+      "asr": {
+        "api_style": "http_batch",
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "default_model": "mimo-v2.5-asr",
+        "models": ["mimo-v2.5-asr"],
+        "status": "config_only",
+        "notes": "批式；audio/wav"
+      }
+    },
+    {
+      "id": "ollama",
+      "aliases": ["ollama"],
+      "display_name": { "en": "Ollama (local)", "zh": "Ollama（本地）" },
+      "api_style": "ollama",
+      "region": "local",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "local": { "base_url": "http://127.0.0.1:11434/v1", "notes": "lumen-cut 写作 http://localhost:11434/v1，同一服务" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "qwen3.5:9b",
+      "models": ["qwen3.5:9b", "qwen3:8b", "qwen3:14b", "qwen2.5:7b", "llama3.1:8b", "llama3.2"],
+      "needs_key": false,
+      "quirks": {
+        "no_thinking": {
+          "strategy": "body_params",
+          "body_params": {
+            "think": false,
+            "options": { "num_ctx": 4096, "num_predict": 1024 }
+          },
+          "notes": "任何模型都注入 think:false 关闭思考链；options 为听写场景的上下文/输出长度限制"
+        },
+        "strip_thinking_tags": true,
+        "notes": "需本机 ollama serve"
+      }
+    },
+    {
+      "id": "lm_studio",
+      "aliases": ["lm_studio"],
+      "display_name": { "en": "LM Studio (local)", "zh": "LM Studio（本地）" },
+      "api_style": "openai_compat",
+      "region": "local",
+      "capabilities": ["chat"],
+      "endpoints": {
+        "local": { "base_url": "http://127.0.0.1:1234/v1" }
+      },
+      "chat_path": "/chat/completions",
+      "default_model": "local-model",
+      "models": [],
+      "needs_key": false,
+      "notes": "OpenAI 兼容本地服务"
+    },
+    {
+      "id": "google_translate",
+      "aliases": ["google"],
+      "display_name": { "en": "Google Translate (free)", "zh": "Google 翻译（免费，无需 Key）" },
+      "api_style": "google_translate",
+      "region": "global",
+      "capabilities": ["translation"],
+      "endpoints": {
+        "global": { "base_url": "https://translate.googleapis.com/translate_a/single", "notes": "base_url 即完整端点" }
+      },
+      "default_model": "gtx",
+      "models": ["gtx"],
+      "needs_key": false,
+      "docs_url": "https://translate.google.com"
+    },
+    {
+      "id": "microsoft_translator",
+      "aliases": ["microsoft"],
+      "display_name": { "en": "Microsoft Translator (free)", "zh": "微软翻译（免费，无需 Key）" },
+      "api_style": "microsoft_translator",
+      "region": "global",
+      "capabilities": ["translation"],
+      "endpoints": {
+        "global": { "base_url": "https://api.cognitive.microsofttranslator.com/translate", "notes": "base_url 即完整端点" }
+      },
+      "default_model": "free",
+      "models": ["free"],
+      "needs_key": false,
+      "docs_url": "https://www.bing.com/translator"
+    },
+    {
+      "id": "soniox",
+      "aliases": ["soniox"],
+      "display_name": { "en": "Soniox", "zh": "Soniox" },
+      "api_style": "asr_only",
+      "region": "global",
+      "capabilities": ["audio_transcription"],
+      "needs_key": true,
+      "asr": {
+        "api_style": "websocket",
+        "base_url": "wss://stt-rt.soniox.com/transcribe-websocket",
+        "default_model": "stt-rt-v4",
+        "models": ["stt-rt-v4"],
+        "status": "config_only",
+        "notes": "实时 WebSocket；流式客户端待接"
+      }
+    },
+    {
+      "id": "local_sensevoice",
+      "aliases": ["local_sensevoice"],
+      "display_name": { "en": "Local SenseVoice", "zh": "本地 SenseVoice" },
+      "api_style": "local",
+      "region": "local",
+      "capabilities": ["audio_transcription"],
+      "needs_key": false,
+      "asr": {
+        "api_style": "local",
+        "default_model": "sensevoice-small",
+        "models": ["sensevoice-small"],
+        "status": "wired",
+        "notes": "默认；离线 sherpa-onnx"
+      }
+    },
+    {
+      "id": "local_qwen_asr",
+      "aliases": ["local_qwen"],
+      "display_name": { "en": "Local Qwen3-ASR 0.6B 8-bit", "zh": "本地 Qwen3-ASR 0.6B 8-bit（高准确率）" },
+      "api_style": "local",
+      "region": "local",
+      "capabilities": ["audio_transcription"],
+      "needs_key": false,
+      "asr": {
+        "api_style": "local",
+        "default_model": "Qwen3-ASR-0.6B-8bit",
+        "models": ["Qwen3-ASR-0.6B-8bit"],
+        "status": "wired",
+        "notes": "本地 MLX 高准确率引擎；模型常驻复用"
+      }
+    },
+    {
+      "id": "local_whisper",
+      "aliases": ["local_whisper"],
+      "display_name": { "en": "Local Whisper", "zh": "本地 Whisper" },
+      "api_style": "local",
+      "region": "local",
+      "capabilities": ["audio_transcription"],
+      "needs_key": false,
+      "asr": {
+        "api_style": "local",
+        "default_model": "whisper",
+        "models": [],
+        "status": "wired",
+        "notes": "若本机已配置 whisper 目录"
+      }
+    }
+  ]
+}

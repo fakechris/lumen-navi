@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "./api";
+import { CHAT_PROVIDERS, getProvider } from "./llm/catalog";
 import { Onboarding } from "./Onboarding";
 import { DashboardView } from "./views/Dashboard";
 import { AIView } from "./views/AIView";
@@ -1580,34 +1581,137 @@ export default function App() {
                     无 AX 应用（钉钉文档 / 终端）用复制键兜底取词（读取后立即恢复剪贴板）
                   </label>
                   <label className="field">
-                    <span className="meta">LLM base URL（OpenAI 兼容 …/v1）</span>
-                    <input
+                    <span className="meta">LLM Provider</span>
+                    <select
                       className="input"
-                      placeholder="https://api.openai.com/v1"
-                      value={assistant?.base_url ?? ""}
+                      value={assistant?.provider_id ?? "custom"}
                       onChange={(e) => {
-                        const base_url = e.target.value;
+                        const provider_id = e.target.value;
                         setAssistant((prev) =>
-                          prev ? { ...prev, base_url } : prev,
+                          prev ? { ...prev, provider_id } : prev,
                         );
+                        const preset = getProvider(provider_id);
+                        if (preset) {
+                          const patch: AssistantUpdate = { provider_id };
+                          if (preset.defaultModel) {
+                            patch.model = preset.defaultModel;
+                            setAssistant((prev) =>
+                              prev ? { ...prev, model: preset.defaultModel } : prev,
+                            );
+                          }
+                          void updateAssistant(patch);
+                        } else {
+                          void updateAssistant({ provider_id });
+                        }
                       }}
-                      onBlur={() => void updateAssistant({ base_url: assistant?.base_url ?? "" })}
-                    />
+                    >
+                      <option value="custom">自定义（手动填写 base URL）</option>
+                      {CHAT_PROVIDERS.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </select>
                   </label>
+                  {(assistant?.provider_id ?? "custom") !== "custom" &&
+                    getProvider(assistant?.provider_id ?? "")?.overseasBaseUrl && (
+                      <label className="field">
+                        <span className="meta">Endpoint 区域</span>
+                        <select
+                          className="input"
+                          value={assistant?.region ?? "cn"}
+                          onChange={(e) => {
+                            const region = e.target.value;
+                            setAssistant((prev) =>
+                              prev ? { ...prev, region } : prev,
+                            );
+                            void updateAssistant({ region });
+                          }}
+                        >
+                          <option value="cn">国内端点</option>
+                          <option value="global">海外端点</option>
+                        </select>
+                      </label>
+                    )}
+                  {(assistant?.provider_id ?? "custom") === "custom" && (
+                    <label className="field">
+                      <span className="meta">LLM base URL（OpenAI 兼容 …/v1）</span>
+                      <input
+                        className="input mono"
+                        placeholder="https://api.openai.com/v1"
+                        value={assistant?.base_url ?? ""}
+                        onChange={(e) => {
+                          const base_url = e.target.value;
+                          setAssistant((prev) =>
+                            prev ? { ...prev, base_url } : prev,
+                          );
+                        }}
+                        onBlur={() => void updateAssistant({ base_url: assistant?.base_url ?? "" })}
+                      />
+                    </label>
+                  )}
                   <label className="field">
                     <span className="meta">模型</span>
-                    <input
-                      className="input"
-                      placeholder="gpt-4o-mini"
-                      value={assistant?.model ?? ""}
-                      onChange={(e) => {
-                        const model = e.target.value;
-                        setAssistant((prev) =>
-                          prev ? { ...prev, model } : prev,
-                        );
-                      }}
-                      onBlur={() => void updateAssistant({ model: assistant?.model ?? "" })}
-                    />
+                    <div style={{ display: "flex", gap: 6 }}>
+                      {(assistant?.provider_id ?? "custom") !== "custom" &&
+                      (getProvider(assistant?.provider_id ?? "")?.models.length ?? 0) > 0 ? (
+                        <select
+                          className="input"
+                          style={{ flex: 1 }}
+                          value={assistant?.model ?? ""}
+                          onChange={(e) => {
+                            const model = e.target.value;
+                            setAssistant((prev) =>
+                              prev ? { ...prev, model } : prev,
+                            );
+                            void updateAssistant({ model });
+                          }}
+                        >
+                          {(assistant?.model &&
+                            !getProvider(assistant?.provider_id ?? "")?.models.includes(assistant.model)) ? (
+                            <option value={assistant.model}>{assistant.model}（自定义）</option>
+                          ) : null}
+                          {getProvider(assistant?.provider_id ?? "")?.models.map((m) => (
+                            <option key={m} value={m}>{m}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          className="input"
+                          style={{ flex: 1 }}
+                          placeholder="gpt-4o-mini"
+                          value={assistant?.model ?? ""}
+                          onChange={(e) => {
+                            const model = e.target.value;
+                            setAssistant((prev) =>
+                              prev ? { ...prev, model } : prev,
+                            );
+                          }}
+                          onBlur={() => void updateAssistant({ model: assistant?.model ?? "" })}
+                        />
+                      )}
+                      <Button
+                        variant="secondary"
+                        disabled={busy}
+                        onClick={() => {
+                          void api
+                            .llmListModels()
+                            .then((models) => {
+                              const pid = assistant?.provider_id ?? "custom";
+                              if (pid === "custom" || models.length === 0) return;
+                              // Merge fetched models into the preset's list for this session.
+                              const existing = getProvider(pid);
+                              if (existing) {
+                                existing.models = Array.from(new Set([...existing.models, ...models]));
+                              }
+                              setStatusNote(`获取到 ${models.length} 个模型`);
+                            })
+                            .catch((e) => setError(`获取模型列表失败：${String(e)}`));
+                        }}
+                      >
+                        刷新模型
+                      </Button>
+                    </div>
                   </label>
                   <label className="field">
                     <span className="meta">翻译目标语言</span>
@@ -1654,6 +1758,18 @@ export default function App() {
                       >
                         清除 API key
                       </button>
+                      <Button
+                        variant="secondary"
+                        disabled={busy}
+                        onClick={() => {
+                          void api
+                            .llmTest()
+                            .then((r) => setStatusNote(`✓ ${r}`))
+                            .catch((e) => setError(`连接测试失败：${String(e)}`));
+                        }}
+                      >
+                        测试连接
+                      </Button>
                     </div>
                   )}
                   <p className="meta">

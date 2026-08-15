@@ -376,6 +376,8 @@ pub fn run() {
             commands::day_roast_summary,
             commands::roast_day,
             commands::ai_chat,
+            commands::llm_test,
+            commands::llm_list_models,
             commands::activity_stats,
             commands::activity_range,
             commands::activity_add_manual_segment,

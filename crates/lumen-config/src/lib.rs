@@ -49,7 +49,13 @@ pub struct AssistantConfig {
     pub enabled: bool,
     /// Show popup automatically after mouse text selection.
     pub popup_enabled: bool,
-    /// OpenAI-compatible base URL (…/v1).
+    /// Provider preset id from the LLM catalog (e.g. "deepseek", "glm",
+    /// "anthropic"). "custom" (default) means the user hand-filled base_url.
+    pub provider_id: String,
+    /// "cn" or "global" — picks the endpoint for dual-region providers.
+    pub region: String,
+    /// OpenAI-compatible base URL (…/v1). Used when provider_id == "custom";
+    /// for preset providers the catalog endpoint wins.
     pub base_url: String,
     /// Bearer token (env `LUMEN_NAVI_LLM_API_KEY` / `OPENAI_API_KEY` overrides).
     pub api_key: String,
@@ -71,6 +77,8 @@ impl Default for AssistantConfig {
         Self {
             enabled: false,
             popup_enabled: false,
+            provider_id: "custom".into(),
+            region: "cn".into(),
             base_url: "https://api.openai.com/v1".into(),
             api_key: String::new(),
             model: "gpt-4o-mini".into(),

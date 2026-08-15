@@ -64,6 +64,8 @@ export const api = {
     invoke<SceneDay>("activity_scenes", { day }),
   roastDay: (day: string) => invoke<string>("roast_day", { day }),
   aiChat: (messages: unknown[]) => invoke<string>("ai_chat", { messages }),
+  llmTest: () => invoke<string>("llm_test"),
+  llmListModels: () => invoke<string[]>("llm_list_models"),
   activityStats: (day: string, groupBy?: "app" | "site") =>
     invoke<DayStats>("activity_stats", { day, groupBy }),
   activityRange: (from: string, to: string, groupBy?: "app" | "site") =>
