@@ -318,6 +318,10 @@ export interface AsrDownloadProgress {
 export interface AssistantConfig {
   enabled: boolean;
   popup_enabled: boolean;
+  /** Provider preset id ("custom" = hand-filled base_url). */
+  provider_id: string;
+  /** "cn" | "global" — endpoint for dual-region providers. */
+  region: string;
   base_url: string;
   model: string;
   target_lang: string;
@@ -333,6 +337,8 @@ export interface AssistantConfig {
 export interface AssistantUpdate {
   enabled?: boolean;
   popup_enabled?: boolean;
+  provider_id?: string;
+  region?: string;
   base_url?: string;
   model?: string;
   target_lang?: string;

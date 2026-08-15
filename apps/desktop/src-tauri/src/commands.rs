@@ -506,6 +506,201 @@ pub fn day_roast_summary(
     state.store.day_roast_summary(&day).map_err(err)
 }
 
+// ── Unified LLM client (provider-catalog aware, Anthropic-native) ───────
+
+/// A small vendored subset of the provider catalog for endpoint/auth/style
+/// resolution server-side. Mirrors the frontend catalog (provider-catalog.v1.json).
+static LLM_CATALOG: &str = include_str!("../../src/llm/provider-catalog.v1.json");
+
+#[derive(Debug, Clone)]
+enum LlmStyle {
+    OpenAiCompat,
+    Anthropic,
+}
+
+#[derive(Debug, Clone)]
+struct LlmEndpoint {
+    /// Full chat URL (base + chat path).
+    url: String,
+    /// Base URL without chat path (for /models listing).
+    base: String,
+    /// Extra headers to set (auth + provider-required headers).
+    headers: Vec<(String, String)>,
+    style: LlmStyle,
+}
+
+#[derive(serde::Deserialize)]
+struct CatalogProvider {
+    id: String,
+    #[serde(default)]
+    api_style: String,
+    #[serde(default)]
+    endpoints: std::collections::HashMap<String, CatalogEndpoint>,
+    #[serde(default)]
+    chat_path: Option<String>,
+    #[serde(default)]
+    needs_key: bool,
+    #[serde(default)]
+    auth: Option<CatalogAuth>,
+    #[serde(default)]
+    extra_headers: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(serde::Deserialize)]
+struct CatalogEndpoint {
+    base_url: String,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct CatalogAuth {
+    header: String,
+    value_template: String,
+}
+
+fn catalog_provider(id: &str) -> Option<CatalogProvider> {
+    let file: serde_json::Value = serde_json::from_str(LLM_CATALOG).ok()?;
+    file.get("providers")?
+        .as_array()?
+        .iter()
+        .filter_map(|p| serde_json::from_value::<CatalogProvider>(p.clone()).ok())
+        .find(|p| p.id == id)
+}
+
+/// Resolve the effective endpoint for the configured provider. Provider
+/// presets win over base_url; "custom" (or unknown id) uses base_url as-is.
+fn resolve_llm_endpoint(cfg: &lumen_config::AssistantConfig) -> Result<LlmEndpoint, String> {
+    let key = {
+        let k = cfg.effective_api_key().trim().to_string();
+        if k.is_empty() { None } else { Some(k) }
+    };
+
+    let preset = if cfg.provider_id == "custom" || cfg.provider_id.is_empty() {
+        None
+    } else {
+        catalog_provider(&cfg.provider_id)
+    };
+
+    let (base, chat_path, style, auth_header, auth_template, extra) = match &preset {
+        None => {
+            // Custom: base_url must be set; treat as OpenAI-compat.
+            let b = cfg.base_url.trim().trim_end_matches('/').to_string();
+            if b.is_empty() {
+                return Err("LLM 未配置 — 请在 设置 → 划词助手 选择 provider 或填写 base_url".into());
+            }
+            (b, "/chat/completions".to_string(), LlmStyle::OpenAiCompat, None, None, None)
+        }
+        Some(p) => {
+            let ep = if cfg.region == "global" {
+                p.endpoints.get("global").or_else(|| p.endpoints.get("cn"))
+            } else {
+                p.endpoints.get("cn").or_else(|| p.endpoints.get("global"))
+            };
+            let base = match ep {
+                Some(e) => e.base_url.trim().trim_end_matches('/').to_string(),
+                None => {
+                    // Fallback to user's base_url if the catalog entry lacks endpoints.
+                    let b = cfg.base_url.trim().trim_end_matches('/').to_string();
+                    if b.is_empty() {
+                        return Err(format!("provider {} 没有 endpoint 配置", cfg.provider_id));
+                    }
+                    b
+                }
+            };
+            let chat = p.chat_path.clone()
+                .unwrap_or_else(|| "/chat/completions".into());
+            let style = if p.api_style == "anthropic" { LlmStyle::Anthropic } else { LlmStyle::OpenAiCompat };
+            (base, chat, style, p.auth.clone(), p.auth.clone().map(|a| a.value_template), p.extra_headers.clone())
+        }
+    };
+
+    // Build headers: auth first, then extra (extra wins on conflict).
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if let Some(k) = &key {
+        match (&auth_header, &auth_template) {
+            (Some(auth), Some(t)) => {
+                headers.push((auth.header.clone(), t.replace("{key}", k)));
+            }
+            _ => {
+                headers.push(("Authorization".into(), format!("Bearer {k}")));
+            }
+        }
+    } else if preset.as_ref().map(|p| p.needs_key).unwrap_or(false) {
+        return Err(format!("401: {} 需要 API key，请在 设置 → 划词助手 中配置", cfg.provider_id));
+    }
+    if let Some(extra) = extra {
+        for (k, v) in extra {
+            headers.push((k, v));
+        }
+    }
+
+    let url = format!("{base}{chat_path}");
+    Ok(LlmEndpoint { url, base, headers, style })
+}
+
+/// Send a chat completion (non-streaming) and extract the assistant text.
+/// Handles both OpenAI-compat and Anthropic-native response shapes.
+async fn llm_chat_complete(
+    cfg: &lumen_config::AssistantConfig,
+    endpoint: &LlmEndpoint,
+    messages: Vec<serde_json::Value>,
+    temperature: f64,
+) -> Result<String, String> {
+    let body = match endpoint.style {
+        LlmStyle::OpenAiCompat => serde_json::json!({
+            "model": cfg.model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": false,
+        }),
+        LlmStyle::Anthropic => {
+            // Anthropic Messages API: system prompt is a top-level field,
+            // messages must alternate user/assistant, max_tokens required.
+            let system = messages.iter()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("")
+                .to_string();
+            let chat: Vec<&serde_json::Value> = messages.iter()
+                .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+                .collect();
+            serde_json::json!({
+                "model": cfg.model,
+                "max_tokens": 4096,
+                "system": system,
+                "messages": chat,
+            })
+        }
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(cfg.timeout_ms.max(30_000)))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let mut req = client.post(&endpoint.url).json(&body);
+    for (k, v) in &endpoint.headers {
+        req = req.header(k, v);
+    }
+    let resp = req.send().await.map_err(|e| format!("LLM 请求失败: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("LLM 返回 {status}: {text}"));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应: {e}"))?;
+    let content = match endpoint.style {
+        LlmStyle::OpenAiCompat => json
+            .pointer("/choices/0/message/content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        LlmStyle::Anthropic => json
+            .pointer("/content/0/text")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    };
+    content.ok_or_else(|| "LLM 响应缺少 content".to_string())
+}
+
 #[tauri::command]
 pub async fn roast_day(
     state: State<'_, AppState>,
@@ -513,9 +708,10 @@ pub async fn roast_day(
 ) -> Result<String, String> {
     let summary = state.store.day_roast_summary(&day).map_err(err)?;
     let cfg = state.load_config().map_err(err)?.assistant;
-    if cfg.base_url.trim().is_empty() || cfg.model.trim().is_empty() {
-        return Err("请先在设置中配置 Assistant LLM（base_url + model）".into());
+    if cfg.model.trim().is_empty() {
+        return Err("LLM 未配置 — 请在 设置 → 划词助手 选择 model".into());
     }
+    let endpoint = resolve_llm_endpoint(&cfg)?;
     let data = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
     let prompt = format!(
         "你是一个毒舌但洞察深刻的数字生活评论员。基于下面的 JSON 数据（用户 {day} 一天的真实行为统计），写一份 6-10 条的中文 roast。要求：\n\
@@ -526,42 +722,13 @@ pub async fn roast_day(
          - 直接输出 roast 内容，不要前言后语\n\n\
          数据：\n{data}"
     );
-    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let api_key = std::env::var("LUMEN_NAVI_LLM_API_KEY")
-        .or_else(|_| std::env::var("OPENAI_API_KEY"))
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            let k = cfg.api_key.trim().to_string();
-            if k.is_empty() { None } else { Some(k) }
-        });
-    let body = serde_json::json!({
-        "model": cfg.model,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.8,
-        "stream": false,
-    });
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(cfg.timeout_ms.max(30_000)))
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-    let mut req = client.post(&url).json(&body);
-    if let Some(key) = api_key {
-        req = req.bearer_auth(key);
-    }
-    let resp = req.send().await.map_err(|e| format!("LLM 请求失败: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM 返回 {status}: {text}"));
-    }
-    let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应: {e}"))?;
-    json.pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "LLM 响应缺少 content".to_string())
+    llm_chat_complete(
+        &cfg,
+        &endpoint,
+        vec![serde_json::json!({"role": "user", "content": prompt})],
+        0.8,
+    )
+    .await
 }
 
 /// AI chat: multi-turn conversation with the configured assistant LLM
@@ -572,46 +739,87 @@ pub async fn ai_chat(
     messages: Vec<serde_json::Value>,
 ) -> Result<String, String> {
     let cfg = state.load_config().map_err(err)?.assistant;
-    if cfg.base_url.trim().is_empty() || cfg.model.trim().is_empty() {
-        return Err("LLM 未配置 — 请在 设置 → 划词助手 中配置 base_url 和 model".into());
+    if cfg.model.trim().is_empty() {
+        return Err("LLM 未配置 — 请在 设置 → 划词助手 选择 model".into());
     }
-    let api_key = std::env::var("LUMEN_NAVI_LLM_API_KEY")
-        .or_else(|_| std::env::var("OPENAI_API_KEY"))
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            let k = cfg.api_key.trim().to_string();
-            if k.is_empty() { None } else { Some(k) }
-        });
-    if api_key.is_none() && cfg.base_url.contains("openai.com") {
-        return Err("401: 未配置 API key。请在 设置 → 划词助手 中设置".into());
+    let endpoint = resolve_llm_endpoint(&cfg)?;
+    llm_chat_complete(&cfg, &endpoint, messages, 0.7).await
+}
+
+/// Test the LLM connection with a minimal ping.
+#[tauri::command]
+pub async fn llm_test(state: State<'_, AppState>) -> Result<String, String> {
+    let cfg = state.load_config().map_err(err)?.assistant;
+    let endpoint = resolve_llm_endpoint(&cfg)?;
+    if cfg.model.trim().is_empty() {
+        return Err("未选择 model".into());
     }
-    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
-        "model": cfg.model,
-        "messages": messages,
-        "temperature": 0.7,
-        "stream": false,
-    });
+    let ep = endpoint.clone();
+    // Minimal ping: one token max.
+    let body = match ep.style {
+        LlmStyle::OpenAiCompat => serde_json::json!({
+            "model": cfg.model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "stream": false,
+        }),
+        LlmStyle::Anthropic => serde_json::json!({
+            "model": cfg.model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        }),
+    };
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(cfg.timeout_ms.max(30_000)))
+        .timeout(std::time::Duration::from_millis(15_000))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let mut req = client.post(&url).json(&body);
-    if let Some(key) = api_key {
-        req = req.bearer_auth(key);
+    let mut req = client.post(&ep.url).json(&body);
+    for (k, v) in &ep.headers {
+        req = req.header(k, v);
     }
-    let resp = req.send().await.map_err(|e| format!("LLM 请求失败: {e}"))?;
-    if !resp.status().is_success() {
+    let resp = req.send().await.map_err(|e| format!("连接失败: {e}"))?;
+    if resp.status().is_success() {
+        Ok("连接成功".into())
+    } else {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("LLM 返回 {status}: {text}"));
+        // Truncate long error bodies for display.
+        let short: String = text.chars().take(200).collect();
+        Err(format!("返回 {status}: {short}"))
     }
-    let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析响应: {e}"))?;
-    json.pointer("/choices/0/message/content")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "LLM 响应缺少 content".to_string())
+}
+
+/// List available models from the provider (GET /models).
+#[tauri::command]
+pub async fn llm_list_models(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let cfg = state.load_config().map_err(err)?.assistant;
+    let endpoint = resolve_llm_endpoint(&cfg)?;
+    let url = format!("{}/models", endpoint.base);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(10_000))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let mut req = client.get(&url);
+    for (k, v) in &endpoint.headers {
+        req = req.header(k, v);
+    }
+    let resp = req.send().await.map_err(|e| format!("请求失败: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(format!("返回 {status}（该 provider 可能不支持 model 列表）"));
+    }
+    let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析: {e}"))?;
+    // OpenAI-compat: /data[].id ; Anthropic: /data[].id too (v1/models).
+    let mut out = Vec::new();
+    if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+        for item in data {
+            if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
+                out.push(id.to_string());
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 #[tauri::command]
@@ -1334,6 +1542,8 @@ fn err(e: impl ToString) -> String {
 pub struct AssistantConfigDto {
     pub enabled: bool,
     pub popup_enabled: bool,
+    pub provider_id: String,
+    pub region: String,
     pub base_url: String,
     pub model: String,
     pub target_lang: String,
@@ -1351,6 +1561,8 @@ pub struct AssistantConfigDto {
 pub struct AssistantUpdate {
     pub enabled: Option<bool>,
     pub popup_enabled: Option<bool>,
+    pub provider_id: Option<String>,
+    pub region: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub target_lang: Option<String>,
@@ -1363,6 +1575,8 @@ fn assistant_dto(cfg: &lumen_config::Config) -> AssistantConfigDto {
     AssistantConfigDto {
         enabled: cfg.assistant.enabled,
         popup_enabled: cfg.assistant.popup_enabled,
+        provider_id: cfg.assistant.provider_id.clone(),
+        region: cfg.assistant.region.clone(),
         base_url: cfg.assistant.base_url.clone(),
         model: cfg.assistant.model.clone(),
         target_lang: cfg.assistant.target_lang.clone(),
@@ -1401,6 +1615,15 @@ pub fn assistant_update_config(
     }
     if let Some(v) = update.popup_enabled {
         cfg.assistant.popup_enabled = v;
+    }
+    if let Some(v) = update.provider_id {
+        cfg.assistant.provider_id = v.trim().to_string();
+    }
+    if let Some(v) = update.region {
+        let r = v.trim().to_string();
+        if r == "cn" || r == "global" {
+            cfg.assistant.region = r;
+        }
     }
     if let Some(v) = update.base_url {
         cfg.assistant.base_url = v.trim().to_string();
