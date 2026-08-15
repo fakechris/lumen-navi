@@ -28,6 +28,8 @@ pub struct CapturedBatch {
     pub closed_session: Option<ActivitySession>,
     /// Session row to upsert (open).
     pub open_session: Option<ActivitySession>,
+    /// Lifecycle facts from the capture-time bind (ended/started).
+    pub session_events: Vec<SourceEvent>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -244,10 +246,10 @@ impl CaptureOrchestrator {
     /// Pause and closed-eyes emit nothing. Lock is a hard capture gate: we may
     /// persist a lock-transition fact, but it never carries app/window/URL.
     pub async fn poll_activity(&mut self) -> ActivityPoll {
-        if self.paused.load(Ordering::Relaxed) || self.privacy.paused {
+        if self.paused.load(Ordering::Relaxed) {
             return ActivityPoll::default();
         }
-        if self.closed_eyes.load(Ordering::Relaxed) || self.privacy.closed_eyes {
+        if self.closed_eyes.load(Ordering::Relaxed) {
             return ActivityPoll::default();
         }
 
@@ -330,12 +332,12 @@ impl CaptureOrchestrator {
         &mut self,
         reason: TriggerReason,
     ) -> Result<Option<CapturedBatch>, String> {
-        if self.paused.load(Ordering::Relaxed) || self.privacy.paused {
+        if self.paused.load(Ordering::Relaxed) {
             self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
             debug!("gate: paused");
             return Ok(None);
         }
-        if self.closed_eyes.load(Ordering::Relaxed) || self.privacy.closed_eyes {
+        if self.closed_eyes.load(Ordering::Relaxed) {
             self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
             debug!("gate: closed_eyes");
             return Ok(None);
@@ -346,8 +348,20 @@ impl CaptureOrchestrator {
             return Ok(None);
         }
 
-        let front = self.frontmost.frontmost().await.ok().flatten();
+        let front = match self.frontmost.frontmost().await {
+            Ok(front) => front,
+            Err(_) => {
+                self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
+                debug!("gate: frontmost_unavailable");
+                return Ok(None);
+            }
+        };
         let bundle = front.as_ref().and_then(|f| f.bundle_id.clone());
+        if front.is_none() && !self.privacy.app_blocklist.is_empty() {
+            self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
+            debug!("gate: frontmost_unknown_with_blocklist");
+            return Ok(None);
+        }
         if self.privacy.blocks_bundle(bundle.as_deref()) {
             self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
             debug!("gate: app_blocklist");
@@ -549,6 +563,7 @@ impl CaptureOrchestrator {
             frames,
             closed_session,
             open_session,
+            session_events: trans.events,
         }))
     }
 
@@ -804,6 +819,40 @@ mod tests {
             Arc::new(FakePower),
             CaptureConfig {
                 visual_change_threshold: 0.05,
+                debounce_default_ms: 0,
+                debounce_churn_ms: 0,
+                same_app_min_ms: 0,
+                probe_scale: 1,
+                displays: "all".into(),
+                ..CaptureConfig::default()
+            },
+            privacy,
+        );
+        let r = o.capture_tick(TriggerReason::FocusChange).await.unwrap();
+        assert!(r.is_none());
+        assert_eq!(o.stats().skipped_gate, 1);
+    }
+
+    struct FakeFrontNone;
+    #[async_trait]
+    impl FrontmostAppProbe for FakeFrontNone {
+        async fn frontmost(&self) -> Result<Option<FrontmostApp>, PlatformError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_frontmost_skips_capture_when_blocklist_is_set() {
+        let mut privacy = PrivacyConfig::default();
+        privacy.app_blocklist = vec!["com.secret.app".into()];
+        let mut o = CaptureOrchestrator::new(
+            Arc::new(FakeDisplays),
+            Arc::new(FakeCap { n: Mutex::new(1) }),
+            Arc::new(FakeFrontNone),
+            Arc::new(FakeLock::unlocked()),
+            Arc::new(FakeIdle),
+            Arc::new(FakePower),
+            CaptureConfig {
                 debounce_default_ms: 0,
                 debounce_churn_ms: 0,
                 same_app_min_ms: 0,

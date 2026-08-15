@@ -16,5 +16,6 @@ pub use audio::{
 pub use interaction::{InteractionCoalescer, InteractionContext};
 pub use orchestrator::{ActivityPoll, CaptureOrchestrator, CaptureStats, CapturedBatch};
 pub use session::{
-    session_matches_frontmost, SessionManager, SessionTransition, SharedSessionBinder,
+    drain_transition, session_matches_frontmost, SessionManager, SessionTransition,
+    SharedSessionBinder,
 };

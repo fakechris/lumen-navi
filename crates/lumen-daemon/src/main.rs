@@ -28,8 +28,9 @@ use lumen_process::{
 };
 use lumen_sources_browser::BrowserIngestPolicy;
 use lumen_sources_media::{
-    session_matches_frontmost, ActivityPoll, AudioOrchestrator, CaptureOrchestrator, CapturedBatch,
-    InteractionCoalescer, InteractionContext, SessionTransition, SharedSessionBinder,
+    drain_transition, session_matches_frontmost, ActivityPoll, AudioOrchestrator,
+    CaptureOrchestrator, CapturedBatch, InteractionCoalescer, InteractionContext,
+    SessionTransition, SharedSessionBinder,
 };
 use lumen_store::{EventStore, ReclaimKind, RecoveryPolicy, SqliteStore, SCHEMA_VERSION};
 use lumen_types::{event_kind, SourceEvent, SourceKind, TriggerReason};
@@ -146,20 +147,32 @@ fn observe_hard_gated(paused: bool, closed_eyes: bool, locked: bool) -> bool {
 
 /// Open a session only when none exists. App switches stay with the activity
 /// owner so HID cannot race a poll and flip the session backwards.
+/// Bind and persist stay under the binder lock so a later Mail transition
+/// cannot be overwritten by a stale Safari-open write.
 fn ensure_session_if_absent(
     store: &SqliteStore,
     sessions: &SharedSessionBinder,
     app: Option<&str>,
     bundle: Option<&str>,
 ) -> Option<Uuid> {
-    if let Some(current) = sessions.current() {
-        if session_matches_frontmost(&current, app, bundle) {
-            return Some(current.id);
+    sessions.mutate(|manager| {
+        if let Some(current) = manager.current() {
+            if session_matches_frontmost(current, app, bundle) {
+                return Some(current.id);
+            }
+            return None;
         }
-        return None;
-    }
-    persist_session_transition(store, sessions.bind(app, bundle, "interaction"));
-    sessions.current_id()
+        let (_, closed) = manager.touch(app, bundle, "interaction");
+        let trans = drain_transition(manager, closed);
+        if trans.is_empty() {
+            return manager.current().map(|s| s.id);
+        }
+        match store.apply_activity_transition(&trans.upserts, &trans.events) {
+            Ok(()) => note_write(),
+            Err(e) => warn!(error = %e, "apply activity transition failed"),
+        }
+        manager.current().map(|s| s.id)
+    })
 }
 
 fn recovery_policy_from_config(config: &Config) -> RecoveryPolicy {
@@ -327,6 +340,7 @@ async fn main() -> Result<()> {
         config.privacy.closed_eyes,
     ));
     let session_binder = SharedSessionBinder::new(config.capture.idle_session_ms);
+    let session_persist = Arc::new(tokio::sync::Mutex::new(()));
 
     let recovery = store
         .recover_after_unclean_shutdown(&recovery_policy_from_config(&config))
@@ -563,6 +577,7 @@ async fn main() -> Result<()> {
                 let observe_paused = Arc::clone(&observe_paused);
                 let observe_closed_eyes = Arc::clone(&observe_closed_eyes);
                 let session_binder = Arc::clone(&session_binder);
+                let session_persist = Arc::clone(&session_persist);
                 Some(tokio::spawn(async move {
                     let mut stats_tick = tokio::time::interval(flush_every);
                     stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -595,18 +610,13 @@ async fn main() -> Result<()> {
                                     lumen_platform_macos::input_reset(state);
                                     continue;
                                 }
-                                let session_id = session_binder.current_id();
-                                if session_id.is_none() {
-                                    continue;
-                                }
                                 let counts = lumen_platform_macos::input_snapshot(state);
                                 lumen_platform_macos::input_reset(state);
-                                let mut event = SourceEvent::new(
+                                let event = SourceEvent::new(
                                     SourceKind::Screen,
                                     event_kind::INPUT_STATS_V1,
                                     serde_json::to_value(&counts).unwrap_or_default(),
                                 );
-                                event.session_id = session_id;
                                 if let Err(e) = store_in.append_event(event) {
                                     warn!(error = %e, "append input.stats.v1 failed");
                                 } else {
@@ -619,6 +629,7 @@ async fn main() -> Result<()> {
                                 let locked = host::is_screen_locked();
                                 if !observe_on || observe_hard_gated(paused, closed_eyes, locked) {
                                     let _ = lumen_platform_macos::input_drain_hid(state);
+                                    lumen_platform_macos::input_reset(state);
                                     coal.discard_text();
                                     continue;
                                 }
@@ -644,6 +655,7 @@ async fn main() -> Result<()> {
                                     coal.discard_text();
                                     continue;
                                 }
+                                let _persist = session_persist.lock().await;
                                 let session_id = ensure_session_if_absent(
                                     &store_in,
                                     &session_binder,
@@ -882,13 +894,21 @@ async fn main() -> Result<()> {
     // calls stuck on a SkyLight mutex — daemon alive, health "fine", zero
     // writes). Exit non-zero so the app's supervisor restarts us.
     // Not armed when paused/closed-eyes, where no writes are expected.
-    if expect_long && !config.privacy.paused && !config.privacy.closed_eyes {
+    if expect_long {
         note_write();
-        tokio::spawn(async {
+        let watchdog_paused = Arc::clone(&observe_paused);
+        let watchdog_closed_eyes = Arc::clone(&observe_closed_eyes);
+        tokio::spawn(async move {
             let mut every = tokio::time::interval(Duration::from_secs(60));
             every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 every.tick().await;
+                if watchdog_paused.load(Ordering::Relaxed)
+                    || watchdog_closed_eyes.load(Ordering::Relaxed)
+                {
+                    note_write();
+                    continue;
+                }
                 let last = LAST_WRITE_UNIX.load(Ordering::Relaxed);
                 let silent_for = unix_now().saturating_sub(last);
                 if last > 0 && silent_for > 300 {
@@ -928,22 +948,28 @@ async fn main() -> Result<()> {
         let mut act_cancel = observe_cancel_rx.clone();
         let observe_paused = Arc::clone(&observe_paused);
         let observe_closed_eyes = Arc::clone(&observe_closed_eyes);
+        let session_persist = Arc::clone(&session_persist);
         tokio::spawn(async move {
             tick.tick().await; // consume the immediate tick
             info!("activity tracker running (screen capture unavailable, tracking time only)");
             orch.set_paused(observe_paused.load(Ordering::Relaxed));
             orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
-            persist_activity_poll(&store_act, orch.poll_activity().await);
+            {
+                let _persist = session_persist.lock().await;
+                persist_activity_poll(&store_act, orch.poll_activity().await);
+            }
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
                         orch.set_paused(observe_paused.load(Ordering::Relaxed));
                         orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
+                        let _persist = session_persist.lock().await;
                         persist_activity_poll(&store_act, orch.poll_activity().await);
                         persist_session_transition(&store_act, orch.close_idle_session());
                     }
                     _ = act_cancel.changed() => {
                         if *act_cancel.borrow() {
+                            let _persist = session_persist.lock().await;
                             persist_session_transition(&store_act, orch.force_close_session());
                             break;
                         }
@@ -982,11 +1008,19 @@ async fn main() -> Result<()> {
         let ax_on = config.ax.enabled;
         let persist = tokio::spawn(async move {
             while let Some(batch) = rx.recv().await {
-                if let Some(ref closed) = batch.closed_session {
-                    let _ = store_w.upsert_session(closed);
+                let mut upserts = Vec::new();
+                if let Some(closed) = batch.closed_session {
+                    upserts.push(closed);
                 }
-                if let Some(ref open) = batch.open_session {
-                    let _ = store_w.upsert_session(open);
+                if let Some(open) = batch.open_session {
+                    upserts.push(open);
+                }
+                if !upserts.is_empty() || !batch.session_events.is_empty() {
+                    if let Err(e) =
+                        store_w.apply_activity_transition(&upserts, &batch.session_events)
+                    {
+                        warn!(error = %e, "apply capture session transition failed");
+                    }
                 }
                 for (event, frame) in batch.frames {
                     match store_w.put_and_append(
@@ -1036,7 +1070,10 @@ async fn main() -> Result<()> {
         capture_tick.tick().await;
         orch.set_paused(observe_paused.load(Ordering::Relaxed));
         orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
-        persist_activity_poll(&store, orch.poll_activity().await);
+        {
+            let _persist = session_persist.lock().await;
+            persist_activity_poll(&store, orch.poll_activity().await);
+        }
 
         info!("observe screen loop running (Ctrl+C to stop if ticks=0)");
         if !cua_ready.load(Ordering::Relaxed) {
@@ -1061,7 +1098,10 @@ async fn main() -> Result<()> {
                 _ = focus_tick.tick() => {
                     orch.set_paused(observe_paused.load(Ordering::Relaxed));
                     orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
-                    persist_activity_poll(&store, orch.poll_activity().await);
+                    {
+                        let _persist = session_persist.lock().await;
+                        persist_activity_poll(&store, orch.poll_activity().await);
+                    }
 
                     // Capture is gated on Cua readiness: while Cua is down the
                     // loop keeps tracking activity only, and starts capturing
@@ -1084,9 +1124,14 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
-                    persist_session_transition(&store, orch.close_idle_session());
+                    {
+                        let _persist = session_persist.lock().await;
+                        persist_session_transition(&store, orch.close_idle_session());
+                    }
                 }
                 _ = capture_tick.tick() => {
+                    orch.set_paused(observe_paused.load(Ordering::Relaxed));
+                    orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
                     if cua_ready.load(Ordering::Relaxed) {
                         interval_ticks += 1;
                         match orch.capture_tick(TriggerReason::Interval).await {
@@ -1108,7 +1153,10 @@ async fn main() -> Result<()> {
             }
         }
 
-        persist_session_transition(&store, orch.force_close_session());
+        {
+            let _persist = session_persist.lock().await;
+            persist_session_transition(&store, orch.force_close_session());
+        }
         drop(tx);
         let _ = persist.await;
         screen_status.running = false;

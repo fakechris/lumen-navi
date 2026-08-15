@@ -33,9 +33,13 @@ impl SharedSessionBinder {
         })
     }
 
-    fn with_inner<R>(&self, f: impl FnOnce(&mut SessionManager) -> R) -> R {
+    pub fn mutate<R>(&self, f: impl FnOnce(&mut SessionManager) -> R) -> R {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)
+    }
+
+    fn with_inner<R>(&self, f: impl FnOnce(&mut SessionManager) -> R) -> R {
+        self.mutate(f)
     }
 
     pub fn current(&self) -> Option<ActivitySession> {
@@ -92,7 +96,7 @@ pub fn session_matches_frontmost(
     }
 }
 
-fn drain_transition(
+pub fn drain_transition(
     manager: &mut SessionManager,
     closed: Option<ActivitySession>,
 ) -> SessionTransition {
