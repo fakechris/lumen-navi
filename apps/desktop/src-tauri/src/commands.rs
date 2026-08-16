@@ -507,6 +507,22 @@ pub fn activity_history_slots(
     state.store.list_history_slots(&day).map_err(err)
 }
 
+/// Bundle-id → 64px PNG data URL for History app marks. Missing apps omitted.
+#[tauri::command]
+pub fn app_icons(
+    state: State<'_, AppState>,
+    bundle_ids: Vec<String>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let cache = state.data_dir.join("icon-cache");
+    let mut out = std::collections::HashMap::new();
+    for id in bundle_ids {
+        if let Some(url) = crate::app_icon::data_url_for_bundle(&cache, &id) {
+            out.insert(id, url);
+        }
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 pub fn day_roast_summary(
     state: State<'_, AppState>,

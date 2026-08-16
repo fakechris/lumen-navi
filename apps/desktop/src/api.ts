@@ -71,6 +71,8 @@ export const api = {
     invoke<SceneDay>("activity_scenes", { day }),
   activityHistorySlots: (day: string) =>
     invoke<HistorySlot[]>("activity_history_slots", { day }),
+  appIcons: (bundleIds: string[]) =>
+    invoke<Record<string, string>>("app_icons", { bundleIds }),
   roastDay: (day: string, tone?: string) =>
     invoke<LlmReply>("roast_day", { day, tone: tone ?? null }),
   roastList: (day: string) => invoke<RoastRecord[]>("roast_list", { day }),
