@@ -145,6 +145,9 @@ extern "C" {
     fn CFRunLoopAddSource(rl: *const c_void, source: *const c_void, mode: *const c_void);
     fn CFRunLoopRun();
     fn CFRunLoopStop(rl: *const c_void);
+    // Non-null CFStringRef — passing NULL as the mode makes CFHash trap
+    // (EXC_BREAKPOINT) inside CFRunLoopAddSource.
+    static kCFRunLoopDefaultMode: *const c_void;
     fn CGEventGetIntegerValueField(event: *const c_void, field: usize) -> i64;
     fn CGEventGetFlags(event: *const c_void) -> u64;
     fn CFMachPortCreateRunLoopSource(
@@ -362,8 +365,7 @@ pub fn start_input_counter(state: &'static InputCounterState) -> Result<(), Stri
                 unsafe {
                     let rl = CFRunLoopGetCurrent();
                     let source = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
-                    let mode: *const c_void = std::ptr::null();
-                    CFRunLoopAddSource(rl, source, mode);
+                    CFRunLoopAddSource(rl, source, kCFRunLoopDefaultMode);
                     CGEventTapEnable(tap, true);
                     CFRunLoopRun();
                 }
