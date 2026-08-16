@@ -1399,6 +1399,119 @@ impl SqliteStore {
     }
 
     /// Build the structured one-day roast summary — every field a real number
+    /// Merged epoch-ms ranges during which the user actually typed or
+    /// clicked, derived from input.stats.v1 events. Each event carries the
+    /// counters of the flush interval ending at its ts; the interval length
+    /// is self-calibrated from the median gap between consecutive events.
+    /// Empty when the input counter never ran that day.
+    fn input_active_ranges(conn: &Connection, day: &str) -> Vec<(i64, i64)> {
+        let mut stmt = match conn.prepare(
+            "SELECT ts, payload FROM events WHERE kind='input.stats.v1' \
+             AND date(ts,'localtime')=?1 ORDER BY ts",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows: Vec<(String, String)> = stmt
+            .query_map(params![day], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map(|it| it.filter_map(|x| x.ok()).collect())
+            .unwrap_or_default();
+        let mut pts: Vec<(i64, bool)> = Vec::with_capacity(rows.len());
+        for (ts, payload) in &rows {
+            let Ok(t) = DateTime::parse_from_rfc3339(ts) else { continue };
+            let active = serde_json::from_str::<serde_json::Value>(payload)
+                .ok()
+                .and_then(|v| {
+                    v.as_object()
+                        .map(|o| o.values().filter_map(|x| x.as_u64()).sum::<u64>() > 0)
+                })
+                .unwrap_or(false);
+            pts.push((t.timestamp_millis(), active));
+        }
+        if pts.is_empty() {
+            return Vec::new();
+        }
+        // Median inter-event gap ≈ flush interval (clamped to sane bounds).
+        let mut gaps: Vec<i64> = pts.windows(2).map(|w| w[1].0 - w[0].0).filter(|g| *g > 0).collect();
+        let flush_ms = if gaps.is_empty() {
+            30_000
+        } else {
+            gaps.sort_unstable();
+            gaps[gaps.len() / 2].clamp(30_000, 300_000)
+        };
+        let mut ranges: Vec<(i64, i64)> = pts
+            .iter()
+            .filter(|(_, active)| *active)
+            .map(|(t, _)| (t - flush_ms, *t))
+            .collect();
+        ranges.sort_unstable();
+        let mut merged: Vec<(i64, i64)> = Vec::new();
+        for (s, e) in ranges {
+            match merged.last_mut() {
+                Some(last) if s <= last.1 => {
+                    if e > last.1 {
+                        last.1 = e;
+                    }
+                }
+                _ => merged.push((s, e)),
+            }
+        }
+        merged
+    }
+
+    /// Discrete interaction events for the day — the precise user-behavior
+    /// signal from observe_interactions. Each event carries app/title
+    /// context on the payload; text content is never read. Returns
+    /// (ts_ms, kind, app, title) rows sorted by ts.
+    fn interaction_events(conn: &Connection, day: &str) -> Vec<(i64, String, String, String)> {
+        static KINDS: &str = "('mouse.click.v1','keyboard.submit.v1','keyboard.shortcut.v1',\
+                              'keyboard.text_input.v1','mouse.drag.v1','mouse.context_menu.v1',\
+                              'selection.changed.v1')";
+        let sql = format!(
+            "SELECT ts, kind, json_extract(payload,'$.app_name'), json_extract(payload,'$.window_title') \
+             FROM events WHERE kind IN {KINDS} AND date(ts,'localtime')=?1 \
+             ORDER BY ts"
+        );
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            return Vec::new();
+        };
+        let rows = stmt
+            .query_map(params![day], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map(|it| it.filter_map(|x| x.ok()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|(ts, kind, app, title)| {
+                let t = DateTime::parse_from_rfc3339(&ts).ok()?;
+                Some((
+                    t.timestamp_millis(),
+                    kind,
+                    app.unwrap_or_default(),
+                    title.unwrap_or_default(),
+                ))
+            })
+            .collect()
+    }
+
+    /// Overlap of [start, end] with the (merged, sorted) ranges, in ms.
+    fn ranges_overlap_ms(ranges: &[(i64, i64)], start: i64, end: i64) -> i64 {
+        let mut total = 0i64;
+        for (s, e) in ranges {
+            let lo = (*s).max(start);
+            let hi = (*e).min(end);
+            if hi > lo {
+                total += hi - lo;
+            }
+        }
+        total
+    }
+
     /// from the store, ready to feed an LLM with a roast prompt.
     pub fn day_roast_summary(&self, day: &str) -> Result<DayRoastSummaryDto, StoreError> {
         let stats = self.activity_day_stats(day, GroupBy::App)?;
@@ -1417,6 +1530,7 @@ impl SqliteStore {
                 ms: a.ms,
                 pct: ((a.ms as f64 / total) * 100.0 * 10.0).round() / 10.0,
                 category: a.category.clone(),
+                user_active_ms: 0,
             })
             .collect();
 
@@ -1468,42 +1582,181 @@ impl SqliteStore {
             })
             .collect();
 
-        // Notable titles from screenshot events (recurring window titles).
-        let notable_titles: Vec<RoastTitleTotal> = {
+        // ── User-behavior attribution ────────────────────────────────────
+        // Two signals reflect what the user actually did (vs. what the screen
+        // sampler observed). Prefer the precise one:
+        //   1. discrete interaction events (observe_interactions) — exact
+        //      click/submit/shortcut moments with app/title context
+        //   2. input.stats.v1 periodic counters — coarse activity ranges
+        let interactions = Self::interaction_events(&conn, day);
+        let mut title_acts: std::collections::HashMap<(String, String), [i64; 3]> =
+            std::collections::HashMap::new(); // (app,title) → [clicks, submits, shortcuts]
+        let (active_ranges, attribution): (Vec<(i64, i64)>, Option<&'static str>) =
+            if !interactions.is_empty() {
+                // Each interaction is a point; a user active at t stays
+                // plausibly active for a short tail afterwards.
+                let mut pts: Vec<(i64, i64)> = interactions
+                    .iter()
+                    .map(|(t, _, _, _)| (*t, *t + 45_000))
+                    .collect();
+                pts.sort_unstable();
+                let mut merged: Vec<(i64, i64)> = Vec::new();
+                for (s0, e0) in pts {
+                    match merged.last_mut() {
+                        Some(last) if s0 <= last.1 => {
+                            if e0 > last.1 {
+                                last.1 = e0;
+                            }
+                        }
+                        _ => merged.push((s0, e0)),
+                    }
+                }
+                for (_, kind, app, title) in &interactions {
+                    if title.len() > 4 {
+                        let e = title_acts
+                            .entry((app.clone(), title.clone()))
+                            .or_insert([0, 0, 0]);
+                        match kind.as_str() {
+                            "mouse.click.v1" => e[0] += 1,
+                            "keyboard.submit.v1" => e[1] += 1,
+                            "keyboard.shortcut.v1" => e[2] += 1,
+                            _ => {}
+                        }
+                    }
+                }
+                (merged, Some("interactions"))
+            } else {
+                let ranges = Self::input_active_ranges(&conn, day);
+                let attr = if ranges.is_empty() { None } else { Some("input.stats") };
+                (ranges, attr)
+            };
+        let has_input = attribution.is_some();
+        // With point-precise interactions a switch is user-driven only when
+        // one happened right at the boundary; with coarse 5-min counters we
+        // have to widen the window.
+        let (switch_before_ms, switch_after_ms): (i64, i64) = if attribution == Some("interactions") {
+            (3_000, 1_500)
+        } else {
+            (45_000, 15_000)
+        };
+        let user_active_ms: i64 = active_ranges.iter().map(|(s, e)| e - s).sum();
+
+        // Day segments: foreground episodes with (possibly null) end times.
+        struct SegRow {
+            start_ms: i64,
+            end_ms: i64,
+            app: String,
+            title: String,
+            is_idle: bool,
+        }
+        let segments: Vec<SegRow> = {
             let mut stmt = conn
                 .prepare(
-                    r#"SELECT json_extract(payload, '$.app_name') AS app,
-                              json_extract(payload, '$.window_title') AS t,
-                              COUNT(1) AS n
-                       FROM events
-                       WHERE kind = 'screenshot.v1' AND date(ts, 'localtime') = date(?1, 'localtime')
-                         AND t IS NOT NULL AND t != '' AND length(t) > 4
-                       GROUP BY app, t ORDER BY n DESC LIMIT 8"#,
+                    r#"SELECT started_at, ended_at, duration_ms, app_name, window_title, is_idle
+                       FROM activity_segments
+                       WHERE day = ?1
+                       ORDER BY started_at"#,
                 )
                 .map_err(StoreError::db)?;
             let rows = stmt
                 .query_map(params![day], |row| {
-                    Ok(RoastTitleTotal {
-                        app: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                        title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                        seen_count: row.get(2)?,
-                    })
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
                 })
                 .map_err(StoreError::db)?;
-            rows.filter_map(|r| r.ok()).collect()
+            rows.filter_map(|r| r.ok())
+                .filter_map(|(started, ended, dur, app, title, idle)| {
+                    let start_ms = DateTime::parse_from_rfc3339(&started).ok()?;
+                    let end_ms = ended
+                        .as_deref()
+                        .and_then(|e| DateTime::parse_from_rfc3339(e).ok())
+                        .unwrap_or_else(|| start_ms + chrono::Duration::milliseconds(dur.max(0)));
+                    Some(SegRow {
+                        start_ms: start_ms.timestamp_millis(),
+                        end_ms: end_ms.timestamp_millis(),
+                        app: app.unwrap_or_default(),
+                        title: title.unwrap_or_default(),
+                        is_idle: idle != 0,
+                    })
+                })
+                .collect()
+        };
+
+        // Per-app user-active overlap (non-idle time only, matching top_apps).
+        let mut app_user_active: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        // Per-title dwell (INCLUDING idle — a title sitting foreground while
+        // the user is away is exactly the artifact roasts must not misread)
+        // plus its user-active overlap.
+        let mut title_agg: std::collections::HashMap<(String, String), [i64; 3]> =
+            std::collections::HashMap::new(); // [dwell_ms, user_active_ms, episodes]
+        let mut switches_user = 0i64;
+        let mut switches_nonidle = 0i64;
+        for seg in &segments {
+            let active_ms = Self::ranges_overlap_ms(&active_ranges, seg.start_ms, seg.end_ms);
+            if !seg.is_idle {
+                *app_user_active.entry(seg.app.clone()).or_insert(0) += active_ms;
+                switches_nonidle += 1;
+                // A switch the user plausibly drove: key/mouse activity around
+                // the moment the foreground changed.
+                if Self::ranges_overlap_ms(
+                    &active_ranges,
+                    seg.start_ms - switch_before_ms,
+                    seg.start_ms + switch_after_ms,
+                ) > 0
+                {
+                    switches_user += 1;
+                }
+            }
+            if seg.title.len() > 4 {
+                let e = title_agg
+                    .entry((seg.app.clone(), seg.title.clone()))
+                    .or_insert([0, 0, 0]);
+                e[0] += (seg.end_ms - seg.start_ms).max(0);
+                e[1] += active_ms;
+                e[2] += 1;
+            }
+        }
+        let switches_passive = (switches_nonidle - switches_user).max(0);
+
+        let notable_titles: Vec<RoastTitleTotal> = {
+            let mut all: Vec<((String, String), [i64; 3])> = title_agg.into_iter().collect();
+            all.sort_by(|a, b| b.1[0].cmp(&a.1[0]));
+            all.into_iter()
+                .take(8)
+                .map(|((app, title), v)| {
+                    let acts = title_acts.get(&(app.clone(), title.clone())).copied().unwrap_or([0, 0, 0]);
+                    RoastTitleTotal {
+                        app,
+                        title,
+                        seen_count: v[2],
+                        dwell_ms: v[0],
+                        user_active_ms: v[1],
+                        clicks: acts[0],
+                        submits: acts[1],
+                        shortcuts: acts[2],
+                    }
+                })
+                .collect()
         };
 
         // Screenshot + AX counts.
         let screenshot_count: i64 = conn
             .query_row(
-                "SELECT COUNT(1) FROM events WHERE kind='screenshot.v1' AND date(ts,'localtime')=date(?1,'localtime')",
+                "SELECT COUNT(1) FROM events WHERE kind='screenshot.v1' AND date(ts,'localtime')=?1",
                 params![day],
                 |r| r.get(0),
             )
             .unwrap_or(0);
         let ax_sample_count: i64 = conn
             .query_row(
-                "SELECT COUNT(1) FROM derived WHERE kind='ax.v1' AND date(created_at,'localtime')=date(?1,'localtime')",
+                "SELECT COUNT(1) FROM derived WHERE kind='ax.v1' AND date(created_at,'localtime')=?1",
                 params![day],
                 |r| r.get(0),
             )
@@ -1514,7 +1767,7 @@ impl SqliteStore {
             let mut stmt = conn
                 .prepare(
                     "SELECT payload FROM events WHERE kind='input.stats.v1' \
-                     AND date(ts,'localtime')=date(?1,'localtime')",
+                     AND date(ts,'localtime')=?1",
                 )
                 .map_err(StoreError::db)?;
             let rows = stmt
@@ -1549,6 +1802,12 @@ impl SqliteStore {
             if any { Some(total) } else { None }
         };
         drop(conn);
+
+        // Attach per-app user-active overlap now that attribution is done.
+        let mut top_apps = top_apps;
+        for a in top_apps.iter_mut() {
+            a.user_active_ms = app_user_active.get(&a.app).copied().unwrap_or(0);
+        }
 
         // Hour histogram + busiest hour with top app.
         let mut hour_histogram: Vec<RoastHour> = Vec::new();
@@ -1597,6 +1856,10 @@ impl SqliteStore {
             notable_titles,
             busiest_hour,
             hour_histogram,
+            user_active_ms: has_input.then_some(user_active_ms),
+            attribution: attribution.map(|a| a.to_string()),
+            switches_user: has_input.then_some(switches_user),
+            switches_passive: has_input.then_some(switches_passive),
         })
     }
 
@@ -5833,6 +6096,107 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(80));
         blocker.execute_batch("COMMIT;").unwrap();
         handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn roast_summary_attributes_user_activity_over_dwell() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let day = "2026-08-16";
+
+        {
+            let conn = store.conn.lock().unwrap();
+            // Two foreground episodes of the same long title: 10:00-10:10
+            // (user clicks once at 10:00:30, then walks away) and a second
+            // episode 11:00-11:02 that starts exactly on a user submit.
+            let segs = [
+                ("s1", "2026-08-16T10:00:00+00:00", "2026-08-16T10:10:00+00:00", 600_000, "Installer", "claude session jsonl"),
+                ("s2", "2026-08-16T11:00:00+00:00", "2026-08-16T11:02:00+00:00", 120_000, "Ghostty", "herdr"),
+            ];
+            for (id, st, en, ms, app, title) in segs {
+                conn.execute(
+                    "INSERT INTO activity_segments
+                       (seg_id, day, app_name, window_title, started_at, ended_at,
+                        duration_ms, is_idle, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?5)",
+                    params![id, day, app, title, st, en, ms],
+                )
+                .unwrap();
+            }
+            // Interaction events: a click during episode 1, a submit exactly at
+            // the start of episode 2. Payloads carry app/title context.
+            for (kind, ts, app, title, extra) in [
+                ("mouse.click.v1", "2026-08-16T10:00:30+00:00", "Installer", "claude session jsonl", "{}"),
+                ("keyboard.submit.v1", "2026-08-16T11:00:00.500+00:00", "Ghostty", "herdr", "{}"),
+            ] {
+                conn.execute(
+                    "INSERT INTO events (id, source, kind, ts, payload, created_at)
+                     VALUES (?1, 'screen', ?2, ?3, ?4, ?3)",
+                    params![Uuid::new_v4().to_string(), kind, ts,
+                             serde_json::json!({"app_name": app, "window_title": title, "extra": extra}).to_string()],
+                )
+                .unwrap();
+            }
+        }
+
+        let s = store.day_roast_summary(day).unwrap();
+
+        // Precise signal wins over the coarse counter.
+        assert_eq!(s.attribution.as_deref(), Some("interactions"));
+
+        // Title dwell is the full 10 min, but user activity only the 45s tail
+        // after the click — the "sat foreground while user was away" case.
+        let t = s.notable_titles.iter().find(|t| t.title.contains("claude session")).unwrap();
+        assert_eq!(t.dwell_ms, 600_000);
+        assert_eq!(t.user_active_ms, 45_000);
+        assert_eq!(t.clicks, 1);
+        assert_eq!(t.submits, 0);
+
+        // Episode 1 started before any interaction → passive; episode 2 began
+        // within 1.5s of a submit → user-driven.
+        assert_eq!(s.switches_user, Some(1));
+        assert_eq!(s.switches_passive, Some(1));
+        assert_eq!(s.context_switches, 2);
+    }
+
+    #[test]
+    fn roast_summary_falls_back_to_input_stats_and_none() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let day = "2026-08-16";
+
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO activity_segments
+                   (seg_id, day, app_name, window_title, started_at, ended_at,
+                    duration_ms, is_idle, updated_at)
+                 VALUES ('s1', ?1, 'App', 'some long title', '2026-08-16T10:00:00+00:00',
+                         '2026-08-16T10:05:00+00:00', 300_000, 0, '2026-08-16T10:00:00+00:00')",
+                params![day],
+            )
+            .unwrap();
+            // Day A: one non-zero input.stats.v1 counter flush whose interval
+            // ends right at the segment start → the switch is user-driven.
+            conn.execute(
+                "INSERT INTO events (id, source, kind, ts, payload, created_at)
+                 VALUES (?1, 'screen', 'input.stats.v1', '2026-08-16T10:00:00+00:00', ?2,
+                         '2026-08-16T10:00:00+00:00')",
+                params![Uuid::new_v4().to_string(),
+                         serde_json::json!({"mouse_left": 4}).to_string()],
+            )
+            .unwrap();
+        }
+        let a = store.day_roast_summary(day).unwrap();
+        assert_eq!(a.attribution.as_deref(), Some("input.stats"));
+        assert!(a.user_active_ms.unwrap_or(0) > 0);
+        assert_eq!(a.switches_user, Some(1)); // switch falls inside the coarse window
+
+        // Day B: no behavioral signal at all — attribution must be absent.
+        let b = store.day_roast_summary("2026-08-17").unwrap();
+        assert_eq!(b.attribution, None);
+        assert_eq!(b.user_active_ms, None);
+        assert_eq!(b.switches_user, None);
     }
 
     #[test]

@@ -51,6 +51,8 @@ pub struct ConfigSummary {
     pub asr_http_model: String,
     pub asr_fallback_speech: bool,
     pub system_audio: bool,
+    pub input_enabled: bool,
+    pub input_interactions: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +78,8 @@ pub struct SourcesUpdate {
     pub asr_http_model: Option<String>,
     pub asr_locale: Option<String>,
     pub asr_fallback_speech: Option<bool>,
+    pub input_enabled: Option<bool>,
+    pub input_interactions: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -393,6 +397,8 @@ pub fn get_config_summary(state: State<'_, AppState>) -> Result<ConfigSummary, S
         asr_http_model: cfg.asr.http_model.clone(),
         asr_fallback_speech: cfg.asr.fallback_speech,
         system_audio: cfg.audio.system_audio,
+        input_enabled: cfg.input.enabled,
+        input_interactions: cfg.input.observe_interactions,
     })
 }
 
@@ -817,10 +823,64 @@ async fn llm_chat_complete(
     })
 }
 
+/// Curated, semantics-annotated payload for the roast prompt. Raw DTO JSON
+/// leaks sampler artifacts (screenshot counts, seen counts) that LLMs happily
+/// mis-attribute to the user — this view states what each number MEANS.
+fn roast_prompt_data(summary: &lumen_api::DayRoastSummaryDto) -> serde_json::Value {
+    let pct = |part: i64, whole: i64| -> Option<f64> {
+        if whole <= 0 {
+            None
+        } else {
+            Some(((part as f64 / whole as f64) * 1000.0).round() / 10.0)
+        }
+    };
+    serde_json::json!({
+        "日期": summary.day,
+        "行为归因信号": summary.attribution,
+        "用户键鼠活跃时长_ms": summary.user_active_ms,
+        "前台活跃_ms": summary.total_active_ms,
+        "挂机_ms": summary.total_idle_ms,
+        "窗口切换": {
+            "非空闲切换总数": summary.context_switches,
+            "用户操作引起": summary.switches_user,
+            "被动或程序引起": summary.switches_passive,
+        },
+        "键鼠输入计数": summary.input_counts,
+        "应用TOP": summary.top_apps.iter().map(|a| serde_json::json!({
+            "应用": a.app,
+            "前台_ms": a.ms,
+            "占比%": a.pct,
+            "用户键鼠活跃_ms": a.user_active_ms,
+            "用户活跃占比%": pct(a.user_active_ms, a.ms),
+        })).collect::<Vec<_>>(),
+        "窗口标题TOP": summary.notable_titles.iter().map(|t| serde_json::json!({
+            "应用": t.app,
+            "标题": t.title,
+            "前台停留_ms": t.dwell_ms,
+            "用户键鼠活跃_ms": t.user_active_ms,
+            "用户活跃占比%": pct(t.user_active_ms, t.dwell_ms),
+            "鼠标点击": t.clicks,
+            "回车提交": t.submits,
+            "快捷键": t.shortcuts,
+        })).collect::<Vec<_>>(),
+        "域名TOP": summary.top_domains,
+        "场景TOP": summary.top_scenes,
+        "最忙小时": summary.busiest_hour,
+        "小时直方图": summary.hour_histogram,
+        "pulse_score": summary.pulse_score,
+        "采集元数据": {
+            "自动截屏数": summary.screenshot_count,
+            "AX采样数": summary.ax_sample_count,
+            "说明": "系统定时采集的密度指标，与用户行为无关",
+        },
+    })
+}
+
 #[tauri::command]
 pub async fn roast_day(
     state: State<'_, AppState>,
     day: String,
+    tone: Option<String>,
 ) -> Result<LlmReply, String> {
     let summary = state.store.day_roast_summary(&day).map_err(err)?;
     let cfg = state.load_config().map_err(err)?.assistant;
@@ -828,14 +888,44 @@ pub async fn roast_day(
         return Err("LLM 未配置 — 请在 设置 → LLM 配置 选择 model".into());
     }
     let endpoint = resolve_llm_endpoint(&cfg)?;
-    let data = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
+    let data = serde_json::to_string_pretty(&roast_prompt_data(&summary))
+        .map_err(|e| e.to_string())?;
+
+    let (persona, style) = match tone.as_deref() {
+        Some("advisor") => (
+            "一位温和但观察敏锐的专注力教练",
+            "- 语气真诚、有同理心，绝不嘲讽、不贴标签\n             - 每条 = 客观指出一个行为模式（引用具体数字）+ 一条可执行的具体建议\n             - 先讲事实，再给建议；肯定做得好的地方",
+        ),
+        _ => (
+            "一个毒舌但洞察深刻的数字生活评论员",
+            "- 语气幽默毒舌但不是人身攻击，吐槽行为模式而不是人格\n             - 可以玩梗，可以夸张，但数字必须来自数据\n             - 最后一条给一个真诚的建议",
+        ),
+    };
+
+    let attribution_note = match summary.attribution.as_deref() {
+        Some("interactions") => {
+            "今天有精确交互事件（点击/提交/快捷键），user 键鼠活跃数据可信，放心使用 clicks/submits/快捷键 等计数。"
+        }
+        Some("input.stats") => {
+            "今天只有聚合键鼠计数（分钟级粒度），user 活跃时长是区间估算，引用时用约数。"
+        }
+        _ => {
+            "⚠️ 今天没有键鼠监控数据：你看到的时长全部只是「前台窗口停留」，完全无法区分用户主动操作和挂机/程序自动切换。             这种情况下禁止断言用户的操作频率（例如「切了 N 次窗口」「看了 N 次」），只能说「某窗口停留了多久」，且要注明可能包含挂机。"
+        }
+    };
+
     let prompt = format!(
-        "你是一个毒舌但洞察深刻的数字生活评论员。基于下面的 JSON 数据（用户 {day} 一天的真实行为统计），写一份 6-10 条的中文 roast。要求：\n\
-         - 每条吐槽指向一个具体数字（百分比/次数/时长/标题）\n\
-         - 语气幽默但不是人身攻击，吐槽行为模式而不是人格\n\
-         - 可以玩梗，可以夸张，但数字必须来自数据\n\
-         - 最后一条给一个真诚的建议\n\
-         - 直接输出 roast 内容，不要前言后语\n\n\
+        "你是{persona}。基于下面的 JSON 数据（用户 {day} 一天的电脑使用记录），写一份 6-10 条的中文点评。\n\
+         要求：\n{style}\n\
+         - 每条指向一个具体数字（百分比/次数/时长/标题）\n\
+         - 直接输出内容，不要前言后语\n\n\
+         【数据语义 — 必须遵守的因果规则】\n\
+         1. 用户键鼠活跃时长、鼠标点击/回车提交/快捷键计数：用户真实操作，是唯一可信的「用户主动行为」证据。\n\
+         2. 前台停留时长（应用/标题/域名）：只代表窗口在前台放着，不等于用户在操作或专注 —— 必须结合「用户活跃占比%」判断；停留长 + 活跃占比低 = 大概率挂机/离开/在看视频。\n\
+         3. 窗口标题的「前台停留」是停留时长，绝对不是「用户查看了 N 次」。\n\
+         4. 吐槽或分析切换频率时必须用「用户操作引起」的切换数；「非空闲切换总数」包含程序自动切换（安装器、IM 弹窗、AI 工具自动跳转），不能算到用户头上。\n\
+         5. 采集元数据（自动截屏数/AX采样数）是系统采样密度，与用户行为无关，严禁据此推断用户做了什么。\n\
+         6. 归因信号说明：{attribution_note}\n\n\
          数据：\n{data}"
     );
     let reply = llm_chat_complete(
@@ -1195,6 +1285,12 @@ pub fn update_sources_config(
     }
     if let Some(v) = update.asr_fallback_speech {
         cfg.asr.fallback_speech = v;
+    }
+    if let Some(v) = update.input_enabled {
+        cfg.input.enabled = v;
+    }
+    if let Some(v) = update.input_interactions {
+        cfg.input.observe_interactions = v;
     }
     state.save_config(&cfg).map_err(err)?;
     reload_local_service(&state)?;

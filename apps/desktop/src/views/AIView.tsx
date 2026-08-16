@@ -180,11 +180,19 @@ function RoastCard() {
   const today = localDay(new Date());
   const [day, setDay] = useState(today);
   const [viewMonth, setViewMonth] = useState(today.slice(0, 7));
+  const [tone, setTone] = useState<"roast" | "advisor">(() =>
+    localStorage.getItem("roast.tone") === "advisor" ? "advisor" : "roast",
+  );
   const [roastDays, setRoastDays] = useState<Map<string, number>>(new Map());
   const [records, setRecords] = useState<RoastRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const pickTone = (t: "roast" | "advisor") => {
+    setTone(t);
+    localStorage.setItem("roast.tone", t);
+  };
 
   const refreshIndex = useCallback(() => {
     void api
@@ -217,7 +225,7 @@ function RoastCard() {
     setLoading(true);
     setError(null);
     try {
-      await api.roastDay(day);
+      await api.roastDay(day, tone);
       await loadDay(day);
       refreshIndex();
     } catch (e) {
@@ -225,7 +233,7 @@ function RoastCard() {
     } finally {
       setLoading(false);
     }
-  }, [day, loadDay, refreshIndex]);
+  }, [day, tone, loadDay, refreshIndex]);
 
   const selected = records.find((r) => r.id === selectedId) ?? records[0] ?? null;
 
@@ -241,12 +249,37 @@ function RoastCard() {
         <div>
           <h3 style={{ margin: 0 }}>Roast 我的一天 🔥</h3>
           <p style={{ color: "var(--text-tertiary)", fontSize: "var(--text-xs)", margin: "4px 0 0" }}>
-            {day} · 把真实行为数据喂给 LLM 毒舌点评 · 存档自动保留
+            {day} · 把真实行为数据喂给 LLM 点评 · 存档自动保留
           </p>
         </div>
-        <Button variant="primary" disabled={loading} onClick={() => void run()}>
-          {loading ? "生成中…" : day === today ? "Roast 我" : `Roast ${day}`}
-        </Button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div className="seg" style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 999, overflow: "hidden" }}>
+            {(
+              [
+                ["roast", "🔥 吐槽"],
+                ["advisor", "🌱 真诚建议"],
+              ] as const
+            ).map(([v, label]) => (
+              <button
+                key={v}
+                onClick={() => pickTone(v)}
+                style={{
+                  border: "none",
+                  padding: "5px 12px",
+                  fontSize: "var(--text-xs)",
+                  cursor: "pointer",
+                  background: tone === v ? "var(--accent)" : "transparent",
+                  color: tone === v ? "#fff" : "var(--text-secondary)",
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <Button variant="primary" disabled={loading} onClick={() => void run()}>
+            {loading ? "生成中…" : day === today ? "开始" : `Roast ${day}`}
+          </Button>
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>

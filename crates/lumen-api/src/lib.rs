@@ -343,6 +343,18 @@ pub struct DayRoastSummaryDto {
     pub busiest_hour: Option<RoastHour>,
     /// Per-hour active ms (local hour buckets 0-23, only non-zero entries).
     pub hour_histogram: Vec<RoastHour>,
+    /// Total ms covered by intervals with real keyboard/mouse activity
+    /// (None when no behavioral signal ran that day).
+    pub user_active_ms: Option<i64>,
+    /// Which signal produced the attribution: "interactions" (discrete
+    /// click/submit/shortcut events), "input.stats" (periodic counters),
+    /// or None (screen-only — attribution fields are 0/None).
+    pub attribution: Option<String>,
+    /// Non-idle segment starts that happened around real user input —
+    /// switches the user plausibly drove (None without input data).
+    pub switches_user: Option<i64>,
+    /// The rest of the non-idle switches (programmatic / ambiguous).
+    pub switches_passive: Option<i64>,
 }
 
 /// Day-aggregated input counts (sum of all input.stats.v1 events for the day).
@@ -376,6 +388,9 @@ pub struct RoastAppTotal {
     /// Percent of total_active_ms, 0-100 with one decimal.
     pub pct: f64,
     pub category: Option<String>,
+    /// Overlap of this app's foreground time with intervals where the user
+    /// actually typed/clicked (input.stats.v1). 0 when input counting is off.
+    pub user_active_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,7 +411,18 @@ pub struct RoastTitleTotal {
     /// App that owned the window.
     pub app: String,
     pub title: String,
+    /// Number of foreground episodes (NOT "times the user opened it").
     pub seen_count: i64,
+    /// Total foreground dwell from activity segments.
+    pub dwell_ms: i64,
+    /// Dwell overlap with real keyboard/mouse activity.
+    pub user_active_ms: i64,
+    /// Discrete mouse clicks on this title (observe_interactions).
+    pub clicks: i64,
+    /// Enter-key submits (messages sent, forms confirmed).
+    pub submits: i64,
+    /// Cmd/Ctrl shortcut invocations.
+    pub shortcuts: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
