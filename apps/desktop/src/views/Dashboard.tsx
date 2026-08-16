@@ -236,7 +236,7 @@ export function DashboardView() {
             <Card pad={16}>
               <SectionHeader
                 title="今日回顾"
-                subtitle="每 10 分钟一张 · 按时长记 app，不是按按键次数"
+                subtitle="每 15 分钟一张 · 图标是这段出现过的 app · 按时长不是按次数"
               />
               <HistorySlotList slots={slots} />
             </Card>

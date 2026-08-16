@@ -133,7 +133,7 @@ fn tool_defs() -> Vec<Value> {
         ),
         tool(
             "navi_recent_context",
-            "Last N 10-minute History cards (apps by duration, title, narrative).",
+            "Last N 15-minute History cards (apps by duration, title, narrative).",
             json!({
                 "type": "object",
                 "properties": {

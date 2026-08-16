@@ -839,6 +839,30 @@ async fn llm_chat_complete(
     })
 }
 
+/// Human duration for prompts. Never give the model raw millisecond integers.
+fn fmt_dur(ms: i64) -> String {
+    let secs = ms.max(0) / 1000;
+    if secs < 60 {
+        format!("{secs}秒")
+    } else if secs < 3600 {
+        let m = secs / 60;
+        let r = secs % 60;
+        if r == 0 {
+            format!("{m}分钟")
+        } else {
+            format!("{m}分{r}秒")
+        }
+    } else {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            format!("{h}小时")
+        } else {
+            format!("{h}小时{m}分钟")
+        }
+    }
+}
+
 /// Curated, semantics-annotated payload for the roast prompt. Raw DTO JSON
 /// leaks sampler artifacts (screenshot counts, seen counts) that LLMs happily
 /// mis-attribute to the user — this view states what each number MEANS.
@@ -850,12 +874,19 @@ fn roast_prompt_data(summary: &lumen_api::DayRoastSummaryDto) -> serde_json::Val
             Some(((part as f64 / whole as f64) * 1000.0).round() / 10.0)
         }
     };
+    let covered = summary.total_active_ms.saturating_add(summary.total_idle_ms);
+    let partial_day = covered > 0 && covered < 4 * 60 * 60 * 1000;
     serde_json::json!({
         "日期": summary.day,
+        "覆盖说明": if partial_day {
+            "下列前台/挂机/键鼠数字只覆盖监控开启后的窗口，不是日历日 24 小时。禁止写成「你今天只上了 N 分钟电脑」。"
+        } else {
+            "下列数字按当天本地日汇总。"
+        },
         "行为归因信号": summary.attribution,
-        "用户键鼠活跃时长_ms": summary.user_active_ms,
-        "前台活跃_ms": summary.total_active_ms,
-        "挂机_ms": summary.total_idle_ms,
+        "用户键鼠活跃": summary.user_active_ms.map(fmt_dur),
+        "前台停留合计": fmt_dur(summary.total_active_ms),
+        "挂机合计": fmt_dur(summary.total_idle_ms),
         "窗口切换": {
             "非空闲切换总数": summary.context_switches,
             "用户操作引起": summary.switches_user,
@@ -864,25 +895,41 @@ fn roast_prompt_data(summary: &lumen_api::DayRoastSummaryDto) -> serde_json::Val
         "键鼠输入计数": summary.input_counts,
         "应用TOP": summary.top_apps.iter().map(|a| serde_json::json!({
             "应用": a.app,
-            "前台_ms": a.ms,
-            "占比%": a.pct,
-            "用户键鼠活跃_ms": a.user_active_ms,
+            "前台停留": fmt_dur(a.ms),
+            "占前台合计%": a.pct,
+            "用户键鼠活跃": fmt_dur(a.user_active_ms),
             "用户活跃占比%": pct(a.user_active_ms, a.ms),
+            "短段高活跃": a.ms < 5 * 60_000 && pct(a.user_active_ms, a.ms).unwrap_or(0.0) >= 90.0,
         })).collect::<Vec<_>>(),
         "窗口标题TOP": summary.notable_titles.iter().map(|t| serde_json::json!({
             "应用": t.app,
             "标题": t.title,
-            "前台停留_ms": t.dwell_ms,
-            "用户键鼠活跃_ms": t.user_active_ms,
+            "前台停留": fmt_dur(t.dwell_ms),
+            "用户键鼠活跃": fmt_dur(t.user_active_ms),
             "用户活跃占比%": pct(t.user_active_ms, t.dwell_ms),
             "鼠标点击": t.clicks,
             "回车提交": t.submits,
             "快捷键": t.shortcuts,
         })).collect::<Vec<_>>(),
-        "域名TOP": summary.top_domains,
-        "场景TOP": summary.top_scenes,
-        "最忙小时": summary.busiest_hour,
-        "小时直方图": summary.hour_histogram,
+        "域名TOP": summary.top_domains.iter().map(|d| serde_json::json!({
+            "域名": d.domain,
+            "前台停留": fmt_dur(d.ms),
+        })).collect::<Vec<_>>(),
+        "场景TOP": summary.top_scenes.iter().map(|s| serde_json::json!({
+            "场景": s.label,
+            "前台停留": fmt_dur(s.ms),
+            "段数": s.episode_count,
+        })).collect::<Vec<_>>(),
+        "最忙小时": summary.busiest_hour.as_ref().map(|h| serde_json::json!({
+            "小时": h.hour,
+            "前台停留": fmt_dur(h.active_ms),
+            "主要应用": h.top_app,
+        })),
+        "小时直方图": summary.hour_histogram.iter().map(|h| serde_json::json!({
+            "小时": h.hour,
+            "前台停留": fmt_dur(h.active_ms),
+            "主要应用": h.top_app,
+        })).collect::<Vec<_>>(),
         "pulse_score": summary.pulse_score,
         "采集元数据": {
             "自动截屏数": summary.screenshot_count,
@@ -931,17 +978,21 @@ pub async fn roast_day(
     };
 
     let prompt = format!(
-        "你是{persona}。基于下面的 JSON 数据（用户 {day} 一天的电脑使用记录），写一份 6-10 条的中文点评。\n\
+        "你是{persona}。基于下面的 JSON 数据，写一份 6-10 条的中文点评。\n\
          要求：\n{style}\n\
          - 每条指向一个具体数字（百分比/次数/时长/标题）\n\
+         - 时长必须抄数据里已经换算好的中文（如 16分钟、57秒、2小时47分钟），禁止写「毫秒」或未换算的大整数\n\
          - 直接输出内容，不要前言后语\n\n\
          【数据语义 — 必须遵守的因果规则】\n\
-         1. 用户键鼠活跃时长、鼠标点击/回车提交/快捷键计数：用户真实操作，是唯一可信的「用户主动行为」证据。\n\
-         2. 前台停留时长（应用/标题/域名）：只代表窗口在前台放着，不等于用户在操作或专注 —— 必须结合「用户活跃占比%」判断；停留长 + 活跃占比低 = 大概率挂机/离开/在看视频。\n\
-         3. 窗口标题的「前台停留」是停留时长，绝对不是「用户查看了 N 次」。\n\
-         4. 吐槽或分析切换频率时必须用「用户操作引起」的切换数；「非空闲切换总数」包含程序自动切换（安装器、IM 弹窗、AI 工具自动跳转），不能算到用户头上。\n\
-         5. 采集元数据（自动截屏数/AX采样数）是系统采样密度，与用户行为无关，严禁据此推断用户做了什么。\n\
-         6. 归因信号说明：{attribution_note}\n\n\
+         1. 用户键鼠活跃、鼠标点击/回车提交/快捷键：唯一可信的主动行为证据。\n\
+         2. 前台停留只代表窗口在前面，不等于专注。停留长 + 活跃占比低 ≈ 挂机/离开/看视频。\n\
+         3. 窗口标题的前台停留不是「查看了 N 次」。\n\
+         4. 谈切换只用「用户操作引起」；被动/程序引起的不能算到用户头上。\n\
+         5. 自动截屏数/AX采样数是系统密度，严禁当作用户行为。\n\
+         6. 覆盖说明必须遵守：监控只开了一段时，禁止把合计前台说成「今天只上了这么久电脑」。\n\
+         7. 某应用前台短于 5 分钟且「短段高活跃」为 true：写成「这段很短且几乎都在操作」，禁止「全程在场 / 没有任何一秒是空的」。\n\
+         8. 应用名是 Lumen Navi / Navi 时，点击多半是看自己的数据或改设置，不要夸成深度工作区。\n\
+         9. 归因信号说明：{attribution_note}\n\n\
          数据：\n{data}"
     );
     let reply = llm_chat_complete(
@@ -1717,11 +1768,51 @@ const DAEMON_BIN: &str = if cfg!(windows) {
 #[cfg(test)]
 mod command_tests {
     use super::{
-        daemon_health_url, ensure_browser_pairing, health_sources, media_allowed,
-        privacy_settings_url, MediaKind,
+        daemon_health_url, ensure_browser_pairing, fmt_dur, health_sources, media_allowed,
+        privacy_settings_url, roast_prompt_data, MediaKind,
     };
     use lumen_api::{HealthResponse, SourceStatus, API_VERSION};
     use lumen_config::Config;
+
+    #[test]
+    fn roast_prompt_uses_human_durations_not_raw_ms() {
+        assert_eq!(fmt_dur(57_000), "57秒");
+        assert_eq!(fmt_dur(957_939), "15分57秒");
+        assert_eq!(fmt_dur(10_056_219), "2小时47分钟");
+        let summary = lumen_api::DayRoastSummaryDto {
+            day: "2026-08-16".into(),
+            total_active_ms: 38 * 60_000,
+            total_idle_ms: 10_056_219,
+            pulse_score: None,
+            context_switches: 3,
+            screenshot_count: 10,
+            ax_sample_count: 10,
+            input_counts: None,
+            top_apps: vec![lumen_api::RoastAppTotal {
+                app: "ZCode".into(),
+                ms: 957_939,
+                pct: 41.5,
+                category: None,
+                user_active_ms: 57_000,
+            }],
+            top_domains: vec![],
+            top_scenes: vec![],
+            notable_titles: vec![],
+            busiest_hour: None,
+            hour_histogram: vec![],
+            user_active_ms: Some(9 * 60_000 + 32_000),
+            attribution: Some("interactions".into()),
+            switches_user: Some(13),
+            switches_passive: Some(26),
+        };
+        let data = roast_prompt_data(&summary);
+        let s = data.to_string();
+        assert!(!s.contains("_ms"), "prompt JSON must not leak raw ms fields: {s}");
+        assert!(s.contains("15分57秒"));
+        assert!(s.contains("2小时47分钟"));
+        assert!(s.contains("监控开启后的窗口"));
+        assert_eq!(data["应用TOP"][0]["短段高活跃"], false);
+    }
 
     #[test]
     fn privacy_pane_routes_are_stable_and_unknown_values_fail() {

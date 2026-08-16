@@ -1,6 +1,6 @@
-//! Fold activity segments into 10-minute History cards.
+//! Fold activity segments into 15-minute History cards.
 //!
-//! Wall-clock slots (`:00` / `:10` / `:20` …) with apps by **duration**,
+//! Wall-clock slots (`:00` / `:15` / `:30` / `:45`) with apps by **duration**,
 //! not event count. Idle and lock time are excluded. Titles/bodies are
 //! deterministic so Observe never waits on a model.
 
@@ -10,7 +10,7 @@ use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
 use lumen_api::{ActivitySegmentDto, HistorySlotAppDto, HistorySlotDto, HistorySlotSceneDto};
 use lumen_scene::stack_for;
 
-const SLOT_MINUTES: i64 = 10;
+const SLOT_MINUTES: i64 = 15;
 
 #[derive(Default)]
 struct SlotAcc {
@@ -69,7 +69,7 @@ where
 
 fn floor_slot<Tz: TimeZone>(ts: DateTime<Utc>, tz: &Tz) -> DateTime<Utc> {
     let local = ts.with_timezone(tz);
-    let minute = (local.minute() / 10) * 10;
+    let minute = (local.minute() / 15) * 15;
     local
         .with_minute(minute)
         .and_then(|t| t.with_second(0))
@@ -143,36 +143,8 @@ fn finish_slot(start: DateTime<Utc>, acc: SlotAcc) -> HistorySlotDto {
     urls.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let urls: Vec<String> = urls.into_iter().take(4).map(|(u, _)| u).collect();
 
-    let title = if let Some(top) = scenes.first() {
-        top.label.clone()
-    } else if apps.len() >= 2 {
-        format!("{} + {}", apps[0].app_name, apps[1].app_name)
-    } else {
-        apps.first()
-            .map(|a| a.app_name.clone())
-            .unwrap_or_else(|| "Activity".into())
-    };
-
-    let body = if apps.is_empty() {
-        String::new()
-    } else {
-        apps.iter()
-            .take(3)
-            .map(|a| {
-                let scene = scenes
-                    .iter()
-                    .find(|s| s.label.starts_with(&a.app_name))
-                    .map(|s| s.label.as_str());
-                match scene {
-                    Some(label) if label != a.app_name => {
-                        format!("{} {}", fmt_ms(a.ms), label)
-                    }
-                    _ => format!("{} {}", fmt_ms(a.ms), a.app_name),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+    let title = distinctive_title(&titles, &apps, &scenes);
+    let body = narrative_body(&apps, &scenes);
 
     HistorySlotDto {
         slot_start: start,
@@ -205,6 +177,75 @@ pub fn overlay_slot_narrative(slot: &mut HistorySlotDto, persisted: &HistorySlot
             slot.narrative_status = persisted.narrative_status.clone();
         }
         _ => {}
+    }
+}
+
+fn distinctive_title(
+    titles: &[String],
+    apps: &[HistorySlotAppDto],
+    scenes: &[HistorySlotSceneDto],
+) -> String {
+    if let Some(raw) = titles.first() {
+        let t = shorten_title(raw);
+        if t.chars().count() >= 4 && !apps.iter().any(|a| a.app_name == t) {
+            return t;
+        }
+    }
+    if let Some(s) = scenes.first() {
+        if s.label.chars().count() >= 4 {
+            return shorten_title(&s.label);
+        }
+    }
+    if apps.len() >= 2 {
+        format!("{} + {}", apps[0].app_name, apps[1].app_name)
+    } else {
+        apps.first()
+            .map(|a| a.app_name.clone())
+            .unwrap_or_else(|| "活动".into())
+    }
+}
+
+fn narrative_body(apps: &[HistorySlotAppDto], scenes: &[HistorySlotSceneDto]) -> String {
+    if apps.is_empty() {
+        return String::new();
+    }
+    let bits: Vec<String> = apps
+        .iter()
+        .take(3)
+        .map(|a| {
+            let label = scenes
+                .iter()
+                .find(|s| s.label.starts_with(&a.app_name))
+                .map(|s| s.label.as_str());
+            match label {
+                Some(l) if l != a.app_name => format!("在{}上 {}", l, fmt_ms(a.ms)),
+                _ => format!("在{}上 {}", a.app_name, fmt_ms(a.ms)),
+            }
+        })
+        .collect();
+    match bits.len() {
+        0 => String::new(),
+        1 => format!("这段时间{}。", bits[0]),
+        2 => format!("这段时间{}，随后{}。", bits[0], bits[1]),
+        _ => format!("这段时间{}，随后{}，以及{}。", bits[0], bits[1], bits[2]),
+    }
+}
+
+fn shorten_title(raw: &str) -> String {
+    let t = raw.trim();
+    let t = t
+        .split(" - ")
+        .next()
+        .unwrap_or(t)
+        .split(" — ")
+        .next()
+        .unwrap_or(t)
+        .trim();
+    let n = t.chars().count();
+    if n <= 42 {
+        t.to_string()
+    } else {
+        format!("{}…", t.chars().take(40).collect::<String>())
     }
 }
 
@@ -258,7 +299,7 @@ mod tests {
 
     #[test]
     fn safari_then_terminal_in_one_slot() {
-        let start = Utc.with_ymd_and_hms(2026, 8, 15, 4, 20, 0).unwrap();
+        let start = Utc.with_ymd_and_hms(2026, 8, 15, 4, 15, 0).unwrap();
         let segs = vec![
             seg("Safari", "com.apple.Safari", "Inbox", start, 7),
             seg(
@@ -278,9 +319,10 @@ mod tests {
         assert_eq!(slot.apps[0].ms, 7 * 60_000);
         assert_eq!(slot.apps[1].app_name, "Ghostty");
         assert_eq!(slot.apps[1].ms, 3 * 60_000);
-        assert!(slot.title.contains("Safari") || slot.title.contains("Ghostty"));
+        assert!(slot.title.contains("Inbox") || slot.title.contains("Safari"));
         assert!(slot.body.contains("Safari"));
         assert!(slot.body.contains("Ghostty"));
+        assert!(slot.body.starts_with("这段时间"));
     }
 
     #[test]
@@ -295,19 +337,19 @@ mod tests {
 
     #[test]
     fn long_segment_spans_two_slots() {
-        let start = Utc.with_ymd_and_hms(2026, 8, 15, 4, 15, 0).unwrap();
-        let segs = vec![seg("Safari", "com.apple.Safari", "Doc", start, 10)];
+        let start = Utc.with_ymd_and_hms(2026, 8, 15, 4, 10, 0).unwrap();
+        let segs = vec![seg("Safari", "com.apple.Safari", "Doc", start, 20)];
         let slots = fold_history_slots(&segs, Utc);
         assert_eq!(slots.len(), 2);
         let total: i64 = slots.iter().map(|s| s.active_ms).sum();
-        assert_eq!(total, 10 * 60_000);
+        assert_eq!(total, 20 * 60_000);
         assert_eq!(
             slots[0].slot_start,
-            Utc.with_ymd_and_hms(2026, 8, 15, 4, 20, 0).unwrap()
+            Utc.with_ymd_and_hms(2026, 8, 15, 4, 15, 0).unwrap()
         );
         assert_eq!(
             slots[1].slot_start,
-            Utc.with_ymd_and_hms(2026, 8, 15, 4, 10, 0).unwrap()
+            Utc.with_ymd_and_hms(2026, 8, 15, 4, 0, 0).unwrap()
         );
     }
 
