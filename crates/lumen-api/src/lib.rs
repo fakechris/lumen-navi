@@ -504,6 +504,29 @@ pub struct HistorySlotDto {
     pub active_ms: i64,
     #[serde(default)]
     pub narrative_status: String,
+    /// Optional reusable-workflow chips. Empty on most cards.
+    #[serde(default)]
+    pub suggested_skills: Vec<SuggestedSkillDto>,
+    /// True after the slot job decided whether a chip belongs here.
+    #[serde(default)]
+    pub skill_checked: bool,
+}
+
+/// One conservative “turn this stretch into a reusable skill” suggestion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SuggestedSkillDto {
+    /// `skill` (reusable, no schedule). Automation/cron is out of scope.
+    #[serde(default = "default_skill_kind")]
+    pub kind: String,
+    pub name: String,
+    /// When to reuse this (user-facing).
+    pub trigger: String,
+    /// First-person instruction the user can paste to an agent.
+    pub prompt: String,
+}
+
+fn default_skill_kind() -> String {
+    "skill".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

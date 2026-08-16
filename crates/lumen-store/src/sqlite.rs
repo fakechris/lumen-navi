@@ -2312,6 +2312,23 @@ impl SqliteStore {
             .collect())
     }
 
+    /// Closed `ready` cards that have not yet been skill-checked.
+    pub fn list_ready_slots_missing_skill(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<HistorySlotDto>, StoreError> {
+        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let now = Utc::now();
+        Ok(self
+            .list_history_slots(&day)?
+            .into_iter()
+            .filter(|s| {
+                s.slot_end <= now && s.narrative_status == "ready" && !s.skill_checked
+            })
+            .take(limit.max(1))
+            .collect())
+    }
+
     /// Write title/body/status onto an already-persisted History card.
     pub fn apply_slot_narrative(
         &self,
@@ -2319,6 +2336,7 @@ impl SqliteStore {
         title: &str,
         body: &str,
         status: &str,
+        skills: Option<&[lumen_api::SuggestedSkillDto]>,
     ) -> Result<(), StoreError> {
         let key = crate::history_slot_key(slot_start);
         let conn = self
@@ -2334,6 +2352,10 @@ impl SqliteStore {
         slot.title = title.to_string();
         slot.body = body.to_string();
         slot.narrative_status = status.to_string();
+        if let Some(skills) = skills {
+            slot.suggested_skills = skills.to_vec();
+            slot.skill_checked = true;
+        }
         kv_set(
             &conn,
             &key,
@@ -5218,7 +5240,13 @@ mod tests {
             .cloned()
             .expect("closed slot");
         store
-            .apply_slot_narrative(slot.slot_start, "Wrote the PR", "Safari on Inbox.", "ready")
+            .apply_slot_narrative(
+                slot.slot_start,
+                "Wrote the PR",
+                "Safari on Inbox.",
+                "ready",
+                None,
+            )
             .unwrap();
         store.persist_closed_history_slots().unwrap();
         let again = store.list_history_slots(&day).unwrap();
@@ -5231,6 +5259,19 @@ mod tests {
         assert_eq!(kept.narrative_status, "ready");
         let pending = store.list_closed_slots_needing_narrative(8).unwrap();
         assert!(pending.iter().all(|s| s.slot_start != slot.slot_start));
+        let missing = store.list_ready_slots_missing_skill(8).unwrap();
+        assert!(missing.iter().any(|s| s.slot_start == slot.slot_start));
+        store
+            .apply_slot_narrative(
+                slot.slot_start,
+                "Wrote the PR",
+                "Safari on Inbox.",
+                "ready",
+                Some(&[]),
+            )
+            .unwrap();
+        let missing = store.list_ready_slots_missing_skill(8).unwrap();
+        assert!(missing.iter().all(|s| s.slot_start != slot.slot_start));
     }
 
     #[test]

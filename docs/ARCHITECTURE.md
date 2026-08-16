@@ -273,7 +273,7 @@ Transport: Unix socket (`<data_dir>/daemon.sock`) for the desktop shell and `lum
 
 Agent surface (`lumen-daemon mcp`, stdio): `navi_status`, `navi_get_settings`, `navi_pause`, `navi_resume`, `navi_recent_context`, `navi_search`. No wipe and no Act tools on this server.
 
-Closed 15-minute History cards persist under `history.slot.*`. An optional local/OpenAI-compat narrative overlays title/body without blocking capture. App marks belong on these cards, not on the day roast. Suggested-skill chips are not implemented yet.
+Closed 15-minute History cards persist under `history.slot.*`. An optional local/OpenAI-compat narrative overlays title/body without blocking capture. App marks belong on these cards, not on the day roast. A card may also carry a conservative suggested-skill chip (reusable workflow only; messaging/browsing stays chip-less). The chip copies a first-person agent prompt — it does not write a skill file or invoke Act.
 
 ### Source style
 

@@ -892,7 +892,7 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
               {slot.body}
             </div>
           )}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
             {slot.apps.map((app) => {
               const src = app.bundle_id ? icons[app.bundle_id] : undefined;
               const letter = (app.app_name || "?").slice(0, 1);
@@ -942,6 +942,20 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
                 </span>
               );
             })}
+            {(slot.suggested_skills ?? []).map((sk) => (
+              <button
+                key={sk.name}
+                type="button"
+                className="skill-chip"
+                title="复制给 agent：触发条件 + 第一人称指令"
+                onClick={() => {
+                  const text = `# ${sk.name}\n\n何时再用：${sk.trigger}\n\n${sk.prompt}\n`;
+                  void navigator.clipboard.writeText(text);
+                }}
+              >
+                建议技能 · {sk.name}
+              </button>
+            ))}
           </div>
         </div>
       ))}
