@@ -1192,6 +1192,62 @@ export default function App() {
                 </div>
               </div>
               <div className="card">
+                <h3>行为采集（键鼠，Roast 数据源）</h3>
+                <div className="stack mt">
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={!!cfg?.input_enabled}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setBusy(true);
+                        void api
+                          .updateSourcesConfig({ input_enabled: checked })
+                          .then((c) => {
+                            setCfg(c);
+                            setStatusNote(
+                              checked
+                                ? "键鼠计数已开启（需在 系统设置 → 隐私与安全性 → 输入监控 中允许 lumen-daemon），本地服务已重载。"
+                                : "键鼠计数已关闭，本地服务已重载。",
+                            );
+                          })
+                          .catch((err) => setError(String(err)))
+                          .finally(() => setBusy(false));
+                      }}
+                    />
+                    键盘鼠标计数（按行为类别统计：删除/Tab/回车/点击…，不记录按键内容）
+                  </label>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      disabled={!cfg?.input_enabled}
+                      checked={!!cfg?.input_interactions}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setBusy(true);
+                        void api
+                          .updateSourcesConfig({ input_interactions: checked })
+                          .then((c) => {
+                            setCfg(c);
+                            setStatusNote(
+                              checked
+                                ? "交互事件已开启：记录点击/快捷键/提交的时刻与应用（不记录文本内容）。"
+                                : "交互事件已关闭。",
+                            );
+                          })
+                          .catch((err) => setError(String(err)))
+                          .finally(() => setBusy(false));
+                      }}
+                    />
+                    交互事件（更精确：每次点击/回车提交/快捷键的时刻 + 所在应用；文本内容不记录）
+                  </label>
+                  <p className="meta">
+                    Roast / 行为分析靠这个区分「用户主动操作」和「程序自动变化」（自动截屏、安装器切窗、挂机）。
+                    没开的话分析只能基于前台停留时长，无法归因。首次开启需要在系统设置授予「输入监控」权限给 lumen-daemon。
+                  </p>
+                </div>
+              </div>
+              <div className="card">
                 <h3>Sources / engines</h3>
                 <div className="stack mt">
                   {(

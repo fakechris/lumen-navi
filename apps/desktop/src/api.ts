@@ -71,7 +71,8 @@ export const api = {
     invoke<SceneDay>("activity_scenes", { day }),
   activityHistorySlots: (day: string) =>
     invoke<HistorySlot[]>("activity_history_slots", { day }),
-  roastDay: (day: string) => invoke<LlmReply>("roast_day", { day }),
+  roastDay: (day: string, tone?: string) =>
+    invoke<LlmReply>("roast_day", { day, tone: tone ?? null }),
   roastList: (day: string) => invoke<RoastRecord[]>("roast_list", { day }),
   roastIndex: () => invoke<RoastIndexEntry[]>("roast_index"),
   aiSend: (threadId: string | null, content: string) =>

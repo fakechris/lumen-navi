@@ -238,6 +238,8 @@ export interface ConfigSummary {
   asr_http_model: string;
   asr_fallback_speech: boolean;
   system_audio: boolean;
+  input_enabled: boolean;
+  input_interactions: boolean;
 }
 
 export interface SourcesUpdate {
@@ -254,6 +256,8 @@ export interface SourcesUpdate {
   asr_http_model?: string;
   asr_locale?: string;
   asr_fallback_speech?: boolean;
+  input_enabled?: boolean;
+  input_interactions?: boolean;
 }
 
 export interface TimelineItem {
