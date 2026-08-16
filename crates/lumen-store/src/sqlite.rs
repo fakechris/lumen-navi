@@ -2200,34 +2200,97 @@ impl SqliteStore {
     /// Persist closed 15-minute cards so agents can read them without
     /// rescanning every activity segment. The open slot is left to the query.
     /// An existing `ready` narrative is never overwritten by the fold.
+    ///
+    /// After the fold, closed cards that are not yet `ready` get an AX/OCR
+    /// digest (`extracted`) so the UI is not stuck on a duration list while
+    /// the LLM job is queued.
     pub fn persist_closed_history_slots(&self) -> Result<usize, StoreError> {
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
         let segs = self.list_activity_segments(&day)?;
-        let slots = crate::fold_history_slots(&segs, chrono::Local);
+        let mut slots = crate::fold_history_slots(&segs, chrono::Local);
         let now = Utc::now();
-        let mut wrote = 0usize;
+        slots.retain(|s| s.slot_end <= now);
+
+        {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+            for slot in &mut slots {
+                let key = crate::history_slot_key(slot.slot_start);
+                if let Some(raw) = kv_get(&conn, &key)? {
+                    if let Ok(existing) = serde_json::from_str::<HistorySlotDto>(&raw) {
+                        crate::overlay_slot_narrative(slot, &existing);
+                    }
+                }
+            }
+        }
+
+        for slot in &mut slots {
+            if slot.narrative_status == "ready" {
+                continue;
+            }
+            let ev = self.extract_slot_evidence(slot.slot_start, slot.slot_end)?;
+            crate::apply_slot_evidence(slot, &ev);
+        }
+
         let conn = self
             .conn
             .lock()
             .map_err(|_| StoreError::Other("lock poisoned".into()))?;
-        for mut slot in slots {
-            if slot.slot_end > now {
-                continue;
-            }
+        for slot in &slots {
             let key = crate::history_slot_key(slot.slot_start);
-            if let Some(raw) = kv_get(&conn, &key)? {
-                if let Ok(existing) = serde_json::from_str::<HistorySlotDto>(&raw) {
-                    crate::overlay_slot_narrative(&mut slot, &existing);
-                }
-            }
             kv_set(
                 &conn,
                 &key,
-                &serde_json::to_string(&slot).map_err(StoreError::json)?,
+                &serde_json::to_string(slot).map_err(StoreError::json)?,
             )?;
-            wrote += 1;
         }
-        Ok(wrote)
+        Ok(slots.len())
+    }
+
+    /// AX + OCR snippets for one wall-clock slot. Capture is not involved.
+    pub fn extract_slot_evidence(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<crate::SlotEvidence, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let start_s = start.to_rfc3339();
+        let end_s = end.to_rfc3339();
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT e.payload, d.kind, d.body
+                   FROM events e
+                   JOIN derived d ON d.event_id = e.id
+                   WHERE e.kind = 'screenshot.v1'
+                     AND e.ts >= ?1 AND e.ts < ?2
+                     AND d.kind IN ('ax.v1', 'ocr.v1')
+                   ORDER BY e.ts ASC"#,
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map(params![start_s, end_s], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(StoreError::db)?;
+        let mut docs = Vec::new();
+        for row in rows {
+            let (payload, kind, body) = row.map_err(StoreError::db)?;
+            let payload_v: serde_json::Value =
+                serde_json::from_str(&payload).unwrap_or(serde_json::json!({}));
+            if let Some(doc) = crate::parse_derived_doc(&payload_v, &kind, &body) {
+                docs.push(doc);
+            }
+        }
+        Ok(crate::compress_slot_docs(&docs))
     }
 
     /// Closed cards that still need an LLM narrative (`none` or `failed`).
@@ -5168,6 +5231,80 @@ mod tests {
         assert_eq!(kept.narrative_status, "ready");
         let pending = store.list_closed_slots_needing_narrative(8).unwrap();
         assert!(pending.iter().all(|s| s.slot_start != slot.slot_start));
+    }
+
+    #[test]
+    fn persist_closed_history_slots_extracts_ax_digest() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let start = Utc::now() - chrono::Duration::minutes(25);
+        let end = start + chrono::Duration::minutes(10);
+        store
+            .add_manual_segment(start, end, "Ghostty", Some("herdr"), None, None)
+            .unwrap();
+
+        let mut shot = SourceEvent::new(
+            SourceKind::Screen,
+            event_kind::SCREENSHOT_V1,
+            json!({
+                "app_name": "Ghostty",
+                "window_title": "herdr",
+                "bundle_id": "com.mitchellh.ghostty",
+                "pid": 42,
+            }),
+        );
+        shot.ts = start + chrono::Duration::minutes(1);
+        let eid = shot.id;
+        store.append_event(shot).unwrap();
+        store
+            .insert_derived(
+                eid,
+                "ax.v1",
+                json!({
+                    "payload_version": 1,
+                    "text": "herdr\nWelcome to Kimi Code!\n任务转派与历史状态清理机制已经落地",
+                    "app_name": "Ghostty",
+                    "window_title": "herdr",
+                    "document_path": "/Users/chris/source/lumen-navi",
+                    "desynced": false,
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+        store.persist_closed_history_slots().unwrap();
+        let day = start
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        let listed = store.list_history_slots(&day).unwrap();
+        let slot = listed
+            .iter()
+            .find(|s| s.narrative_status == "extracted")
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "no extracted slot; listed={:?}",
+                    listed
+                        .iter()
+                        .map(|s| (
+                            s.slot_start,
+                            s.narrative_status.clone(),
+                            s.title.clone(),
+                            s.body.clone()
+                        ))
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            slot.body.contains("Kimi") || slot.body.contains("任务转派"),
+            "body={}",
+            slot.body
+        );
+        assert!(!slot.body.contains("这段时间在Ghostty → herdr上"));
+
+        let pending = store.list_closed_slots_needing_narrative(8).unwrap();
+        assert!(pending.iter().any(|s| s.slot_start == slot.slot_start));
     }
 
     #[tokio::test]

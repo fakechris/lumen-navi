@@ -164,11 +164,14 @@ pub fn history_slot_key(start: DateTime<Utc>) -> String {
     format!("history.slot.{}", start.to_rfc3339())
 }
 
-/// Overlay a persisted LLM (or failed) narrative onto a freshly folded card.
-/// Deterministic title/body stay unless the stored status is `ready`.
+/// Overlay a persisted narrative onto a freshly folded card.
+///
+/// `ready` is the LLM card. `extracted` is the AX/OCR digest written
+/// before the model runs — the UI should show that instead of the
+/// duration laundry list. `pending` / `failed` keep fold copy.
 pub fn overlay_slot_narrative(slot: &mut HistorySlotDto, persisted: &HistorySlotDto) {
     match persisted.narrative_status.as_str() {
-        "ready" => {
+        "ready" | "extracted" => {
             slot.title = persisted.title.clone();
             slot.body = persisted.body.clone();
             slot.narrative_status = persisted.narrative_status.clone();
@@ -369,6 +372,24 @@ mod tests {
         assert_eq!(slot.title, "Wrote the PR");
         assert_eq!(slot.body, "Safari for ten minutes on Inbox.");
         assert_eq!(slot.narrative_status, "ready");
+    }
+
+    #[test]
+    fn overlay_extracted_replaces_laundry_list() {
+        let start = Utc.with_ymd_and_hms(2026, 8, 15, 4, 20, 0).unwrap();
+        let mut slot = fold_history_slots(
+            &[seg("Safari", "com.apple.Safari", "Inbox", start, 10)],
+            Utc,
+        )
+        .remove(0);
+        let mut persisted = slot.clone();
+        persisted.title = "Inbox triage".into();
+        persisted.body = "在 Safari 里看到「未读 12」.".into();
+        persisted.narrative_status = "extracted".into();
+        overlay_slot_narrative(&mut slot, &persisted);
+        assert_eq!(slot.title, "Inbox triage");
+        assert_eq!(slot.body, "在 Safari 里看到「未读 12」.");
+        assert_eq!(slot.narrative_status, "extracted");
     }
 
     #[test]
