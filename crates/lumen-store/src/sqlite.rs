@@ -2293,6 +2293,45 @@ impl SqliteStore {
         Ok(crate::compress_slot_docs(&docs))
     }
 
+    /// HID clicks / shortcuts / submits in one wall-clock slot, folded
+    /// into a CUA-shaped trace. Capture is not involved.
+    pub fn extract_slot_actions(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<crate::SlotActionTrace, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let start_s = start.to_rfc3339();
+        let end_s = end.to_rfc3339();
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT kind, payload FROM events
+                   WHERE ts >= ?1 AND ts < ?2
+                     AND kind IN (
+                       'mouse.click.v1','mouse.context_menu.v1','mouse.drag.v1',
+                       'keyboard.shortcut.v1','keyboard.submit.v1','keyboard.text_input.v1'
+                     )
+                   ORDER BY ts ASC"#,
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map(params![start_s, end_s], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(StoreError::db)?;
+        let mut hits = Vec::new();
+        for row in rows {
+            let (kind, payload) = row.map_err(StoreError::db)?;
+            let payload_v: serde_json::Value =
+                serde_json::from_str(&payload).unwrap_or(serde_json::json!({}));
+            hits.push(crate::parse_interaction_hit(&kind, &payload_v));
+        }
+        Ok(crate::fold_slot_actions(&hits))
+    }
+
     /// Closed cards that still need an LLM narrative (`none` or `failed`).
     pub fn list_closed_slots_needing_narrative(
         &self,

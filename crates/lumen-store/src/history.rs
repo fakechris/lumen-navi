@@ -373,10 +373,12 @@ mod tests {
         persisted.body = "Safari for ten minutes on Inbox.".into();
         persisted.narrative_status = "ready".into();
         persisted.suggested_skills = vec![lumen_api::SuggestedSkillDto {
-            kind: "skill".into(),
+            kind: "cua".into(),
             name: "Inbox triage".into(),
             trigger: "下次清邮件时".into(),
             prompt: "帮我按上次的规则清 Inbox。".into(),
+            verify: String::new(),
+            steps: vec![],
         }];
         overlay_slot_narrative(&mut slot, &persisted);
         assert_eq!(slot.title, "Wrote the PR");

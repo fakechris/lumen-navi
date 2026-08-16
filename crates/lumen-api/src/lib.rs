@@ -512,21 +512,45 @@ pub struct HistorySlotDto {
     pub skill_checked: bool,
 }
 
-/// One conservative “turn this stretch into a reusable skill” suggestion.
+/// A CUA-replayable draft: focus windows, then keyboard/mouse steps.
+/// Observe never runs these steps.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SuggestedSkillDto {
-    /// `skill` (reusable, no schedule). Automation/cron is out of scope.
+    /// `cua` — a replay draft. Not a scheduled automation.
     #[serde(default = "default_skill_kind")]
     pub kind: String,
     pub name: String,
     /// When to reuse this (user-facing).
     pub trigger: String,
-    /// First-person instruction the user can paste to an agent.
+    /// First-person instruction an agent can follow.
     pub prompt: String,
+    /// How a replay knows it succeeded.
+    #[serde(default)]
+    pub verify: String,
+    /// Ordered CUA steps. Empty means the suggestion is not replayable.
+    #[serde(default)]
+    pub steps: Vec<SkillStepDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillStepDto {
+    /// `focus` | `click` | `shortcut` | `submit` | `type` | `context_menu` | `drag`
+    pub action: String,
+    pub app: String,
+    #[serde(default)]
+    pub window: Option<String>,
+    /// AX / title hint. Preferred over pixels.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// e.g. `command+s`. Required for `shortcut`.
+    #[serde(default)]
+    pub keys: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 fn default_skill_kind() -> String {
-    "skill".into()
+    "cua".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

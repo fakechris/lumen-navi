@@ -947,13 +947,12 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
                 key={sk.name}
                 type="button"
                 className="skill-chip"
-                title="复制给 agent：触发条件 + 第一人称指令"
+                title="复制 CUA 回放草稿：先聚焦窗口，再键鼠"
                 onClick={() => {
-                  const text = `# ${sk.name}\n\n何时再用：${sk.trigger}\n\n${sk.prompt}\n`;
-                  void navigator.clipboard.writeText(text);
+                  void navigator.clipboard.writeText(formatCuaSkill(sk));
                 }}
               >
-                建议技能 · {sk.name}
+                CUA 回放 · {sk.name}
               </button>
             ))}
           </div>
@@ -961,6 +960,41 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
       ))}
     </div>
   );
+}
+
+function formatCuaSkill(sk: {
+  name: string;
+  trigger: string;
+  prompt: string;
+  verify?: string;
+  steps?: Array<{
+    action: string;
+    app: string;
+    window?: string | null;
+    target?: string | null;
+    keys?: string | null;
+    note?: string | null;
+  }>;
+}): string {
+  const lines = [`# ${sk.name}`, "", `何时再用：${sk.trigger}`, ""];
+  if (sk.verify) {
+    lines.push(`验收：${sk.verify}`, "");
+  }
+  lines.push("CUA 步骤：");
+  const steps = sk.steps ?? [];
+  if (steps.length === 0) {
+    lines.push("- （无步骤）");
+  } else {
+    steps.forEach((st, i) => {
+      const win = st.window ? ` 「${st.window}」` : "";
+      const tgt = st.target ? ` → ${st.target}` : "";
+      const keys = st.keys ? ` [${st.keys}]` : "";
+      const note = st.note ? ` (${st.note})` : "";
+      lines.push(`${i + 1}. ${st.action} ${st.app}${win}${tgt}${keys}${note}`);
+    });
+  }
+  lines.push("", sk.prompt, "");
+  return lines.join("\n");
 }
 
 function SceneRanking({ scenes }: { scenes: SceneDay | null }) {

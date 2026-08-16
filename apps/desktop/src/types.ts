@@ -62,6 +62,17 @@ export interface SuggestedSkill {
   name: string;
   trigger: string;
   prompt: string;
+  verify?: string;
+  steps?: SkillStep[];
+}
+
+export interface SkillStep {
+  action: string;
+  app: string;
+  window?: string | null;
+  target?: string | null;
+  keys?: string | null;
+  note?: string | null;
 }
 
 export interface ActivitySegment {
