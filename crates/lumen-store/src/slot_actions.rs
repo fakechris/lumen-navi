@@ -35,6 +35,30 @@ pub struct FoldedAction {
     pub x: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub y: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rel_x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rel_y: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AxHitBox {
+    pub role: String,
+    pub title: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AxHitSet {
+    pub window: Option<AxHitBox>,
+    pub hits: Vec<AxHitBox>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,8 +84,12 @@ impl SlotActionTrace {
 }
 
 /// Compress a time-ordered HID stream: insert `focus` on window change,
-/// merge consecutive identical actions.
+/// merge consecutive identical actions. Clicks are hit-tested against AX boxes.
 pub fn fold_slot_actions(hits: &[InteractionHit]) -> SlotActionTrace {
+    fold_slot_actions_with_ax(hits, &AxHitSet::default())
+}
+
+pub fn fold_slot_actions_with_ax(hits: &[InteractionHit], ax: &AxHitSet) -> SlotActionTrace {
     let mut out = SlotActionTrace {
         events: hits.len(),
         ..SlotActionTrace::default()
@@ -97,11 +125,20 @@ pub fn fold_slot_actions(hits: &[InteractionHit]) -> SlotActionTrace {
                     keys: None,
                     x: None,
                     y: None,
+                    target: None,
+                    role: None,
+                    rel_x: None,
+                    rel_y: None,
                 },
             );
             last_focus = Some(focus_key);
         }
         let keys = hit.keys.as_deref().map(pretty_keys);
+        let mapped = if action == "click" {
+            map_click(hit, ax)
+        } else {
+            ClickMap::default()
+        };
         push_folded(
             &mut out.folded,
             FoldedAction {
@@ -114,6 +151,10 @@ pub fn fold_slot_actions(hits: &[InteractionHit]) -> SlotActionTrace {
                 keys,
                 x: hit.x.map(|v| v.round() as i64),
                 y: hit.y.map(|v| v.round() as i64),
+                target: mapped.target,
+                role: mapped.role,
+                rel_x: mapped.rel_x,
+                rel_y: mapped.rel_y,
             },
         );
     }
@@ -187,6 +228,95 @@ fn push_folded(out: &mut Vec<FoldedAction>, next: FoldedAction) {
         }
     }
     out.push(next);
+}
+
+#[derive(Default)]
+struct ClickMap {
+    target: Option<String>,
+    role: Option<String>,
+    rel_x: Option<f64>,
+    rel_y: Option<f64>,
+}
+
+fn map_click(hit: &InteractionHit, ax: &AxHitSet) -> ClickMap {
+    let (Some(x), Some(y)) = (hit.x, hit.y) else {
+        return ClickMap::default();
+    };
+    let mut best: Option<&AxHitBox> = None;
+    let mut best_area = f64::MAX;
+    for box_ in &ax.hits {
+        if contains(box_, x, y) {
+            let area = (box_.w * box_.h).max(1.0);
+            if area < best_area {
+                best_area = area;
+                best = Some(box_);
+            }
+        }
+    }
+    if let Some(el) = best {
+        return ClickMap {
+            target: Some(el.title.clone()),
+            role: Some(el.role.clone()),
+            rel_x: Some(((x - el.x) / el.w.max(1.0)).clamp(0.0, 1.0)),
+            rel_y: Some(((y - el.y) / el.h.max(1.0)).clamp(0.0, 1.0)),
+        };
+    }
+    if let Some(win) = &ax.window {
+        if win.w > 1.0 && win.h > 1.0 {
+            return ClickMap {
+                target: None,
+                role: None,
+                rel_x: Some(((x - win.x) / win.w).clamp(0.0, 1.0)),
+                rel_y: Some(((y - win.y) / win.h).clamp(0.0, 1.0)),
+            };
+        }
+    }
+    ClickMap::default()
+}
+
+fn contains(b: &AxHitBox, x: f64, y: f64) -> bool {
+    x >= b.x && y >= b.y && x <= b.x + b.w && y <= b.y + b.h
+}
+
+pub fn parse_ax_hit_set(body: &Value) -> AxHitSet {
+    let mut set = AxHitSet::default();
+    if let Some(win) = body.get("window_bounds") {
+        set.window = parse_box(win);
+    }
+    if let Some(arr) = body.get("hits").and_then(|v| v.as_array()) {
+        set.hits = arr.iter().filter_map(parse_box).collect();
+    }
+    set
+}
+
+fn parse_box(v: &Value) -> Option<AxHitBox> {
+    Some(AxHitBox {
+        role: v.get("role").and_then(|x| x.as_str()).unwrap_or("").into(),
+        title: v.get("title").and_then(|x| x.as_str()).unwrap_or("").into(),
+        x: v.get("x").and_then(|x| x.as_f64())?,
+        y: v.get("y").and_then(|x| x.as_f64())?,
+        w: v.get("w").and_then(|x| x.as_f64())?,
+        h: v.get("h").and_then(|x| x.as_f64())?,
+    })
+}
+
+pub fn steps_from_actions(trace: &SlotActionTrace) -> Vec<lumen_api::SkillStepDto> {
+    trace
+        .folded
+        .iter()
+        .take(8)
+        .map(|a| lumen_api::SkillStepDto {
+            action: a.action.clone(),
+            app: a.app.clone(),
+            window: a.window.clone(),
+            target: a.target.clone(),
+            keys: a.keys.clone(),
+            role: a.role.clone(),
+            rel_x: a.rel_x,
+            rel_y: a.rel_y,
+            note: None,
+        })
+        .collect()
 }
 
 fn map_action(kind: &str) -> Option<&'static str> {
@@ -314,5 +444,37 @@ mod tests {
         );
         let folded = fold_slot_actions(&[tab]);
         assert_eq!(folded.folded.last().unwrap().keys.as_deref(), Some("command+tab"));
+    }
+
+    #[test]
+    fn click_maps_to_smallest_ax_hit_and_relative_coords() {
+        let hits = vec![hit("mouse.click.v1", "Safari", "Harness", None)];
+        let mut click = hits[0].clone();
+        click.x = Some(25.0);
+        click.y = Some(45.0);
+        let ax = AxHitSet {
+            window: Some(AxHitBox {
+                role: "AXWindow".into(),
+                title: "Harness".into(),
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            }),
+            hits: vec![AxHitBox {
+                role: "AXButton".into(),
+                title: "任务转派".into(),
+                x: 20.0,
+                y: 40.0,
+                w: 20.0,
+                h: 10.0,
+            }],
+        };
+        let t = fold_slot_actions_with_ax(&[click], &ax);
+        let click = t.folded.iter().find(|a| a.action == "click").unwrap();
+        assert_eq!(click.target.as_deref(), Some("任务转派"));
+        assert_eq!(click.role.as_deref(), Some("AXButton"));
+        assert!((click.rel_x.unwrap() - 0.25).abs() < 0.01);
+        assert!((click.rel_y.unwrap() - 0.5).abs() < 0.01);
     }
 }

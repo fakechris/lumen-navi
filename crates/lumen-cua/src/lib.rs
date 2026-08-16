@@ -6,6 +6,8 @@
 mod adapter;
 mod client;
 #[cfg(target_os = "macos")]
+mod input;
+#[cfg(target_os = "macos")]
 mod peer_auth;
 mod permission_host;
 mod permissions;
@@ -18,6 +20,8 @@ pub use client::{CuaClient, CuaError};
 pub use permission_host::{
     is_permission_host_request, run as run_permission_host, PERMISSION_HOST_ARG,
 };
-pub use protocol::{CuaStatus, DirectCaptureError, DirectCaptureStatus, PROTOCOL_VERSION};
+pub use protocol::{
+    CuaStatus, DirectCaptureError, DirectCaptureStatus, InputStep, PROTOCOL_VERSION,
+};
 pub use runtime::{ensure_token_file, CuaPaths};
 pub use server::serve;

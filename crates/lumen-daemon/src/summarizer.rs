@@ -148,11 +148,40 @@ fn summarize_slot(
     let text = chat_completion(assistant, &prompt)?;
     let (title, body, raw_skill) = parse_title_body(&text, slot)?;
     let skill = if allow_skill {
-        raw_skill.as_ref().and_then(sanitize_suggested_skill)
+        raw_skill
+            .as_ref()
+            .and_then(sanitize_suggested_skill)
+            .or_else(|| skill_from_actions(slot, actions))
+            .map(|s| fill_steps(s, actions))
     } else {
         None
     };
     Ok((title, body, skill))
+}
+
+fn skill_from_actions(
+    slot: &HistorySlotDto,
+    actions: &SlotActionTrace,
+) -> Option<SuggestedSkillDto> {
+    let steps = lumen_store::steps_from_actions(actions);
+    if steps.len() < 2 {
+        return None;
+    }
+    sanitize_suggested_skill(&SuggestedSkillDto {
+        kind: "cua".into(),
+        name: slot.title.chars().take(12).collect(),
+        trigger: "下次要按同样窗口和键鼠再做一遍时".into(),
+        prompt: format!("按 {} 步在对应窗口回放刚才的操作。", steps.len()),
+        verify: String::new(),
+        steps,
+    })
+}
+
+fn fill_steps(mut skill: SuggestedSkillDto, actions: &SlotActionTrace) -> SuggestedSkillDto {
+    if skill.steps.len() < 2 {
+        skill.steps = lumen_store::steps_from_actions(actions);
+    }
+    skill
 }
 
 const CUA_SKILL_RULES: &str = "\
@@ -182,7 +211,11 @@ fn extract_skill_only(
     );
     let text = chat_completion(assistant, &prompt)?;
     let (_, _, raw) = parse_title_body(&text, slot)?;
-    Ok(raw.as_ref().and_then(sanitize_suggested_skill))
+    Ok(raw
+        .as_ref()
+        .and_then(sanitize_suggested_skill)
+        .or_else(|| skill_from_actions(slot, actions))
+        .map(|s| fill_steps(s, actions)))
 }
 
 fn slot_facts(

@@ -72,6 +72,9 @@ export interface SkillStep {
   window?: string | null;
   target?: string | null;
   keys?: string | null;
+  role?: string | null;
+  rel_x?: number | null;
+  rel_y?: number | null;
   note?: string | null;
 }
 

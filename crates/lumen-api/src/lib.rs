@@ -514,7 +514,7 @@ pub struct HistorySlotDto {
 
 /// A CUA-replayable draft: focus windows, then keyboard/mouse steps.
 /// Observe never runs these steps.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SuggestedSkillDto {
     /// `cua` — a replay draft. Not a scheduled automation.
     #[serde(default = "default_skill_kind")]
@@ -532,7 +532,7 @@ pub struct SuggestedSkillDto {
     pub steps: Vec<SkillStepDto>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SkillStepDto {
     /// `focus` | `click` | `shortcut` | `submit` | `type` | `context_menu` | `drag`
     pub action: String,
@@ -545,6 +545,13 @@ pub struct SkillStepDto {
     /// e.g. `command+s`. Required for `shortcut`.
     #[serde(default)]
     pub keys: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Relative position inside the window (0–1). Preferred over pixels.
+    #[serde(default)]
+    pub rel_x: Option<f64>,
+    #[serde(default)]
+    pub rel_y: Option<f64>,
     #[serde(default)]
     pub note: Option<String>,
 }

@@ -186,6 +186,17 @@ impl Default for AxTreeWalkConfig {
     }
 }
 
+/// Screen rect of one AX control (global points, top-left origin).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct AxHit {
+    pub role: String,
+    pub title: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
 /// The output of an AX tree walk: a flat text blob (for FTS search) plus
 /// metadata. Structured node storage is iteration 2.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -207,6 +218,12 @@ pub struct AxTreeSnapshot {
     pub document_path: Option<String>,
     /// Browser URL via AXWebArea→AXURL (iteration 2; None in MVP).
     pub browser_url: Option<String>,
+    /// Clickable/text controls with frames, for mapping HID clicks.
+    #[serde(default)]
+    pub hits: Vec<AxHit>,
+    /// Focused window frame in the same coordinate space as `hits`.
+    #[serde(default)]
+    pub window_bounds: Option<AxHit>,
 }
 
 /// Platform trait for walking the Accessibility tree of the focused window.

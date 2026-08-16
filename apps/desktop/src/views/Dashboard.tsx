@@ -947,9 +947,25 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
                 key={sk.name}
                 type="button"
                 className="skill-chip"
-                title="复制 CUA 回放草稿：先聚焦窗口，再键鼠"
-                onClick={() => {
-                  void navigator.clipboard.writeText(formatCuaSkill(sk));
+                title="点击回放一次（先聚焦窗口再键鼠）。Shift+点击只复制草稿。"
+                onClick={(e) => {
+                  if (e.shiftKey) {
+                    void navigator.clipboard.writeText(formatCuaSkill(sk));
+                    return;
+                  }
+                  if (
+                    !window.confirm(
+                      `按 ${sk.steps?.length ?? 0} 步回放「${sk.name}」？\n会激活对应窗口并发送键鼠。`,
+                    )
+                  ) {
+                    return;
+                  }
+                  void api
+                    .replayHistorySkill(slot.slot_start)
+                    .then((msg) => window.alert(msg))
+                    .catch((err: unknown) =>
+                      window.alert(String(err ?? "回放失败")),
+                    );
                 }}
               >
                 CUA 回放 · {sk.name}
@@ -973,6 +989,8 @@ function formatCuaSkill(sk: {
     window?: string | null;
     target?: string | null;
     keys?: string | null;
+    rel_x?: number | null;
+    rel_y?: number | null;
     note?: string | null;
   }>;
 }): string {
@@ -989,8 +1007,12 @@ function formatCuaSkill(sk: {
       const win = st.window ? ` 「${st.window}」` : "";
       const tgt = st.target ? ` → ${st.target}` : "";
       const keys = st.keys ? ` [${st.keys}]` : "";
+      const rel =
+        st.rel_x != null && st.rel_y != null
+          ? ` @${st.rel_x.toFixed(2)},${st.rel_y.toFixed(2)}`
+          : "";
       const note = st.note ? ` (${st.note})` : "";
-      lines.push(`${i + 1}. ${st.action} ${st.app}${win}${tgt}${keys}${note}`);
+      lines.push(`${i + 1}. ${st.action} ${st.app}${win}${tgt}${rel}${keys}${note}`);
     });
   }
   lines.push("", sk.prompt, "");

@@ -301,6 +301,14 @@ fn sanitize_step(step: &SkillStepDto) -> Option<SkillStepDto> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string()),
+        role: step
+            .role
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        rel_x: step.rel_x.filter(|v| (0.0..=1.0).contains(v)),
+        rel_y: step.rel_y.filter(|v| (0.0..=1.0).contains(v)),
         note,
     })
 }
@@ -878,6 +886,9 @@ mod tests {
             window: Some(window.into()),
             target: None,
             keys: keys.map(|s| s.into()),
+            role: None,
+            rel_x: None,
+            rel_y: None,
             note: None,
         }
     }

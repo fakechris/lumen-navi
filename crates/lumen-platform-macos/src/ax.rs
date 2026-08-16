@@ -22,6 +22,8 @@ pub type AxError = i32;
 /// `AXValueType` is a CFIndex enum.
 pub type AxValueType = i64;
 
+pub const K_AX_VALUE_TYPE_CGPOINT: AxValueType = 1;
+pub const K_AX_VALUE_TYPE_CGSIZE: AxValueType = 2;
 pub const K_AX_VALUE_TYPE_CGRECT: AxValueType = 3;
 pub const K_AX_VALUE_TYPE_CF_RANGE: AxValueType = 4;
 
@@ -103,6 +105,46 @@ pub unsafe fn ax_string_attr(element: AxUIElementRef, name: &str) -> Option<Stri
     }
     let cf_str = core_foundation::string::CFString::wrap_under_create_rule(value as core_foundation::string::CFStringRef);
     Some(cf_str.to_string())
+}
+
+/// Read `AXPosition` / `AXSize` as a global point or size.
+///
+/// # Safety
+/// `element` must be a valid `AXUIElementRef`.
+pub unsafe fn ax_point_attr(element: AxUIElementRef, name: &str) -> Option<(f64, f64)> {
+    let value = ax_attr(element, name)?;
+    let _g = ReleaseGuard(value);
+    if AXValueGetType(value as AxValueRef) != K_AX_VALUE_TYPE_CGPOINT {
+        return None;
+    }
+    let mut pt = [0f64; 2];
+    if !AXValueGetValue(
+        value as AxValueRef,
+        K_AX_VALUE_TYPE_CGPOINT,
+        pt.as_mut_ptr() as *mut c_void,
+    ) {
+        return None;
+    }
+    Some((pt[0], pt[1]))
+}
+
+/// # Safety
+/// `element` must be a valid `AXUIElementRef`.
+pub unsafe fn ax_size_attr(element: AxUIElementRef, name: &str) -> Option<(f64, f64)> {
+    let value = ax_attr(element, name)?;
+    let _g = ReleaseGuard(value);
+    if AXValueGetType(value as AxValueRef) != K_AX_VALUE_TYPE_CGSIZE {
+        return None;
+    }
+    let mut sz = [0f64; 2];
+    if !AXValueGetValue(
+        value as AxValueRef,
+        K_AX_VALUE_TYPE_CGSIZE,
+        sz.as_mut_ptr() as *mut c_void,
+    ) {
+        return None;
+    }
+    Some((sz[0], sz[1]))
 }
 
 /// Read a non-string CFType attribute as a retained `CFTypeRef` (caller must
