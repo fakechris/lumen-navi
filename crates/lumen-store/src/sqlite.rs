@@ -2177,7 +2177,7 @@ impl SqliteStore {
         Ok(crate::scene::fold_scene_day(day, &segs))
     }
 
-    /// 10-minute History cards for a local day, newest slot first.
+    /// 15-minute History cards for a local day, newest slot first.
     /// Fresh fold of segments, then overlay any persisted slot narrative.
     pub fn list_history_slots(&self, day: &str) -> Result<Vec<HistorySlotDto>, StoreError> {
         let segs = self.list_activity_segments(day)?;
@@ -2197,7 +2197,7 @@ impl SqliteStore {
         Ok(slots)
     }
 
-    /// Persist closed 10-minute cards so agents can read them without
+    /// Persist closed 15-minute cards so agents can read them without
     /// rescanning every activity segment. The open slot is left to the query.
     /// An existing `ready` narrative is never overwritten by the fold.
     pub fn persist_closed_history_slots(&self) -> Result<usize, StoreError> {

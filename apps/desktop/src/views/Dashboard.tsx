@@ -236,7 +236,7 @@ export function DashboardView() {
             <Card pad={16}>
               <SectionHeader
                 title="今日回顾"
-                subtitle="每 10 分钟一张 · 按时长记 app，不是按按键次数"
+                subtitle="每 15 分钟一张 · 图标是这段出现过的 app · 按时长不是按次数"
               />
               <HistorySlotList slots={slots} />
             </Card>
@@ -838,6 +838,19 @@ function HourDistribution({ stats }: { stats: DayStats }) {
 }
 
 function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
+  const [icons, setIcons] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const ids = [
+      ...new Set(
+        slots.flatMap((s) =>
+          s.apps.map((a) => a.bundle_id).filter((id): id is string => !!id),
+        ),
+      ),
+    ];
+    if (ids.length === 0) return;
+    void api.appIcons(ids).then(setIcons).catch(() => {});
+  }, [slots]);
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       {slots.map((slot) => (
@@ -880,22 +893,55 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
             </div>
           )}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {slot.apps.map((app) => (
-              <span
-                key={`${app.bundle_id ?? app.app_name}`}
-                style={{
-                  fontSize: "var(--text-xs)",
-                  padding: "2px 8px",
-                  borderRadius: 999,
-                  border: "1px solid var(--border)",
-                  color: "var(--text-secondary)",
-                  background: "var(--surface-elevated, var(--surface))",
-                }}
-                title={fmtDuration(app.ms)}
-              >
-                {app.app_name}
-              </span>
-            ))}
+            {slot.apps.map((app) => {
+              const src = app.bundle_id ? icons[app.bundle_id] : undefined;
+              const letter = (app.app_name || "?").slice(0, 1);
+              return (
+                <span
+                  key={`${app.bundle_id ?? app.app_name}`}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 5,
+                    fontSize: "var(--text-xs)",
+                    padding: "2px 8px 2px 4px",
+                    borderRadius: 999,
+                    border: "1px solid var(--border)",
+                    color: "var(--text-secondary)",
+                    background: "var(--surface-elevated, var(--surface))",
+                  }}
+                  title={`${app.app_name} · ${fmtDuration(app.ms)}`}
+                >
+                  {src ? (
+                    <img
+                      src={src}
+                      width={16}
+                      height={16}
+                      alt=""
+                      style={{ borderRadius: 4, display: "block" }}
+                    />
+                  ) : (
+                    <span
+                      style={{
+                        width: 16,
+                        height: 16,
+                        borderRadius: 4,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: 10,
+                        fontWeight: 600,
+                        background: "var(--border)",
+                        color: "var(--text)",
+                      }}
+                    >
+                      {letter}
+                    </span>
+                  )}
+                  {app.app_name}
+                </span>
+              );
+            })}
           </div>
         </div>
       ))}

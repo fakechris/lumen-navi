@@ -273,7 +273,7 @@ Transport: Unix socket (`<data_dir>/daemon.sock`) for the desktop shell and `lum
 
 Agent surface (`lumen-daemon mcp`, stdio): `navi_status`, `navi_get_settings`, `navi_pause`, `navi_resume`, `navi_recent_context`, `navi_search`. No wipe and no Act tools on this server.
 
-Closed 10-minute History cards persist under `history.slot.*`. An optional local/OpenAI-compat narrative overlays title/body without blocking capture.
+Closed 15-minute History cards persist under `history.slot.*`. An optional local/OpenAI-compat narrative overlays title/body without blocking capture. App marks belong on these cards, not on the day roast. Suggested-skill chips are not implemented yet.
 
 ### Source style
 

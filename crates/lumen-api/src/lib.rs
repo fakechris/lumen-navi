@@ -490,7 +490,7 @@ pub struct ObserveSourcesDto {
     pub browser: bool,
 }
 
-/// One 10-minute History card (deterministic fold of activity segments).
+/// One 15-minute History card (deterministic fold of activity segments).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistorySlotDto {
     pub slot_start: DateTime<Utc>,

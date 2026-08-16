@@ -1,5 +1,6 @@
 //! Lumen Navi desktop shell — store browser + control + observe sidecar + tray.
 
+mod app_icon;
 mod asr_models;
 mod assistant;
 mod commands;
@@ -404,6 +405,7 @@ pub fn run() {
             commands::activity_segments,
             commands::activity_scenes,
             commands::activity_history_slots,
+            commands::app_icons,
             commands::day_roast_summary,
             commands::roast_day,
             commands::roast_list,
