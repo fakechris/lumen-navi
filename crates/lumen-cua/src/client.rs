@@ -7,7 +7,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::protocol::{
-    Command, RequestEnvelope, ResponseEnvelope, ResponseResult, MAX_HEADER_BYTES,
+    Command, InputStep, RequestEnvelope, ResponseEnvelope, ResponseResult, MAX_HEADER_BYTES,
     MAX_PAYLOAD_BYTES, PROTOCOL_VERSION,
 };
 use crate::CuaStatus;
@@ -172,8 +172,18 @@ impl CuaClient {
                     window_title: meta.window_title,
                     document_path: meta.document_path,
                     browser_url: meta.browser_url,
+                    hits: meta.hits,
+                    window_bounds: meta.window_bounds,
                 })
             }
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Run an explicit Act replay. Observe never calls this.
+    pub fn input_replay(&self, steps: Vec<InputStep>) -> Result<(), CuaError> {
+        match self.call(Command::InputReplay { steps })?.0 {
+            ResponseResult::Ack => Ok(()),
             other => Err(unexpected(other)),
         }
     }

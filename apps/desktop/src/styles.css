@@ -439,3 +439,20 @@ input[type="password"]:focus {
   background: var(--danger, #e5484d);
 }
 .cal-day.sel .cal-dot { background: #fff; }
+
+.skill-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px dashed var(--border-strong, var(--border));
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  padding: 2px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.skill-chip:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}

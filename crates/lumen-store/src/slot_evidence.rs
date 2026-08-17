@@ -10,7 +10,9 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use lumen_api::HistorySlotDto;
+use lumen_api::{HistorySlotDto, SkillStepDto, SuggestedSkillDto};
+
+use crate::slot_actions::SlotActionTrace;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -189,6 +191,158 @@ pub fn apply_slot_evidence(slot: &mut HistorySlotDto, ev: &SlotEvidence) {
     if slot.narrative_status != "pending" {
         slot.narrative_status = "extracted".into();
     }
+}
+
+/// Cheap gate before asking the model for a CUA-replay chip.
+///
+/// Need a real HID sequence (focus + clicks/shortcuts), not just reading
+/// a page. Messaging-only stretches stay chip-less.
+pub fn slot_may_hold_skill(
+    slot: &HistorySlotDto,
+    ev: &SlotEvidence,
+    actions: &SlotActionTrace,
+) -> bool {
+    if slot.active_ms < 2 * 60_000 {
+        return false;
+    }
+    let hid_enough = actions.folded.len() >= 3 || actions.clicks >= 4 || actions.submits >= 2;
+    if !hid_enough {
+        return false;
+    }
+    let apps: Vec<&str> = ev
+        .apps
+        .iter()
+        .map(|a| a.app.as_str())
+        .chain(slot.apps.iter().map(|a| a.app_name.as_str()))
+        .chain(actions.folded.iter().map(|a| a.app.as_str()))
+        .collect();
+    if !apps.is_empty() && apps.iter().all(|a| is_messaging_app(a)) {
+        return false;
+    }
+    true
+}
+
+/// Keep a model suggestion only when it is a CUA-replayable step list.
+pub fn sanitize_suggested_skill(raw: &SuggestedSkillDto) -> Option<SuggestedSkillDto> {
+    let name = strip_skill_suffix(raw.name.trim());
+    let trigger = raw.trigger.trim();
+    let prompt = raw.prompt.trim();
+    let verify = raw.verify.trim();
+    let n = name.chars().count();
+    if !(2..=24).contains(&n) {
+        return None;
+    }
+    if trigger.chars().count() < 6 || prompt.chars().count() < 8 {
+        return None;
+    }
+    if looks_secret(trigger) || looks_secret(prompt) || looks_secret(&name) || looks_secret(verify)
+    {
+        return None;
+    }
+    let steps: Vec<SkillStepDto> = raw
+        .steps
+        .iter()
+        .filter_map(sanitize_step)
+        .take(8)
+        .collect();
+    if steps.len() < 2 {
+        return None;
+    }
+    Some(SuggestedSkillDto {
+        kind: "cua".into(),
+        name,
+        trigger: trigger.to_string(),
+        prompt: prompt.to_string(),
+        verify: verify.to_string(),
+        steps,
+    })
+}
+
+fn sanitize_step(step: &SkillStepDto) -> Option<SkillStepDto> {
+    let action = step.action.trim();
+    if !matches!(
+        action,
+        "focus" | "click" | "shortcut" | "submit" | "type" | "context_menu" | "drag"
+    ) {
+        return None;
+    }
+    let app = step.app.trim();
+    if app.is_empty() {
+        return None;
+    }
+    if action == "shortcut" && step.keys.as_deref().unwrap_or("").trim().is_empty() {
+        return None;
+    }
+    let target = step
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !looks_secret(s))
+        .map(|s| s.to_string());
+    let note = step
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !looks_secret(s))
+        .map(|s| s.to_string());
+    Some(SkillStepDto {
+        action: action.to_string(),
+        app: app.to_string(),
+        window: step
+            .window
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        target,
+        keys: step
+            .keys
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        role: step
+            .role
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        rel_x: step.rel_x.filter(|v| (0.0..=1.0).contains(v)),
+        rel_y: step.rel_y.filter(|v| (0.0..=1.0).contains(v)),
+        note,
+    })
+}
+
+fn strip_skill_suffix(name: &str) -> String {
+    let t = name
+        .trim()
+        .trim_end_matches(" skill")
+        .trim_end_matches(" Skill")
+        .trim_end_matches("技能")
+        .trim_end_matches("自动化")
+        .trim();
+    t.to_string()
+}
+
+fn is_messaging_app(name: &str) -> bool {
+    matches!(
+        name,
+        "Feishu"
+            | "飞书"
+            | "DingTalk"
+            | "钉钉"
+            | "WeChat"
+            | "微信"
+            | "Slack"
+            | "Mail"
+            | "Mail.app"
+            | "Microsoft Outlook"
+            | "Outlook"
+            | "Messages"
+            | "信息"
+            | "Telegram"
+            | "Discord"
+    )
 }
 
 fn evidence_title(ev: &SlotEvidence, slot: &HistorySlotDto) -> Option<String> {
@@ -533,7 +687,8 @@ pub fn parse_derived_doc(payload: &Value, kind: &str, body: &str) -> Option<Deri
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use lumen_api::{HistorySlotAppDto, HistorySlotDto};
+    use crate::slot_actions::{fold_slot_actions, InteractionHit};
+    use lumen_api::{HistorySlotAppDto, HistorySlotDto, SkillStepDto, SuggestedSkillDto};
 
     fn doc(app: &str, kind: &str, title: &str, text: &str) -> DerivedDoc {
         DerivedDoc {
@@ -621,6 +776,8 @@ mod tests {
             urls: vec![],
             active_ms: 391_000,
             narrative_status: "none".into(),
+            suggested_skills: vec![],
+            skill_checked: false,
         };
         let ev = compress_slot_docs(&[doc(
             "Ghostty",
@@ -639,5 +796,142 @@ mod tests {
         apply_slot_evidence(&mut slot, &ev);
         assert_eq!(slot.title, "Wrote the PR");
         assert_eq!(slot.body, "done");
+    }
+
+    #[test]
+    fn messaging_only_stretch_is_not_a_skill_candidate() {
+        let start = Utc.with_ymd_and_hms(2026, 8, 16, 11, 15, 0).unwrap();
+        let slot = HistorySlotDto {
+            slot_start: start,
+            slot_end: start + chrono::Duration::minutes(15),
+            title: "飞书".into(),
+            body: "看群".into(),
+            apps: vec![HistorySlotAppDto {
+                app_name: "Feishu".into(),
+                bundle_id: None,
+                ms: 9 * 60_000,
+                pct: 100.0,
+            }],
+            scenes: vec![],
+            titles: vec![],
+            urls: vec![],
+            active_ms: 9 * 60_000,
+            narrative_status: "none".into(),
+            suggested_skills: vec![],
+            skill_checked: false,
+        };
+        let ev = compress_slot_docs(&[doc(
+            "Feishu",
+            "ax.v1",
+            "飞书",
+            "GLM Coding 用户交流群\n又回到熟悉的M3老师了",
+        )]);
+        let actions = fold_slot_actions(&[hit("mouse.click.v1", "Feishu", "飞书")]);
+        assert!(!slot_may_hold_skill(&slot, &ev, &actions));
+    }
+
+    #[test]
+    fn harness_stretch_is_a_skill_candidate() {
+        let start = Utc.with_ymd_and_hms(2026, 8, 16, 11, 15, 0).unwrap();
+        let slot = HistorySlotDto {
+            slot_start: start,
+            slot_end: start + chrono::Duration::minutes(15),
+            title: "Harness".into(),
+            body: "任务转派".into(),
+            apps: vec![HistorySlotAppDto {
+                app_name: "Safari".into(),
+                bundle_id: None,
+                ms: 9 * 60_000,
+                pct: 100.0,
+            }],
+            scenes: vec![],
+            titles: vec![],
+            urls: vec![],
+            active_ms: 9 * 60_000,
+            narrative_status: "none".into(),
+            suggested_skills: vec![],
+            skill_checked: false,
+        };
+        let ev = compress_slot_docs(&[doc(
+            "Safari",
+            "ocr.v1",
+            "DeepSeek Harness",
+            "任务转派与历史状态清理机制\n为右侧条目添加跳转链接",
+        )]);
+        let actions = fold_slot_actions(&[
+            hit("mouse.click.v1", "Safari", "Harness"),
+            hit("mouse.click.v1", "Safari", "Harness"),
+            hit("keyboard.submit.v1", "Safari", "Harness"),
+        ]);
+        assert!(slot_may_hold_skill(&slot, &ev, &actions));
+    }
+
+    fn hit(kind: &str, app: &str, window: &str) -> InteractionHit {
+        InteractionHit {
+            kind: kind.into(),
+            app: app.into(),
+            bundle_id: String::new(),
+            window: window.into(),
+            url: String::new(),
+            keys: None,
+            x: None,
+            y: None,
+        }
+    }
+
+    fn step(action: &str, app: &str, window: &str, keys: Option<&str>) -> SkillStepDto {
+        SkillStepDto {
+            action: action.into(),
+            app: app.into(),
+            window: Some(window.into()),
+            target: None,
+            keys: keys.map(|s| s.into()),
+            role: None,
+            rel_x: None,
+            rel_y: None,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn sanitize_drops_empty_and_secret_skills() {
+        assert!(sanitize_suggested_skill(&SuggestedSkillDto {
+            kind: "cua".into(),
+            name: "x".into(),
+            trigger: "too".into(),
+            prompt: "short".into(),
+            verify: String::new(),
+            steps: vec![],
+        })
+        .is_none());
+        assert!(sanitize_suggested_skill(&SuggestedSkillDto {
+            kind: "cua".into(),
+            name: "Deploy".into(),
+            trigger: "when shipping".into(),
+            prompt: "use api_key=sk-abc123456789 please".into(),
+            verify: String::new(),
+            steps: vec![
+                step("focus", "Safari", "Harness", None),
+                step("click", "Safari", "Harness", None),
+            ],
+        })
+        .is_none());
+        let ok = sanitize_suggested_skill(&SuggestedSkillDto {
+            kind: "automation".into(),
+            name: "Harness 任务转派复查 skill".into(),
+            trigger: "下次改 TaskHistory 清理逻辑时".into(),
+            prompt: "帮我在 Harness 窗口里对照失败测试点开任务转派。".into(),
+            verify: "失败列表与上次一致".into(),
+            steps: vec![
+                step("focus", "Safari", "DeepSeek Harness", None),
+                step("click", "Safari", "DeepSeek Harness", None),
+                step("submit", "Safari", "DeepSeek Harness", Some("return")),
+            ],
+        })
+        .unwrap();
+        assert_eq!(ok.kind, "cua");
+        assert_eq!(ok.name, "Harness 任务转派复查");
+        assert_eq!(ok.steps.len(), 3);
+        assert_eq!(ok.steps[0].action, "focus");
     }
 }

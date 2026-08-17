@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use lumen_api::{
     AiMessageDto, AiThreadDto, EventSummary, HealthResponse, OcrSearchHitDto, RoastIndexDto,
     RoastRecordDto, SourceStatus, API_VERSION,
@@ -505,6 +505,75 @@ pub fn activity_history_slots(
     day: String,
 ) -> Result<Vec<lumen_api::HistorySlotDto>, String> {
     state.store.list_history_slots(&day).map_err(err)
+}
+
+/// Explicit Act: replay the first suggested skill on a History card once.
+/// Observe never calls this.
+#[tauri::command]
+pub fn replay_history_skill(
+    state: State<'_, AppState>,
+    slot_start: String,
+) -> Result<String, String> {
+    let start = chrono::DateTime::parse_from_rfc3339(&slot_start)
+        .or_else(|_| chrono::DateTime::parse_from_rfc3339(&slot_start.replace('Z', "+00:00")))
+        .map_err(|e| format!("bad slot_start: {e}"))?
+        .with_timezone(&chrono::Utc);
+    let day = start
+        .with_timezone(&Local)
+        .format("%Y-%m-%d")
+        .to_string();
+    let slots = state.store.list_history_slots(&day).map_err(err)?;
+    let slot = slots
+        .into_iter()
+        .find(|s| s.slot_start == start)
+        .ok_or_else(|| "找不到这张 15 分钟卡".to_string())?;
+    let skill = slot
+        .suggested_skills
+        .first()
+        .cloned()
+        .ok_or_else(|| "这张卡没有可回放的 skill".to_string())?;
+    if skill.steps.len() < 2 {
+        return Err("步骤太少，无法回放".into());
+    }
+    let mut ops = Vec::new();
+    for step in &skill.steps {
+        let bundle = step_bundle(&slot, step);
+        ops.push(lumen_cua::InputStep {
+            action: step.action.clone(),
+            bundle_id: bundle,
+            window: step.window.clone(),
+            target: step.target.clone(),
+            keys: step.keys.clone().or_else(|| {
+                if step.action == "submit" {
+                    Some("return".into())
+                } else {
+                    None
+                }
+            }),
+            nx: step.rel_x,
+            ny: step.rel_y,
+            wait_ms: Some(200),
+        });
+    }
+    let n = ops.len();
+    state
+        .cua
+        .ensure_running()
+        .map_err(err)?
+        .input_replay(ops)
+        .map_err(|e| format!("CUA 回放失败: {e}"))?;
+    Ok(format!("已回放 {n} 步「{}」", skill.name))
+}
+
+fn step_bundle(
+    slot: &lumen_api::HistorySlotDto,
+    step: &lumen_api::SkillStepDto,
+) -> Option<String> {
+    slot.apps
+        .iter()
+        .find(|a| a.app_name == step.app)
+        .and_then(|a| a.bundle_id.clone())
+        .filter(|s| !s.is_empty())
 }
 
 /// Bundle-id → 64px PNG data URL for History app marks. Missing apps omitted.

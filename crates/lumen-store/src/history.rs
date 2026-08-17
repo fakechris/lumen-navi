@@ -157,6 +157,8 @@ fn finish_slot(start: DateTime<Utc>, acc: SlotAcc) -> HistorySlotDto {
         urls,
         active_ms: acc.active_ms,
         narrative_status: "none".into(),
+        suggested_skills: Vec::new(),
+        skill_checked: false,
     }
 }
 
@@ -175,6 +177,8 @@ pub fn overlay_slot_narrative(slot: &mut HistorySlotDto, persisted: &HistorySlot
             slot.title = persisted.title.clone();
             slot.body = persisted.body.clone();
             slot.narrative_status = persisted.narrative_status.clone();
+            slot.suggested_skills = persisted.suggested_skills.clone();
+            slot.skill_checked = persisted.skill_checked;
         }
         "pending" | "failed" => {
             slot.narrative_status = persisted.narrative_status.clone();
@@ -368,10 +372,20 @@ mod tests {
         persisted.title = "Wrote the PR".into();
         persisted.body = "Safari for ten minutes on Inbox.".into();
         persisted.narrative_status = "ready".into();
+        persisted.suggested_skills = vec![lumen_api::SuggestedSkillDto {
+            kind: "cua".into(),
+            name: "Inbox triage".into(),
+            trigger: "下次清邮件时".into(),
+            prompt: "帮我按上次的规则清 Inbox。".into(),
+            verify: String::new(),
+            steps: vec![],
+        }];
         overlay_slot_narrative(&mut slot, &persisted);
         assert_eq!(slot.title, "Wrote the PR");
         assert_eq!(slot.body, "Safari for ten minutes on Inbox.");
         assert_eq!(slot.narrative_status, "ready");
+        assert_eq!(slot.suggested_skills.len(), 1);
+        assert_eq!(slot.suggested_skills[0].name, "Inbox triage");
     }
 
     #[test]

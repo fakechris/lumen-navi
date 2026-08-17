@@ -25,8 +25,9 @@ uuid = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 lumen-platform-macos = { workspace = true }
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3", features = ["NSArray", "NSError"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSRunningApplication", "NSWorkspace", "NSApplication"] }
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSError", "NSString"] }
+core-foundation-sys = "0.8"
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "SCShareableContent",

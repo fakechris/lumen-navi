@@ -267,8 +267,14 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
                 window_title: snapshot.window_title,
                 document_path: snapshot.document_path,
                 browser_url: snapshot.browser_url,
+                hits: snapshot.hits,
+                window_bounds: snapshot.window_bounds,
             };
             Ok((ResponseResult::AxSnapshot { meta }, text_bytes))
+        }
+        Command::InputReplay { steps } => {
+            crate::input::replay(&steps)?;
+            Ok((ResponseResult::Ack, Vec::new()))
         }
     }
 }

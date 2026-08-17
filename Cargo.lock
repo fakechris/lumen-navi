@@ -2194,6 +2194,7 @@ dependencies = [
  "async-trait",
  "block2",
  "core-foundation",
+ "core-foundation-sys",
  "libc",
  "lumen-platform",
  "lumen-platform-macos",

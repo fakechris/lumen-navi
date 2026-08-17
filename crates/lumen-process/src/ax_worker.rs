@@ -301,6 +301,8 @@ fn ax_body_json(snapshot: &AxTreeSnapshot, event_id: &str, window_id: Option<u64
         "window_id": window_id,
         "desynced": false,
         "event_id": event_id,
+        "hits": snapshot.hits,
+        "window_bounds": snapshot.window_bounds,
     })
     .to_string()
 }

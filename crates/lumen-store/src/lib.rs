@@ -11,6 +11,7 @@ mod pixel_hash;
 mod rule_engine;
 mod scene;
 mod schema;
+mod slot_actions;
 mod slot_evidence;
 mod sqlite;
 
@@ -37,9 +38,13 @@ pub use history::{fold_history_slots, history_slot_key, overlay_slot_narrative};
 pub use pixel_hash::PixelHashWindow;
 pub use scene::fold_scene_day;
 pub use schema::SCHEMA_VERSION;
+pub use slot_actions::{
+    fold_slot_actions, fold_slot_actions_with_ax, parse_ax_hit_set, parse_interaction_hit,
+    steps_from_actions, AxHitSet, InteractionHit, SlotActionTrace,
+};
 pub use slot_evidence::{
-    apply_slot_evidence, compress_slot_docs, parse_derived_doc, DerivedDoc, SlotAppEvidence,
-    SlotEvidence,
+    apply_slot_evidence, compress_slot_docs, parse_derived_doc, sanitize_suggested_skill,
+    slot_may_hold_skill, DerivedDoc, SlotAppEvidence, SlotEvidence,
 };
 pub use sqlite::{
     ArtifactInput, BlobLimitedAppendOutcome, BrowserVisitProjection, CursorEvent,

@@ -54,6 +54,28 @@ export interface HistorySlot {
   urls: string[];
   active_ms: number;
   narrative_status?: string;
+  suggested_skills?: SuggestedSkill[];
+}
+
+export interface SuggestedSkill {
+  kind?: string;
+  name: string;
+  trigger: string;
+  prompt: string;
+  verify?: string;
+  steps?: SkillStep[];
+}
+
+export interface SkillStep {
+  action: string;
+  app: string;
+  window?: string | null;
+  target?: string | null;
+  keys?: string | null;
+  role?: string | null;
+  rel_x?: number | null;
+  rel_y?: number | null;
+  note?: string | null;
 }
 
 export interface ActivitySegment {

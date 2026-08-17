@@ -2293,6 +2293,73 @@ impl SqliteStore {
         Ok(crate::compress_slot_docs(&docs))
     }
 
+    /// HID clicks / shortcuts / submits in one wall-clock slot, folded
+    /// into a CUA-shaped trace. Capture is not involved.
+    pub fn extract_slot_actions(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<crate::SlotActionTrace, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let start_s = start.to_rfc3339();
+        let end_s = end.to_rfc3339();
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT kind, payload FROM events
+                   WHERE ts >= ?1 AND ts < ?2
+                     AND kind IN (
+                       'mouse.click.v1','mouse.context_menu.v1','mouse.drag.v1',
+                       'keyboard.shortcut.v1','keyboard.submit.v1','keyboard.text_input.v1'
+                     )
+                   ORDER BY ts ASC"#,
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map(params![start_s, end_s], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(StoreError::db)?;
+        let mut hits = Vec::new();
+        for row in rows {
+            let (kind, payload) = row.map_err(StoreError::db)?;
+            let payload_v: serde_json::Value =
+                serde_json::from_str(&payload).unwrap_or(serde_json::json!({}));
+            hits.push(crate::parse_interaction_hit(&kind, &payload_v));
+        }
+        drop(stmt);
+        let mut ax = crate::AxHitSet::default();
+        if let Ok(mut astmt) = conn.prepare(
+            r#"SELECT d.body FROM events e
+               JOIN derived d ON d.event_id = e.id
+               WHERE e.kind = 'screenshot.v1'
+                 AND e.ts >= ?1 AND e.ts < ?2
+                 AND d.kind = 'ax.v1'
+               ORDER BY e.ts DESC
+               LIMIT 8"#,
+        ) {
+            if let Ok(arows) = astmt.query_map(params![start_s, end_s], |row| row.get::<_, String>(0))
+            {
+                for row in arows.flatten() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&row) {
+                        let next = crate::parse_ax_hit_set(&v);
+                        if ax.hits.is_empty() && !next.hits.is_empty() {
+                            ax = next;
+                        } else {
+                            ax.hits.extend(next.hits);
+                            if ax.window.is_none() {
+                                ax.window = next.window;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(crate::fold_slot_actions_with_ax(&hits, &ax))
+    }
+
     /// Closed cards that still need an LLM narrative (`none` or `failed`).
     pub fn list_closed_slots_needing_narrative(
         &self,
@@ -2312,6 +2379,23 @@ impl SqliteStore {
             .collect())
     }
 
+    /// Closed `ready` cards that have not yet been skill-checked.
+    pub fn list_ready_slots_missing_skill(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<HistorySlotDto>, StoreError> {
+        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let now = Utc::now();
+        Ok(self
+            .list_history_slots(&day)?
+            .into_iter()
+            .filter(|s| {
+                s.slot_end <= now && s.narrative_status == "ready" && !s.skill_checked
+            })
+            .take(limit.max(1))
+            .collect())
+    }
+
     /// Write title/body/status onto an already-persisted History card.
     pub fn apply_slot_narrative(
         &self,
@@ -2319,6 +2403,7 @@ impl SqliteStore {
         title: &str,
         body: &str,
         status: &str,
+        skills: Option<&[lumen_api::SuggestedSkillDto]>,
     ) -> Result<(), StoreError> {
         let key = crate::history_slot_key(slot_start);
         let conn = self
@@ -2334,6 +2419,10 @@ impl SqliteStore {
         slot.title = title.to_string();
         slot.body = body.to_string();
         slot.narrative_status = status.to_string();
+        if let Some(skills) = skills {
+            slot.suggested_skills = skills.to_vec();
+            slot.skill_checked = true;
+        }
         kv_set(
             &conn,
             &key,
@@ -5218,7 +5307,13 @@ mod tests {
             .cloned()
             .expect("closed slot");
         store
-            .apply_slot_narrative(slot.slot_start, "Wrote the PR", "Safari on Inbox.", "ready")
+            .apply_slot_narrative(
+                slot.slot_start,
+                "Wrote the PR",
+                "Safari on Inbox.",
+                "ready",
+                None,
+            )
             .unwrap();
         store.persist_closed_history_slots().unwrap();
         let again = store.list_history_slots(&day).unwrap();
@@ -5231,6 +5326,19 @@ mod tests {
         assert_eq!(kept.narrative_status, "ready");
         let pending = store.list_closed_slots_needing_narrative(8).unwrap();
         assert!(pending.iter().all(|s| s.slot_start != slot.slot_start));
+        let missing = store.list_ready_slots_missing_skill(8).unwrap();
+        assert!(missing.iter().any(|s| s.slot_start == slot.slot_start));
+        store
+            .apply_slot_narrative(
+                slot.slot_start,
+                "Wrote the PR",
+                "Safari on Inbox.",
+                "ready",
+                Some(&[]),
+            )
+            .unwrap();
+        let missing = store.list_ready_slots_missing_skill(8).unwrap();
+        assert!(missing.iter().all(|s| s.slot_start != slot.slot_start));
     }
 
     #[test]

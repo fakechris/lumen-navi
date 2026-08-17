@@ -16,12 +16,12 @@
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
-use lumen_platform::{AxTreeSnapshot, AxTreeWalkConfig, PlatformError};
+use lumen_platform::{AxHit, AxTreeSnapshot, AxTreeWalkConfig, PlatformError};
 
 use crate::ax::{
-    ensure_enhanced_ax_for_pid, ax_string_attr, AxError, AxUIElementRef, ReleaseGuard,
-    AXUIElementCopyAttributeValue, AXUIElementCreateApplication, AXUIElementSetMessagingTimeout,
-    _AXUIElementGetWindow,
+    ax_point_attr, ax_size_attr, ax_string_attr, ensure_enhanced_ax_for_pid, AxError,
+    AxUIElementRef, ReleaseGuard, AXUIElementCopyAttributeValue, AXUIElementCreateApplication,
+    AXUIElementSetMessagingTimeout, _AXUIElementGetWindow,
 };
 
 /// kAXErrorSuccess
@@ -260,6 +260,8 @@ unsafe fn walk_window_inner(
             window_title: None,
             document_path: None,
             browser_url: None,
+            hits: Vec::new(),
+            window_bounds: None,
         });
     }
     let _win_guard = ReleaseGuard(window as *const c_void);
@@ -272,12 +274,14 @@ unsafe fn walk_window_inner(
         .filter(|s| !s.is_empty())
         .map(decode_file_url);
 
+    let window_bounds = ax_frame(window);
     let mut walker = Walker {
         config,
         start,
         node_count: 0usize,
         truncated: false,
         text: String::with_capacity(8192),
+        hits: Vec::new(),
     };
 
     tracing::debug!(pid, "walk_inner: starting walk_element");
@@ -298,6 +302,8 @@ unsafe fn walk_window_inner(
         window_title,
         document_path,
         browser_url: None, // iteration 2: AXWebArea→AXURL
+        hits: walker.hits,
+        window_bounds,
     })
 }
 
@@ -309,6 +315,7 @@ struct Walker<'a> {
     node_count: usize,
     truncated: bool,
     text: String,
+    hits: Vec<AxHit>,
 }
 
 #[cfg(target_os = "macos")]
@@ -347,13 +354,27 @@ impl<'a> Walker<'a> {
         // Extract text from this node if its role warrants it.
         if should_extract_text(&role) {
             // Try AXTitle first, then AXValue, then AXDescription.
+            let mut title = None;
             for attr in &["AXTitle", "AXValue", "AXDescription"] {
                 if let Some(t) = ax_string_attr(element, attr) {
                     let trimmed = t.trim();
                     if !trimmed.is_empty() {
                         self.push_text(trimmed);
+                        title = Some(trimmed.to_string());
                         break;
                     }
+                }
+            }
+            if let (Some(title), Some(frame)) = (title, ax_frame(element)) {
+                if self.hits.len() < 80 && frame.w >= 2.0 && frame.h >= 2.0 {
+                    self.hits.push(AxHit {
+                        role: role.clone(),
+                        title: title.chars().take(80).collect(),
+                        x: frame.x,
+                        y: frame.y,
+                        w: frame.w,
+                        h: frame.h,
+                    });
                 }
             }
         }
@@ -386,6 +407,21 @@ impl<'a> Walker<'a> {
         } else {
             self.text.push_str(s);
         }
+    }
+}
+
+fn ax_frame(element: AxUIElementRef) -> Option<AxHit> {
+    unsafe {
+        let (x, y) = ax_point_attr(element, "AXPosition")?;
+        let (w, h) = ax_size_attr(element, "AXSize")?;
+        Some(AxHit {
+            role: String::new(),
+            title: String::new(),
+            x,
+            y,
+            w,
+            h,
+        })
     }
 }
 

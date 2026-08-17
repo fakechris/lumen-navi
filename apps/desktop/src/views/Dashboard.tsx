@@ -892,7 +892,7 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
               {slot.body}
             </div>
           )}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
             {slot.apps.map((app) => {
               const src = app.bundle_id ? icons[app.bundle_id] : undefined;
               const letter = (app.app_name || "?").slice(0, 1);
@@ -942,11 +942,81 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
                 </span>
               );
             })}
+            {(slot.suggested_skills ?? []).map((sk) => (
+              <button
+                key={sk.name}
+                type="button"
+                className="skill-chip"
+                title="点击回放一次（先聚焦窗口再键鼠）。Shift+点击只复制草稿。"
+                onClick={(e) => {
+                  if (e.shiftKey) {
+                    void navigator.clipboard.writeText(formatCuaSkill(sk));
+                    return;
+                  }
+                  if (
+                    !window.confirm(
+                      `按 ${sk.steps?.length ?? 0} 步回放「${sk.name}」？\n会激活对应窗口并发送键鼠。`,
+                    )
+                  ) {
+                    return;
+                  }
+                  void api
+                    .replayHistorySkill(slot.slot_start)
+                    .then((msg) => window.alert(msg))
+                    .catch((err: unknown) =>
+                      window.alert(String(err ?? "回放失败")),
+                    );
+                }}
+              >
+                CUA 回放 · {sk.name}
+              </button>
+            ))}
           </div>
         </div>
       ))}
     </div>
   );
+}
+
+function formatCuaSkill(sk: {
+  name: string;
+  trigger: string;
+  prompt: string;
+  verify?: string;
+  steps?: Array<{
+    action: string;
+    app: string;
+    window?: string | null;
+    target?: string | null;
+    keys?: string | null;
+    rel_x?: number | null;
+    rel_y?: number | null;
+    note?: string | null;
+  }>;
+}): string {
+  const lines = [`# ${sk.name}`, "", `何时再用：${sk.trigger}`, ""];
+  if (sk.verify) {
+    lines.push(`验收：${sk.verify}`, "");
+  }
+  lines.push("CUA 步骤：");
+  const steps = sk.steps ?? [];
+  if (steps.length === 0) {
+    lines.push("- （无步骤）");
+  } else {
+    steps.forEach((st, i) => {
+      const win = st.window ? ` 「${st.window}」` : "";
+      const tgt = st.target ? ` → ${st.target}` : "";
+      const keys = st.keys ? ` [${st.keys}]` : "";
+      const rel =
+        st.rel_x != null && st.rel_y != null
+          ? ` @${st.rel_x.toFixed(2)},${st.rel_y.toFixed(2)}`
+          : "";
+      const note = st.note ? ` (${st.note})` : "";
+      lines.push(`${i + 1}. ${st.action} ${st.app}${win}${tgt}${rel}${keys}${note}`);
+    });
+  }
+  lines.push("", sk.prompt, "");
+  return lines.join("\n");
 }
 
 function SceneRanking({ scenes }: { scenes: SceneDay | null }) {

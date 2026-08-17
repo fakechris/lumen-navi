@@ -44,6 +44,29 @@ pub(crate) enum Command {
         element_timeout_ms: u64,
         max_text_length: usize,
     },
+    /// Explicit Act: run a short keyboard/mouse replay. Observe never sends this.
+    InputReplay {
+        steps: Vec<InputStep>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputStep {
+    pub action: String,
+    #[serde(default)]
+    pub bundle_id: Option<String>,
+    #[serde(default)]
+    pub window: Option<String>,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub keys: Option<String>,
+    #[serde(default)]
+    pub nx: Option<f64>,
+    #[serde(default)]
+    pub ny: Option<f64>,
+    #[serde(default)]
+    pub wait_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +157,10 @@ pub(crate) struct AxSnapshotMeta {
     pub window_title: Option<String>,
     pub document_path: Option<String>,
     pub browser_url: Option<String>,
+    #[serde(default)]
+    pub hits: Vec<lumen_platform::AxHit>,
+    #[serde(default)]
+    pub window_bounds: Option<lumen_platform::AxHit>,
 }
 
 impl ResponseEnvelope {

@@ -504,6 +504,60 @@ pub struct HistorySlotDto {
     pub active_ms: i64,
     #[serde(default)]
     pub narrative_status: String,
+    /// Optional reusable-workflow chips. Empty on most cards.
+    #[serde(default)]
+    pub suggested_skills: Vec<SuggestedSkillDto>,
+    /// True after the slot job decided whether a chip belongs here.
+    #[serde(default)]
+    pub skill_checked: bool,
+}
+
+/// A CUA-replayable draft: focus windows, then keyboard/mouse steps.
+/// Observe never runs these steps.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SuggestedSkillDto {
+    /// `cua` — a replay draft. Not a scheduled automation.
+    #[serde(default = "default_skill_kind")]
+    pub kind: String,
+    pub name: String,
+    /// When to reuse this (user-facing).
+    pub trigger: String,
+    /// First-person instruction an agent can follow.
+    pub prompt: String,
+    /// How a replay knows it succeeded.
+    #[serde(default)]
+    pub verify: String,
+    /// Ordered CUA steps. Empty means the suggestion is not replayable.
+    #[serde(default)]
+    pub steps: Vec<SkillStepDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillStepDto {
+    /// `focus` | `click` | `shortcut` | `submit` | `type` | `context_menu` | `drag`
+    pub action: String,
+    pub app: String,
+    #[serde(default)]
+    pub window: Option<String>,
+    /// AX / title hint. Preferred over pixels.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// e.g. `command+s`. Required for `shortcut`.
+    #[serde(default)]
+    pub keys: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Relative position inside the window (0–1). Preferred over pixels.
+    #[serde(default)]
+    pub rel_x: Option<f64>,
+    #[serde(default)]
+    pub rel_y: Option<f64>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+fn default_skill_kind() -> String {
+    "cua".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
