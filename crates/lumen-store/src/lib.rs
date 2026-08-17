@@ -41,8 +41,9 @@ pub use pixel_hash::PixelHashWindow;
 pub use scene::fold_scene_day;
 pub use schema::SCHEMA_VERSION;
 pub use slot_actions::{
-    fold_slot_actions, fold_slot_actions_with_ax, parse_ax_hit_set, parse_interaction_hit,
-    steps_from_actions, AxHitSet, InteractionHit, SlotActionTrace,
+    fold_slot_actions, fold_slot_actions_with_ax, fold_slot_actions_with_snapshots,
+    is_messaging_app, parse_ax_hit_set, parse_ax_snapshot, parse_interaction_hit,
+    steps_from_actions, AxHitSet, AxSnapshot, InteractionHit, SlotActionTrace,
 };
 pub use slot_evidence::{
     apply_slot_evidence, compress_slot_docs, parse_derived_doc, sanitize_suggested_skill,

@@ -239,12 +239,7 @@ pub fn sanitize_suggested_skill(raw: &SuggestedSkillDto) -> Option<SuggestedSkil
     {
         return None;
     }
-    let steps: Vec<SkillStepDto> = raw
-        .steps
-        .iter()
-        .filter_map(sanitize_step)
-        .take(8)
-        .collect();
+    let steps: Vec<SkillStepDto> = raw.steps.iter().filter_map(sanitize_step).take(8).collect();
     if steps.len() < 2 {
         return None;
     }
@@ -325,24 +320,7 @@ fn strip_skill_suffix(name: &str) -> String {
 }
 
 fn is_messaging_app(name: &str) -> bool {
-    matches!(
-        name,
-        "Feishu"
-            | "飞书"
-            | "DingTalk"
-            | "钉钉"
-            | "WeChat"
-            | "微信"
-            | "Slack"
-            | "Mail"
-            | "Mail.app"
-            | "Microsoft Outlook"
-            | "Outlook"
-            | "Messages"
-            | "信息"
-            | "Telegram"
-            | "Discord"
-    )
+    crate::slot_actions::is_messaging_app(name)
 }
 
 fn evidence_title(ev: &SlotEvidence, slot: &HistorySlotDto) -> Option<String> {
@@ -686,8 +664,8 @@ pub fn parse_derived_doc(payload: &Value, kind: &str, body: &str) -> Option<Deri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
     use crate::slot_actions::{fold_slot_actions, InteractionHit};
+    use chrono::{TimeZone, Utc};
     use lumen_api::{HistorySlotAppDto, HistorySlotDto, SkillStepDto, SuggestedSkillDto};
 
     fn doc(app: &str, kind: &str, title: &str, text: &str) -> DerivedDoc {
@@ -876,6 +854,7 @@ mod tests {
             keys: None,
             x: None,
             y: None,
+            ts_ms: None,
         }
     }
 
