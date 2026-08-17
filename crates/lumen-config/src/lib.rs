@@ -683,6 +683,7 @@ mod tests {
         assert!(c.sources.audio);
         assert_eq!(c.audio.sample_rate, 16_000);
         assert_eq!(c.audio.chunk_ms, 3_000);
+        assert!(c.audio.device.is_empty());
         assert_eq!(c.audio.session_silence_ms, 1_200);
         assert_eq!(c.audio.max_session_ms, 600_000);
         assert!(c.audio.enqueue_transcribe);
@@ -708,6 +709,17 @@ mod tests {
 
         assert_eq!(decoded.asr.engine, "whisper");
         assert_eq!(decoded.asr.model_dir, "/models/custom-whisper");
+    }
+
+    #[test]
+    fn audio_device_selection_survives_toml_roundtrip() {
+        let mut config = Config::default();
+        config.audio.device = "USB Microphone".into();
+
+        let encoded = toml::to_string_pretty(&config).unwrap();
+        let decoded: Config = toml::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded.audio.device, "USB Microphone");
     }
 
     #[test]

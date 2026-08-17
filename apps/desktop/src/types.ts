@@ -220,6 +220,30 @@ export interface AudioReadiness {
   error: string | null;
 }
 
+export interface AudioDevice {
+  name: string;
+  is_default: boolean;
+}
+
+export interface AudioDevices {
+  devices: AudioDevice[];
+  default_device: string | null;
+}
+
+export interface AudioRecordingTest {
+  permission: string;
+  success: boolean;
+  device: string | null;
+  chunks: number;
+  frames: number;
+  captured_duration_ms: number;
+  rms: number;
+  peak: number;
+  signal_detected: boolean;
+  event_written: boolean;
+  error: string | null;
+}
+
 /** What the OS backend can actually do — drives platform-specific copy. */
 export interface PlatformInfo {
   os: "macos" | "windows" | "other";
@@ -259,6 +283,7 @@ export interface ConfigSummary {
   paused: boolean;
   api_bind: string;
   audio_chunk_ms: number;
+  audio_device: string;
   asr_locale: string;
   asr_engine: string;
   asr_model_dir: string;
@@ -284,6 +309,7 @@ export interface SourcesUpdate {
   asr_http_model?: string;
   asr_locale?: string;
   asr_fallback_speech?: boolean;
+  audio_device?: string;
   input_enabled?: boolean;
   input_interactions?: boolean;
 }

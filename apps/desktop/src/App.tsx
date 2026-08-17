@@ -22,6 +22,8 @@ import {
 import type { IconName } from "./design";
 import type {
   AsrModelStatus,
+  AudioDevices,
+  AudioRecordingTest,
   AssistantConfig,
   AssistantUpdate,
   BrowserPairing,
@@ -219,6 +221,14 @@ export default function App() {
   const [llmTestMessage, setLlmTestMessage] = useState<string | null>(null);
   const [modelListBusy, setModelListBusy] = useState(false);
   const [modelListMessage, setModelListMessage] = useState<string | null>(null);
+  const [audioDevices, setAudioDevices] = useState<AudioDevices | null>(null);
+  const [audioDevicesBusy, setAudioDevicesBusy] = useState(false);
+  const [audioDevicesError, setAudioDevicesError] = useState<string | null>(null);
+  const [audioTestState, setAudioTestState] = useState<
+    "idle" | "testing" | "success" | "error"
+  >("idle");
+  const [audioTestResult, setAudioTestResult] = useState<AudioRecordingTest | null>(null);
+  const [writeAudioTestEvent, setWriteAudioTestEvent] = useState(false);
   const [browserPairing, setBrowserPairing] = useState<BrowserPairing | null>(null);
   const assistantSaveRef = useRef<Promise<void>>(Promise.resolve());
   const assistantLastSaveRef = useRef<Promise<void>>(Promise.resolve());
@@ -447,6 +457,48 @@ export default function App() {
     }
   }, [refresh]);
 
+  const refreshAudioDevices = useCallback(async () => {
+    setAudioDevicesBusy(true);
+    setAudioDevicesError(null);
+    try {
+      setAudioDevices(await api.listAudioDevices());
+    } catch (e) {
+      setAudioDevicesError(`读取录音设备失败：${String(e)}`);
+    } finally {
+      setAudioDevicesBusy(false);
+    }
+  }, []);
+
+  async function runAudioTest() {
+    setAudioTestState("testing");
+    setAudioTestResult(null);
+    try {
+      const result = await api.recordAudioTest(3_000, writeAudioTestEvent);
+      setAudioTestResult(result);
+      setAudioTestState(result.success && !result.error ? "success" : "error");
+      if (result.error) {
+        setError(`录音自测失败：${result.error}`);
+      } else {
+        setError(null);
+        setStatusNote(
+          result.event_written
+            ? "录音自测完成，测试音频已写入时间线。"
+            : "录音自测完成，未写入时间线。",
+        );
+      }
+    } catch (e) {
+      setAudioTestState("error");
+      setAudioTestResult(null);
+      setError(`录音自测失败：${String(e)}`);
+    }
+  }
+
+  useEffect(() => {
+    if (tab === "settings" && !audioDevices && !audioDevicesBusy) {
+      void refreshAudioDevices();
+    }
+  }, [audioDevices, audioDevicesBusy, refreshAudioDevices, tab]);
+
   async function configureBrowserPairing(rotate = false) {
     setBusy(true);
     try {
@@ -537,6 +589,11 @@ export default function App() {
 
   const nav = NAV.find((n) => n.id === tab)!;
   const audioSource = health?.sources.find((source) => source.id === "audio");
+  const selectedAudioDeviceMissing = Boolean(
+    cfg?.audio_device &&
+      audioDevices &&
+      !audioDevices.devices.some((device) => device.name === cfg.audio_device),
+  );
 
   const updateRuntimeConfig = useCallback(async (
     update: SourcesUpdate,
@@ -1251,6 +1308,115 @@ export default function App() {
                   <button className="btn" onClick={() => void api.openDataDir()}>
                     在 Finder 中打开
                   </button>
+                </div>
+              </div>
+              <div className="card">
+                <h3>麦克风录音验证</h3>
+                <p className="meta mt">
+                  选择实际录音设备并做一次限时自测。自测只在你点击按钮后打开麦克风，不会自动修改系统权限。
+                </p>
+                <div className="stack mt">
+                  <label className="field">
+                    <span className="meta">录音设备</span>
+                    <select
+                      className="input"
+                      value={cfg?.audio_device ?? ""}
+                      disabled={audioDevicesBusy || busy}
+                      onChange={(event) => {
+                        void updateRuntimeConfig(
+                          { audio_device: event.target.value },
+                          event.target.value
+                            ? `录音设备已保存为“${event.target.value}”，本地服务已自动重载。`
+                            : "录音设备已恢复为系统默认设备，本地服务已自动重载。",
+                        );
+                      }}
+                    >
+                      <option value="">系统默认设备</option>
+                      {(audioDevices?.devices ?? []).map((device) => (
+                        <option key={device.name} value={device.name}>
+                          {device.name}{device.is_default ? "（系统默认）" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {selectedAudioDeviceMissing && (
+                    <Notice tone="warn">
+                      当前保存的设备“{cfg?.audio_device}”不可用。请选择列表中的设备，或恢复为系统默认设备。
+                    </Notice>
+                  )}
+                  {audioDevicesError && (
+                    <Notice tone="danger">
+                      {audioDevicesError} 请确认麦克风权限后重试。
+                    </Notice>
+                  )}
+                  <div className="row">
+                    <Button
+                      variant="secondary"
+                      disabled={audioDevicesBusy}
+                      onClick={() => void refreshAudioDevices()}
+                    >
+                      {audioDevicesBusy ? "正在读取设备…" : "刷新设备列表"}
+                    </Button>
+                    <StatusDot
+                      status={audioDevices ? "done" : "idle"}
+                      label={
+                        audioDevices
+                          ? `${audioDevices.devices.length} 个录音设备`
+                          : "尚未读取设备列表"
+                      }
+                    />
+                  </div>
+                  <div className="row">
+                    <Button
+                      variant="primary"
+                      disabled={audioTestState === "testing" || busy}
+                      onClick={() => void runAudioTest()}
+                    >
+                      {audioTestState === "testing" ? "正在录音 3 秒…" : "开始录音自测"}
+                    </Button>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={writeAudioTestEvent}
+                        disabled={audioTestState === "testing" || busy}
+                        onChange={(event) => setWriteAudioTestEvent(event.target.checked)}
+                      />
+                      写入一条测试事件
+                    </label>
+                  </div>
+                  <p className="meta">
+                    默认不写入时间线；勾选后会写入一个带 test 标记的 audio_chunk.v1 事件，便于验证落库和播放链路。
+                  </p>
+                  {audioTestResult && (
+                    <Notice
+                      tone={
+                        audioTestResult.success && !audioTestResult.error
+                          ? "success"
+                          : "danger"
+                      }
+                      title={
+                        audioTestResult.success && !audioTestResult.error
+                          ? "录音自测完成"
+                          : "录音自测未通过"
+                      }
+                    >
+                      {audioTestResult.error ? (
+                        audioTestResult.error
+                      ) : (
+                        <span>
+                          设备：{audioTestResult.device ?? "—"} · 帧数：
+                          {audioTestResult.frames.toLocaleString()} · 时长：
+                          {audioTestResult.captured_duration_ms} ms · RMS：
+                          {audioTestResult.rms.toFixed(4)} · 峰值：
+                          {audioTestResult.peak.toFixed(4)} ·{" "}
+                          {audioTestResult.signal_detected ? "检测到有效信号" : "信号偏低"}
+                          <br />
+                          audio_chunk.v1：
+                          {audioTestResult.event_written ? "已写入" : "未写入（诊断模式）"}
+                        </span>
+                      )}
+                    </Notice>
+                  )}
                 </div>
               </div>
               <div className="card">

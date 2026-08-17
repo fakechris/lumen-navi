@@ -8,6 +8,8 @@ import type {
   AiMessage,
   AiSendResult,
   AudioReadiness,
+  AudioDevices,
+  AudioRecordingTest,
   RoastRecord,
   RoastIndexEntry,
   AsrModelCandidate,
@@ -34,6 +36,12 @@ import type {
 export const api = {
   getHealth: () => invoke<Health>("get_health"),
   checkAudioReadiness: () => invoke<AudioReadiness>("check_audio_readiness"),
+  listAudioDevices: () => invoke<AudioDevices>("list_audio_devices"),
+  recordAudioTest: (durationMs = 3_000, writeEvent = false) =>
+    invoke<AudioRecordingTest>("record_audio_test", {
+      durationMs,
+      writeEvent,
+    }),
   getPermissions: () => invoke<Permissions>("get_permissions"),
   getPlatformInfo: () => invoke<PlatformInfo>("get_platform_info"),
   searchText: (query: string, limit = 30) =>

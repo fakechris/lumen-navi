@@ -213,6 +213,12 @@ pub fn mic() -> Arc<dyn MicCapturer> {
     Arc::new(lumen_platform_cpal::CpalMicCapturer)
 }
 
+/// List recording devices through the active cpal backend. This is a
+/// non-recording operation and does not request or modify microphone access.
+pub fn mic_devices() -> Result<(Option<String>, Vec<String>), lumen_platform::PlatformError> {
+    lumen_platform_cpal::input_devices()
+}
+
 /// The OS's built-in speech recognizer, or a `NullAsr` that reports
 /// `is_supported() == false` where there is none.
 pub fn system_speech_asr(max_audio_bytes: usize) -> Arc<dyn AsrEngine> {
