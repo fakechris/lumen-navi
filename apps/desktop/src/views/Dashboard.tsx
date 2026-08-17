@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as d3 from "d3";
 import { api } from "../api";
 import { Button, Card, EmptyState, IconButton, Input, Select, StatCard } from "../design";
-import type { CategoryRule, MatchField, ProductivityLevel, ActivitySegment, DayStats, SceneDay, HistorySlot } from "../types";
+import type { CategoryRule, MatchField, ProductivityLevel, ActivitySegment, DayStats, RangeStats, SceneDay, HistorySlot } from "../types";
 import { WeeklyView } from "./WeeklyView";
 
 // --- helpers --------------------------------------------------------------
@@ -93,9 +93,10 @@ export function registrableDomain(url: string | null | undefined): string | null
 
 export function DashboardView() {
   const [day, setDay] = useState(todayStr());
-  const [view, setView] = useState<"today" | "week">("today");
+  const [view, setView] = useState<"today" | "week" | "last7" | "month" | "total">("today");
   const [segments, setSegments] = useState<ActivitySegment[] | null>(null);
   const [stats, setStats] = useState<DayStats | null>(null);
+  const [rangeStats, setRangeStats] = useState<RangeStats | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Top-apps grouping: "app" (bundle identity, default) or "site" (domain).
   // Only affects the top-apps ranking, not the timeline/categories.
@@ -107,6 +108,22 @@ export function DashboardView() {
 
   const load = useCallback(async () => {
     try {
+      if (view === "last7" || view === "month" || view === "total") {
+        const today = todayStr();
+        const from =
+          view === "last7"
+            ? shiftDay(today, -6)
+            : view === "month"
+              ? `${today.slice(0, 8)}01`
+              : "1970-01-01";
+        setRangeStats(null);
+        setSegments([]);
+        setStats(null);
+        setRangeStats(await api.activityRange(from, today, groupBy === "scene" ? "app" : groupBy));
+        setError(null);
+        return;
+      }
+      setRangeStats(null);
       const [segs, st, sc, sl] = await Promise.all([
         api.activitySegments(day),
         api.activityStats(day, groupBy === "scene" ? "app" : groupBy),
@@ -121,7 +138,7 @@ export function DashboardView() {
     } catch (e) {
       setError(String(e));
     }
-  }, [day, groupBy]);
+  }, [day, groupBy, view]);
 
   useEffect(() => {
     void load();
@@ -140,7 +157,8 @@ export function DashboardView() {
     );
   }
 
-  const loading = segments === null || stats === null;
+  const rangeView = view === "last7" || view === "month" || view === "total";
+  const loading = rangeView ? rangeStats === null : segments === null || stats === null;
   const hasData = !loading && (segments!.length > 0);
 
   return (
@@ -149,9 +167,20 @@ export function DashboardView() {
       <div className="row" style={{ gap: 0, alignSelf: "flex-start", borderRadius: "var(--radius-input)", overflow: "hidden" }}>
         <ViewTab active={view === "today"} onClick={() => setView("today")} first>今日</ViewTab>
         <ViewTab active={view === "week"} onClick={() => setView("week")}>本周</ViewTab>
+        <ViewTab active={view === "last7"} onClick={() => setView("last7")}>最近 7 天</ViewTab>
+        <ViewTab active={view === "month"} onClick={() => setView("month")}>本月</ViewTab>
+        <ViewTab active={view === "total"} onClick={() => setView("total")}>全部</ViewTab>
       </div>
 
       {view === "week" && <WeeklyView />}
+
+      {rangeView && (
+        <RangeSummary
+          label={view === "last7" ? "最近 7 天" : view === "month" ? "本月" : "全部累计"}
+          stats={rangeStats}
+          loading={loading}
+        />
+      )}
 
       {view === "today" && (
         <>
@@ -192,13 +221,13 @@ export function DashboardView() {
         )}
       </div>
 
-      {loading && (
+      {!rangeView && loading && (
         <Card pad={16}>
           <div style={{ color: "var(--text-tertiary)" }}>加载活动…（{prettyDay(day)}）</div>
         </Card>
       )}
 
-      {hasData && (
+      {!rangeView && hasData && (
         <>
           {/* Stat cards row */}
           <div className="grid">
@@ -313,7 +342,7 @@ export function DashboardView() {
         </>
       )}
 
-      {!loading && !hasData && (
+      {!rangeView && !loading && !hasData && (
         <EmptyState
           icon="clock"
           title="今天还没有活动数据"
@@ -414,6 +443,74 @@ function CalendarPicker({
     </>
   );
 }
+
+function RangeSummary({
+  label,
+  stats,
+  loading,
+}: {
+  label: string;
+  stats: RangeStats | null;
+  loading: boolean;
+}) {
+  if (loading || !stats) {
+    return (
+      <Card pad={16}>
+        <div style={{ color: "var(--text-tertiary)" }}>加载{label}统计…</div>
+      </Card>
+    );
+  }
+
+  const topCategory = stats.by_category.find(
+    (category) => category.category && category.category !== "Uncategorized",
+  );
+
+  return (
+    <div className="stack">
+      <div className="meta">统计范围：{label} · 活跃时长按日期范围汇总，事件总数见概览页</div>
+      <div className="grid">
+        <StatCard
+          label="活跃时长"
+          value={fmtDuration(stats.total_active_ms)}
+          hint={`空闲 ${fmtDuration(stats.total_idle_ms)}`}
+        />
+        <StatCard
+          label="生产力分"
+          value={stats.pulse_score !== null ? Math.round(stats.pulse_score).toString() : "—"}
+          hint="0–100，未分类不计入"
+          tone={stats.pulse_score !== null && stats.pulse_score >= 70 ? "success" : "default"}
+        />
+        <StatCard
+          label="切换次数"
+          value={String(stats.days.reduce((sum, day) => sum + day.context_switches, 0))}
+          hint={`${stats.days.length} 个有活动的日期`}
+        />
+        <StatCard
+          label="Top 类别"
+          value={topCategory?.category ?? "—"}
+          hint={topCategory ? fmtDuration(topCategory.ms) : undefined}
+        />
+      </div>
+
+      {stats.top_apps.length > 0 && (
+        <Card pad={16}>
+          <SectionHeader title="应用排行" subtitle={`${label} · 按活跃时长排序`} />
+          <TopApps stats={{
+            day: label,
+            total_active_ms: stats.total_active_ms,
+            total_idle_ms: stats.total_idle_ms,
+            pulse_score: stats.pulse_score,
+            context_switches: 0,
+            by_category: stats.by_category,
+            top_apps: stats.top_apps,
+            by_hour: [],
+          }} groupBy="app" />
+        </Card>
+      )}
+    </div>
+  );
+}
+
 function ViewTab({ active, onClick, children, first }: {
   active: boolean; onClick: () => void; children: React.ReactNode; first?: boolean;
 }) {

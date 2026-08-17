@@ -22,6 +22,8 @@ import {
 import type { IconName } from "./design";
 import type {
   AsrModelStatus,
+  AudioDevices,
+  AudioRecordingTest,
   AssistantConfig,
   AssistantUpdate,
   BrowserPairing,
@@ -29,6 +31,7 @@ import type {
   Health,
   ObserveStatus,
   OnboardingState,
+  OverviewRange,
   Permissions,
   PlatformInfo,
   SearchHit,
@@ -36,6 +39,42 @@ import type {
   TabId,
   TimelineItem,
 } from "./types";
+
+type OverviewRangeKey = "today" | "week" | "last7" | "month" | "total";
+
+const OVERVIEW_RANGE_LABELS: Record<OverviewRangeKey, string> = {
+  today: "今日",
+  week: "本周",
+  last7: "最近 7 天",
+  month: "本月",
+  total: "全部累计",
+};
+
+function localDayString(date = new Date()): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function shiftLocalDay(day: string, delta: number): string {
+  const date = new Date(`${day}T00:00:00`);
+  date.setDate(date.getDate() + delta);
+  return localDayString(date);
+}
+
+function overviewRangeBounds(range: OverviewRangeKey): { from: string; to: string } {
+  const to = localDayString();
+  if (range === "today") return { from: to, to };
+  if (range === "week") {
+    const date = new Date(`${to}T00:00:00`);
+    const day = date.getDay();
+    return { from: shiftLocalDay(to, day === 0 ? -6 : 1 - day), to };
+  }
+  if (range === "last7") return { from: shiftLocalDay(to, -6), to };
+  if (range === "month") return { from: `${to.slice(0, 8)}01`, to };
+  return { from: "1970-01-01", to };
+}
 
 const NAV: {
   id: TabId;
@@ -109,6 +148,42 @@ function permStatus(v: string): "done" | "failed" | "idle" {
   if (s.includes("granted")) return "done";
   if (s.includes("denied") || s.includes("restricted")) return "failed";
   return "idle";
+}
+
+function permissionLabel(v?: string | null): string {
+  switch ((v ?? "").toLowerCase()) {
+    case "granted":
+      return "已允许";
+    case "denied":
+      return "已拒绝";
+    case "restricted":
+      return "受限";
+    case "notdetermined":
+      return "未确认";
+    default:
+      return v || "—";
+  }
+}
+
+function captureStatusLabel(v?: string | null): string {
+  switch ((v ?? "").toLowerCase()) {
+    case "ready":
+      return "已验证";
+    case "not_checked":
+      return "待验证";
+    case "blocked_by_screen_recording":
+      return "等待屏幕权限";
+    case "unavailable":
+      return "不可用";
+    case "probe_failed":
+      return "验证失败";
+    case "timed_out":
+      return "验证超时";
+    case "native":
+      return "系统默认";
+    default:
+      return v || "—";
+  }
 }
 
 function titleMissingLabel(reason: string): string {
@@ -188,6 +263,8 @@ function AudioPreview({ item }: { item: TimelineItem }) {
 export default function App() {
   const [tab, setTab] = useState<TabId>("overview");
   const [health, setHealth] = useState<Health | null>(null);
+  const [overviewRange, setOverviewRange] = useState<OverviewRangeKey>("today");
+  const [overviewStats, setOverviewStats] = useState<OverviewRange | null>(null);
   const [perms, setPerms] = useState<Permissions | null>(null);
   const [platform, setPlatform] = useState<PlatformInfo | null>(null);
   const [cfg, setCfg] = useState<ConfigSummary | null>(null);
@@ -219,9 +296,18 @@ export default function App() {
   const [llmTestMessage, setLlmTestMessage] = useState<string | null>(null);
   const [modelListBusy, setModelListBusy] = useState(false);
   const [modelListMessage, setModelListMessage] = useState<string | null>(null);
+  const [audioDevices, setAudioDevices] = useState<AudioDevices | null>(null);
+  const [audioDevicesBusy, setAudioDevicesBusy] = useState(false);
+  const [audioDevicesError, setAudioDevicesError] = useState<string | null>(null);
+  const [audioTestState, setAudioTestState] = useState<
+    "idle" | "testing" | "success" | "error"
+  >("idle");
+  const [audioTestResult, setAudioTestResult] = useState<AudioRecordingTest | null>(null);
+  const [writeAudioTestEvent, setWriteAudioTestEvent] = useState(false);
   const [browserPairing, setBrowserPairing] = useState<BrowserPairing | null>(null);
   const assistantSaveRef = useRef<Promise<void>>(Promise.resolve());
   const assistantLastSaveRef = useRef<Promise<void>>(Promise.resolve());
+  const screenVerificationStarted = useRef(false);
 
   useEffect(() => {
     void api.getBuildInfo().then(setBuildInfo).catch(() => {});
@@ -314,6 +400,16 @@ export default function App() {
       setAssistant(asst);
       setBrowserPairing(browser);
       setError(null);
+      if (
+        plat.os === "macos" &&
+        c.screen &&
+        p.screen_recording.toLowerCase() === "granted" &&
+        p.direct_capture_status === "not_checked" &&
+        !screenVerificationStarted.current
+      ) {
+        screenVerificationStarted.current = true;
+        void verifyScreenCapture();
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -424,6 +520,28 @@ export default function App() {
     }
   }
 
+  async function verifyScreenCapture() {
+    setBusy(true);
+    setError(null);
+    setStatusNote("正在执行一次实际屏幕捕获验证…");
+    try {
+      const ready = await api.refreshScreenPermission();
+      const nextPerms = await api.getPermissions();
+      setPerms(nextPerms);
+      if (!ready) {
+        setError(
+          `屏幕录制权限已允许，但实际捕获验证未通过：${nextPerms.direct_capture_error ?? "请检查 Lumen Cua 和系统设置。"}`,
+        );
+        return;
+      }
+      setStatusNote("实际屏幕捕获验证成功。");
+    } catch (e) {
+      setError(`实际屏幕捕获验证失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const restartAudio = useCallback(async () => {
     setBusy(true);
     setError(null);
@@ -446,6 +564,48 @@ export default function App() {
       setBusy(false);
     }
   }, [refresh]);
+
+  const refreshAudioDevices = useCallback(async () => {
+    setAudioDevicesBusy(true);
+    setAudioDevicesError(null);
+    try {
+      setAudioDevices(await api.listAudioDevices());
+    } catch (e) {
+      setAudioDevicesError(`读取录音设备失败：${String(e)}`);
+    } finally {
+      setAudioDevicesBusy(false);
+    }
+  }, []);
+
+  async function runAudioTest() {
+    setAudioTestState("testing");
+    setAudioTestResult(null);
+    try {
+      const result = await api.recordAudioTest(3_000, writeAudioTestEvent);
+      setAudioTestResult(result);
+      setAudioTestState(result.success && !result.error ? "success" : "error");
+      if (result.error) {
+        setError(`录音自测失败：${result.error}`);
+      } else {
+        setError(null);
+        setStatusNote(
+          result.event_written
+            ? "录音自测完成，测试音频已写入时间线。"
+            : "录音自测完成，未写入时间线。",
+        );
+      }
+    } catch (e) {
+      setAudioTestState("error");
+      setAudioTestResult(null);
+      setError(`录音自测失败：${String(e)}`);
+    }
+  }
+
+  useEffect(() => {
+    if (tab === "settings" && !audioDevices && !audioDevicesBusy) {
+      void refreshAudioDevices();
+    }
+  }, [audioDevices, audioDevicesBusy, refreshAudioDevices, tab]);
 
   async function configureBrowserPairing(rotate = false) {
     setBusy(true);
@@ -470,6 +630,21 @@ export default function App() {
     return () => clearInterval(t);
   }, [refresh]);
 
+  const loadOverviewStats = useCallback(async () => {
+    try {
+      const { from, to } = overviewRangeBounds(overviewRange);
+      setOverviewStats(await api.overviewRange(from, to));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [overviewRange]);
+
+  useEffect(() => {
+    void loadOverviewStats();
+    const t = setInterval(() => void loadOverviewStats(), 30_000);
+    return () => clearInterval(t);
+  }, [loadOverviewStats]);
+
   useEffect(() => {
     const refreshPendingScreenPermission = async () => {
       if (!screenPermissionPending.current) return;
@@ -478,7 +653,7 @@ export default function App() {
         setPerms(await api.getPermissions());
         if (!granted) return;
         screenPermissionPending.current = false;
-        setStatusNote("Lumen Cua 基础屏幕权限已生效；请再次点击“请求屏幕录制”完成实际捕获验证。");
+        setStatusNote("Lumen Cua 屏幕权限已刷新，实际捕获验证成功。");
         setError(null);
         await refresh();
       } catch (e) {
@@ -537,6 +712,18 @@ export default function App() {
 
   const nav = NAV.find((n) => n.id === tab)!;
   const audioSource = health?.sources.find((source) => source.id === "audio");
+  const audioSignalFiltered = Boolean(
+    audioSource?.last_error?.includes("静音检测过滤"),
+  );
+  const audioPersistedEvents = health?.stored_audio_events ?? 0;
+  const audioStatusMessage = audioSignalFiltered
+    ? `当前未检测到有效语音 · 历史累计 ${audioPersistedEvents} 条`
+    : audioSource?.last_error;
+  const selectedAudioDeviceMissing = Boolean(
+    cfg?.audio_device &&
+      audioDevices &&
+      !audioDevices.devices.some((device) => device.name === cfg.audio_device),
+  );
 
   const updateRuntimeConfig = useCallback(async (
     update: SourcesUpdate,
@@ -827,16 +1014,55 @@ export default function App() {
                 </div>
               </div>
 
+              <div
+                className="row mt"
+                style={{
+                  gap: 0,
+                  alignSelf: "flex-start",
+                  borderRadius: "var(--radius-input)",
+                  overflow: "hidden",
+                }}
+                aria-label="概览统计范围"
+              >
+                {(Object.keys(OVERVIEW_RANGE_LABELS) as OverviewRangeKey[]).map((range, index) => (
+                  <button
+                    key={range}
+                    onClick={() => setOverviewRange(range)}
+                    style={{
+                      background:
+                        overviewRange === range ? "var(--surface)" : "transparent",
+                      border: "1px solid var(--border)",
+                      borderLeft: index === 0 ? "1px solid var(--border)" : "none",
+                      fontSize: "var(--text-xs)",
+                      fontWeight: overviewRange === range ? 600 : 400,
+                      color:
+                        overviewRange === range
+                          ? "var(--text)"
+                          : "var(--text-tertiary)",
+                      padding: "5px 14px",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {OVERVIEW_RANGE_LABELS[range]}
+                  </button>
+                ))}
+              </div>
+
               <div className="grid mt">
                 <StatCard
                   label="Events"
-                  value={health?.stored_events ?? "—"}
-                  hint={`schema v${health?.schema_version ?? "—"}`}
+                  value={overviewStats?.stored_events ?? "—"}
+                  hint={`${OVERVIEW_RANGE_LABELS[overviewRange]} · schema v${health?.schema_version ?? "—"}`}
                 />
                 <StatCard
                   label="Search docs"
-                  value={health?.ocr_docs ?? "—"}
-                  hint="OCR 与转写"
+                  value={overviewStats?.ocr_docs ?? "—"}
+                  hint={`${OVERVIEW_RANGE_LABELS[overviewRange]} · OCR 与转写`}
+                />
+                <StatCard
+                  label="Audio events"
+                  value={overviewStats?.audio_events ?? "—"}
+                  hint={`${OVERVIEW_RANGE_LABELS[overviewRange]} · audio_chunk.v1`}
                 />
                 <StatCard
                   label="Screen"
@@ -855,7 +1081,15 @@ export default function App() {
                 />
                 <StatCard
                   label="Audio / ASR"
-                  tone={audioSource?.last_error ? "danger" : audioSource?.running ? "accent" : "default"}
+                  tone={
+                    audioSignalFiltered
+                      ? "warn"
+                      : audioSource?.last_error
+                        ? "danger"
+                        : audioSource?.running
+                          ? "accent"
+                          : "default"
+                  }
                   value={
                     !audioSource?.enabled
                       ? "关闭"
@@ -866,7 +1100,7 @@ export default function App() {
                         : "已启用但未运行"
                   }
                   hint={
-                    audioSource?.last_error ??
+                    audioStatusMessage ??
                     `${cfg?.asr_engine ?? "sensevoice"} · ${cfg?.asr_locale ?? ""} · ${cfg?.audio_chunk_ms ?? "—"}ms`
                   }
                 />
@@ -927,7 +1161,7 @@ export default function App() {
                     label={
                       platform && !platform.screen_permission_gate
                         ? "屏幕截取 · 无需授权"
-                        : `屏幕录制 · ${perms?.screen_recording ?? "—"}`
+                        : `屏幕录制 · ${permissionLabel(perms?.screen_recording)}`
                     }
                   />
                   <StatusDot
@@ -940,16 +1174,16 @@ export default function App() {
                           ? "failed"
                           : "idle"
                     }
-                    label={`实际捕获 · ${perms?.direct_capture_status ?? "—"}`}
+                    label={`实际捕获 · ${captureStatusLabel(perms?.direct_capture_status)}`}
                   />
                   <StatusDot
                     status={permStatus(perms?.microphone ?? "")}
-                    label={`麦克风 · ${perms?.microphone ?? "—"}`}
+                    label={`麦克风 · ${permissionLabel(perms?.microphone)}`}
                   />
                   {platform?.accessibility_gate !== false && (
                     <StatusDot
                       status={permStatus(perms?.accessibility ?? "")}
-                      label={`辅助功能 · ${perms?.accessibility ?? "—"}`}
+                      label={`辅助功能 · ${permissionLabel(perms?.accessibility)}`}
                     />
                   )}
                 </div>
@@ -963,13 +1197,13 @@ export default function App() {
                 )}
                 <div
                   className={`onboard-status mt ${audioSource?.running ? "ok" : ""}`}
-                  role={audioSource?.last_error ? "alert" : "status"}
+                  role={audioSource?.last_error && !audioSignalFiltered ? "alert" : "status"}
                 >
                   <div className="row" style={{ justifyContent: "space-between" }}>
                     <strong>麦克风采集</strong>
                     <span
                       className={`pill ${
-                        audioSource?.last_error
+                        audioSource?.last_error && !audioSignalFiltered
                           ? "err"
                           : audioSource?.running
                             ? "ok"
@@ -984,10 +1218,12 @@ export default function App() {
                     </span>
                   </div>
                   <p className="meta mt">
-                    {audioSource?.last_error ??
-                      (audioSource?.running
-                        ? "已成功打开输入设备，音频会按配置写入本地事件。"
-                        : "权限可能已允许，但采集设备还没有成功启动。")}
+                    {audioSignalFiltered
+                      ? audioStatusMessage
+                      : audioSource?.last_error ??
+                        (audioSource?.running
+                          ? "已成功打开输入设备，音频会按配置写入本地事件。"
+                          : "权限可能已允许，但采集设备还没有成功启动。")}
                   </p>
                   <div className="row mt">
                     <Button
@@ -997,19 +1233,28 @@ export default function App() {
                     >
                       检查采集
                     </Button>
-                    <Button
-                      variant="primary"
-                      disabled={busy}
-                      onClick={() => void restartAudio()}
-                    >
-                      启动采集
-                    </Button>
+                    {audioSource?.running ? (
+                      <span className="meta">采集已运行，无需启动</span>
+                    ) : (
+                      <Button
+                        variant="primary"
+                        disabled={busy}
+                        onClick={() => void restartAudio()}
+                      >
+                        启动采集
+                      </Button>
+                    )}
                   </div>
                 </div>
                 <div className="row mt">
                   <Button variant="secondary" disabled={busy} onClick={() => void requestScreenRecording()}>
                     请求屏幕录制
                   </Button>
+                  {platform?.os === "macos" && (
+                    <Button variant="secondary" disabled={busy} onClick={() => void verifyScreenCapture()}>
+                      验证实际捕获
+                    </Button>
+                  )}
                   <Button variant="secondary" disabled={busy} onClick={() => void requestMicrophone()}>
                     打开麦克风设置
                   </Button>
@@ -1251,6 +1496,115 @@ export default function App() {
                   <button className="btn" onClick={() => void api.openDataDir()}>
                     在 Finder 中打开
                   </button>
+                </div>
+              </div>
+              <div className="card">
+                <h3>麦克风录音验证</h3>
+                <p className="meta mt">
+                  选择实际录音设备并做一次限时自测。自测只在你点击按钮后打开麦克风，不会自动修改系统权限。
+                </p>
+                <div className="stack mt">
+                  <label className="field">
+                    <span className="meta">录音设备</span>
+                    <select
+                      className="input"
+                      value={cfg?.audio_device ?? ""}
+                      disabled={audioDevicesBusy || busy}
+                      onChange={(event) => {
+                        void updateRuntimeConfig(
+                          { audio_device: event.target.value },
+                          event.target.value
+                            ? `录音设备已保存为“${event.target.value}”，本地服务已自动重载。`
+                            : "录音设备已恢复为系统默认设备，本地服务已自动重载。",
+                        );
+                      }}
+                    >
+                      <option value="">系统默认设备</option>
+                      {(audioDevices?.devices ?? []).map((device) => (
+                        <option key={device.name} value={device.name}>
+                          {device.name}{device.is_default ? "（系统默认）" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {selectedAudioDeviceMissing && (
+                    <Notice tone="warn">
+                      当前保存的设备“{cfg?.audio_device}”不可用。请选择列表中的设备，或恢复为系统默认设备。
+                    </Notice>
+                  )}
+                  {audioDevicesError && (
+                    <Notice tone="danger">
+                      {audioDevicesError} 请确认麦克风权限后重试。
+                    </Notice>
+                  )}
+                  <div className="row">
+                    <Button
+                      variant="secondary"
+                      disabled={audioDevicesBusy}
+                      onClick={() => void refreshAudioDevices()}
+                    >
+                      {audioDevicesBusy ? "正在读取设备…" : "刷新设备列表"}
+                    </Button>
+                    <StatusDot
+                      status={audioDevices ? "done" : "idle"}
+                      label={
+                        audioDevices
+                          ? `${audioDevices.devices.length} 个录音设备`
+                          : "尚未读取设备列表"
+                      }
+                    />
+                  </div>
+                  <div className="row">
+                    <Button
+                      variant="primary"
+                      disabled={audioTestState === "testing" || busy}
+                      onClick={() => void runAudioTest()}
+                    >
+                      {audioTestState === "testing" ? "正在录音 3 秒…" : "开始录音自测"}
+                    </Button>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={writeAudioTestEvent}
+                        disabled={audioTestState === "testing" || busy}
+                        onChange={(event) => setWriteAudioTestEvent(event.target.checked)}
+                      />
+                      写入一条测试事件
+                    </label>
+                  </div>
+                  <p className="meta">
+                    默认不写入时间线；勾选后会写入一个带 test 标记的 audio_chunk.v1 事件，便于验证落库和播放链路。
+                  </p>
+                  {audioTestResult && (
+                    <Notice
+                      tone={
+                        audioTestResult.success && !audioTestResult.error
+                          ? "success"
+                          : "danger"
+                      }
+                      title={
+                        audioTestResult.success && !audioTestResult.error
+                          ? "录音自测完成"
+                          : "录音自测未通过"
+                      }
+                    >
+                      {audioTestResult.error ? (
+                        audioTestResult.error
+                      ) : (
+                        <span>
+                          设备：{audioTestResult.device ?? "—"} · 帧数：
+                          {audioTestResult.frames.toLocaleString()} · 时长：
+                          {audioTestResult.captured_duration_ms} ms · RMS：
+                          {audioTestResult.rms.toFixed(4)} · 峰值：
+                          {audioTestResult.peak.toFixed(4)} ·{" "}
+                          {audioTestResult.signal_detected ? "检测到有效信号" : "信号偏低"}
+                          <br />
+                          audio_chunk.v1：
+                          {audioTestResult.event_written ? "已写入" : "未写入（诊断模式）"}
+                        </span>
+                      )}
+                    </Notice>
+                  )}
                 </div>
               </div>
               <div className="card">

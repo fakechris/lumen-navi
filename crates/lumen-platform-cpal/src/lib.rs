@@ -24,6 +24,27 @@ impl MicCapturer for CpalMicCapturer {
     }
 }
 
+/// Enumerate input devices without opening a recording stream or changing
+/// platform permissions.
+pub fn input_devices() -> Result<(Option<String>, Vec<String>), PlatformError> {
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|device| device.name().ok());
+    let devices = host
+        .input_devices()
+        .map_err(|error| PlatformError::Message(format!("list input devices: {error}")))?;
+    let mut names = Vec::new();
+    for device in devices {
+        if let Ok(name) = device.name() {
+            if !names.iter().any(|existing| existing == &name) {
+                names.push(name);
+            }
+        }
+    }
+    Ok((default_name, names))
+}
+
 fn open_mic(cfg: MicOpenConfig) -> Result<MicStream, PlatformError> {
     let host = cpal::default_host();
     let device = select_device(&host, &cfg.device)?;

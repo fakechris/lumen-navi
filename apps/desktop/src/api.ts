@@ -8,6 +8,8 @@ import type {
   AiMessage,
   AiSendResult,
   AudioReadiness,
+  AudioDevices,
+  AudioRecordingTest,
   RoastRecord,
   RoastIndexEntry,
   AsrModelCandidate,
@@ -19,6 +21,7 @@ import type {
   CategoryRule,
   ConfigSummary,
   DayStats,
+  OverviewRange,
   RangeStats,
   EventSummary,
   Health,
@@ -34,6 +37,12 @@ import type {
 export const api = {
   getHealth: () => invoke<Health>("get_health"),
   checkAudioReadiness: () => invoke<AudioReadiness>("check_audio_readiness"),
+  listAudioDevices: () => invoke<AudioDevices>("list_audio_devices"),
+  recordAudioTest: (durationMs = 3_000, writeEvent = false) =>
+    invoke<AudioRecordingTest>("record_audio_test", {
+      durationMs,
+      writeEvent,
+    }),
   getPermissions: () => invoke<Permissions>("get_permissions"),
   getPlatformInfo: () => invoke<PlatformInfo>("get_platform_info"),
   searchText: (query: string, limit = 30) =>
@@ -94,6 +103,8 @@ export const api = {
     invoke<DayStats>("activity_stats", { day, groupBy }),
   activityRange: (from: string, to: string, groupBy?: "app" | "site") =>
     invoke<RangeStats>("activity_range", { from, to, groupBy }),
+  overviewRange: (from: string, to: string) =>
+    invoke<OverviewRange>("overview_range", { from, to }),
   activityAddManualSegment: (opts: {
     startedAt: string;
     endedAt: string;

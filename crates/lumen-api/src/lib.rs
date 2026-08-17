@@ -20,6 +20,10 @@ pub struct HealthResponse {
     #[serde(default)]
     pub closed_eyes: bool,
     pub stored_events: usize,
+    /// Persisted `audio_chunk.v1` events, independent of the current daemon
+    /// process' live VAD counters.
+    #[serde(default)]
+    pub stored_audio_events: usize,
     /// Indexed OCR documents (`ocr_docs` / FTS).
     #[serde(default)]
     pub ocr_docs: usize,
@@ -172,6 +176,7 @@ impl HealthResponse {
             paused,
             closed_eyes: false,
             stored_events,
+            stored_audio_events: 0,
             ocr_docs,
             schema_version,
             browser: None,

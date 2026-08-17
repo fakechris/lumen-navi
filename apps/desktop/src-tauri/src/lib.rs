@@ -397,7 +397,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_health,
             commands::check_audio_readiness,
-            commands::check_audio_readiness,
+            commands::list_audio_devices,
+            commands::record_audio_test,
             commands::get_permissions,
             commands::get_platform_info,
             commands::get_build_info,
@@ -421,6 +422,7 @@ pub fn run() {
             commands::llm_list_models,
             commands::activity_stats,
             commands::activity_range,
+            commands::overview_range,
             commands::activity_add_manual_segment,
             commands::activity_delete_segment,
             commands::activity_list_category_rules,

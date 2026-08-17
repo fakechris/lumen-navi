@@ -30,8 +30,7 @@ function monthDayLabel(dayStr: string): string {
 }
 
 export function WeeklyView() {
-  // Anchor on the most recent Sunday-ending week; default to last 7 days
-  // ending today.
+  // Anchor on the current calendar week, Monday through today.
   const [endDay, setEndDay] = useState(() => {
     const d = new Date();
     const y = d.getFullYear();
@@ -39,7 +38,9 @@ export function WeeklyView() {
     const dd = String(d.getDate()).padStart(2, "0");
     return `${y}-${m}-${dd}`;
   });
-  const fromDay = shiftDay(endDay, -6);
+  const endDate = new Date(endDay + "T00:00:00");
+  const weekday = endDate.getDay();
+  const fromDay = shiftDay(endDay, weekday === 0 ? -6 : 1 - weekday);
 
   const [stats, setStats] = useState<RangeStats | null>(null);
   const [error, setError] = useState<string | null>(null);

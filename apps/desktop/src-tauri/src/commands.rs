@@ -10,10 +10,10 @@ use lumen_api::{
     RoastRecordDto, SourceStatus, API_VERSION,
 };
 use lumen_config::Config;
-use lumen_platform::MicOpenConfig;
+use lumen_platform::{pcm_rms_peak, pcm_s16le_to_wav, MicOpenConfig, PcmChunk};
 use lumen_platform_host as host;
-use lumen_store::{EventStore, SCHEMA_VERSION, TimelineQuery};
-use lumen_types::event_kind;
+use lumen_store::{EventStore, TimelineQuery, SCHEMA_VERSION};
+use lumen_types::{event_kind, SourceEvent, SourceKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -41,6 +41,33 @@ pub struct AudioReadinessDto {
 }
 
 #[derive(Debug, Serialize)]
+pub struct AudioDeviceDto {
+    pub name: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AudioDevicesDto {
+    pub devices: Vec<AudioDeviceDto>,
+    pub default_device: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AudioRecordingTestDto {
+    pub permission: String,
+    pub success: bool,
+    pub device: Option<String>,
+    pub chunks: u64,
+    pub frames: u64,
+    pub captured_duration_ms: u64,
+    pub rms: f32,
+    pub peak: f32,
+    pub signal_detected: bool,
+    pub event_written: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ConfigSummary {
     pub data_dir: String,
     pub config_path: String,
@@ -52,6 +79,7 @@ pub struct ConfigSummary {
     pub paused: bool,
     pub api_bind: String,
     pub audio_chunk_ms: u64,
+    pub audio_device: String,
     pub asr_locale: String,
     pub asr_engine: String,
     pub asr_model_dir: String,
@@ -61,6 +89,13 @@ pub struct ConfigSummary {
     pub system_audio: bool,
     pub input_enabled: bool,
     pub input_interactions: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OverviewRangeDto {
+    pub stored_events: usize,
+    pub ocr_docs: usize,
+    pub audio_events: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,6 +121,7 @@ pub struct SourcesUpdate {
     pub asr_http_model: Option<String>,
     pub asr_locale: Option<String>,
     pub asr_fallback_speech: Option<bool>,
+    pub audio_device: Option<String>,
     pub input_enabled: Option<bool>,
     pub input_interactions: Option<bool>,
 }
@@ -168,6 +204,15 @@ pub async fn get_health(state: State<'_, AppState>) -> Result<HealthResponse, St
             .map(|h| h.closed_eyes)
             .unwrap_or(cfg.privacy.closed_eyes),
         stored_events: n,
+        stored_audio_events: daemon_health
+            .as_ref()
+            .map(|h| h.stored_audio_events)
+            .unwrap_or_else(|| {
+                state
+                    .store
+                    .event_count_by_kind(lumen_types::event_kind::AUDIO_CHUNK_V1)
+                    .unwrap_or(0)
+            }),
         ocr_docs,
         schema_version: SCHEMA_VERSION,
         browser,
@@ -225,6 +270,178 @@ pub async fn check_audio_readiness(
             error: Some(error),
         }),
     }
+}
+
+#[tauri::command]
+pub async fn list_audio_devices() -> Result<AudioDevicesDto, String> {
+    tokio::task::spawn_blocking(|| {
+        let (default_device, names) = host::mic_devices().map_err(err)?;
+        let devices = names
+            .into_iter()
+            .map(|name| AudioDeviceDto {
+                is_default: default_device.as_deref() == Some(name.as_str()),
+                name,
+            })
+            .collect();
+        Ok(AudioDevicesDto {
+            devices,
+            default_device,
+        })
+    })
+    .await
+    .map_err(|error| format!("设备列表任务失败: {error}"))?
+}
+
+/// Capture a short, bounded sample for Settings validation. The default is
+/// deliberately non-persistent so a diagnostic cannot pollute the timeline.
+#[tauri::command]
+pub async fn record_audio_test(
+    state: State<'_, AppState>,
+    duration_ms: Option<u64>,
+    write_event: Option<bool>,
+) -> Result<AudioRecordingTestDto, String> {
+    let permission = host::permissions().status().await.map_err(err)?;
+    let permission_label = format!("{:?}", permission.microphone);
+    let base = AudioRecordingTestDto {
+        permission: permission_label.clone(),
+        success: false,
+        device: None,
+        chunks: 0,
+        frames: 0,
+        captured_duration_ms: 0,
+        rms: 0.0,
+        peak: 0.0,
+        signal_detected: false,
+        event_written: false,
+        error: None,
+    };
+    if !permission.can_record_mic() {
+        return Ok(AudioRecordingTestDto {
+            error: Some("麦克风权限尚未允许。请在系统设置中允许 Lumen Navi 访问麦克风后重试。".into()),
+            ..base
+        });
+    }
+
+    let config = state.load_config().map_err(err)?;
+    let duration_ms = duration_ms.unwrap_or(3_000).clamp(1_000, 5_000);
+    let threshold = config.audio.vad_rms_threshold;
+    let open_config = MicOpenConfig {
+        preferred_sample_rate: config.audio.sample_rate,
+        preferred_channels: config.audio.channels,
+        chunk_ms: duration_ms,
+        device: config.audio.device,
+    };
+    let capture = tokio::task::spawn_blocking(move || capture_audio_test(open_config, duration_ms))
+        .await
+        .map_err(|error| format!("录音自测任务失败: {error}"))?;
+    let (chunk, chunk_count) = match capture {
+        Ok(capture) => capture,
+        Err(error) => {
+            return Ok(AudioRecordingTestDto {
+                error: Some(error),
+                ..base
+            });
+        }
+    };
+
+    let event_written = if write_event.unwrap_or(false) {
+        let wav = pcm_s16le_to_wav(&chunk.samples, chunk.sample_rate, 1);
+        let event = SourceEvent::new(
+            SourceKind::Audio,
+            event_kind::AUDIO_CHUNK_V1,
+            json!({
+                "payload_version": 1,
+                "device": chunk.device_name.clone(),
+                "sample_rate": chunk.sample_rate,
+                "channels": 1,
+                "duration_ms": chunk.duration_ms,
+                "samples": chunk.samples.len(),
+                "mode": "settings_test",
+                "rms": chunk.rms,
+                "peak": chunk.peak,
+                "format": "wav_s16le",
+                "voice": chunk.rms >= threshold,
+                "test": true,
+            }),
+        );
+        state
+            .store
+            .put_and_append(event, "audio/wav", &wav)
+            .map_err(err)?;
+        true
+    } else {
+        false
+    };
+
+    Ok(AudioRecordingTestDto {
+        permission: permission_label,
+        success: true,
+        device: Some(chunk.device_name),
+        chunks: chunk_count,
+        frames: chunk.samples.len() as u64,
+        captured_duration_ms: chunk.duration_ms,
+        rms: chunk.rms,
+        peak: chunk.peak,
+        signal_detected: chunk.rms >= threshold,
+        event_written,
+        error: None,
+    })
+}
+
+fn capture_audio_test(
+    open_config: MicOpenConfig,
+    duration_ms: u64,
+) -> Result<(PcmChunk, u64), String> {
+    let stream = host::mic()
+        .open(open_config)
+        .map_err(|error| error.to_string())?;
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(duration_ms + 1_000);
+    let mut samples = Vec::new();
+    let mut sample_rate = 0;
+    let mut device_name = String::new();
+    let mut chunks = 0u64;
+    while std::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match stream
+            .recv_timeout(remaining.min(std::time::Duration::from_millis(250)))
+            .map_err(|error| error.to_string())?
+        {
+            Some(chunk) => {
+                if sample_rate == 0 {
+                    sample_rate = chunk.sample_rate;
+                    device_name = chunk.device_name.clone();
+                }
+                samples.extend(chunk.samples);
+                chunks = chunks.saturating_add(1);
+                let captured_requested_duration =
+                    !samples.is_empty() && sample_rate > 0
+                        && samples.len() as u64 * 1_000
+                            >= u64::from(sample_rate) * duration_ms;
+                if chunks >= 2 || captured_requested_duration {
+                    break;
+                }
+            }
+            None => {}
+        }
+    }
+    stream.stop();
+    if samples.is_empty() || sample_rate == 0 {
+        return Err("录音流已启动，但在测试时长内没有收到 PCM 音频帧。请检查输入设备和系统权限。".into());
+    }
+    let (rms, peak) = pcm_rms_peak(&samples);
+    Ok((
+        PcmChunk {
+            duration_ms: samples.len() as u64 * 1_000 / u64::from(sample_rate),
+            samples,
+            sample_rate,
+            channels: 1,
+            rms,
+            peak,
+            device_name,
+        },
+        chunks,
+    ))
 }
 
 fn health_sources(
@@ -450,6 +667,7 @@ pub fn get_config_summary(state: State<'_, AppState>) -> Result<ConfigSummary, S
         paused,
         api_bind: cfg.api.bind.clone(),
         audio_chunk_ms: cfg.audio.chunk_ms,
+        audio_device: cfg.audio.device.clone(),
         asr_locale: cfg.asr.locale.clone(),
         asr_engine: cfg.asr.engine.clone(),
         asr_model_dir: cfg.asr.model_dir.clone(),
@@ -1330,6 +1548,23 @@ pub fn activity_range(
         .map_err(err)
 }
 
+#[tauri::command]
+pub fn overview_range(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> Result<OverviewRangeDto, String> {
+    let (stored_events, ocr_docs, audio_events) = state
+        .store
+        .overview_range_counts(&from, &to)
+        .map_err(err)?;
+    Ok(OverviewRangeDto {
+        stored_events,
+        ocr_docs,
+        audio_events,
+    })
+}
+
 /// Parse the `group_by` invoke param: "site"/"domain"/"website" → Site,
 /// anything else (including None) → App (default).
 fn parse_group_by(s: Option<&str>) -> lumen_store::GroupBy {
@@ -1481,6 +1716,9 @@ pub fn update_sources_config(
     }
     if let Some(v) = update.asr_fallback_speech {
         cfg.asr.fallback_speech = v;
+    }
+    if let Some(v) = update.audio_device {
+        cfg.audio.device = v.trim().to_string();
     }
     if let Some(v) = update.input_enabled {
         cfg.input.enabled = v;
@@ -1980,6 +2218,7 @@ mod command_tests {
             paused: false,
             closed_eyes: false,
             stored_events: 0,
+            stored_audio_events: 0,
             ocr_docs: 0,
             schema_version: 0,
             browser: None,
