@@ -391,12 +391,13 @@ fn retry_delay(attempts: i64, base: Duration, max: Duration) -> Duration {
     Duration::from_millis(ms.min(max.as_millis() as u64))
 }
 
-/// True when the transcript contains at least one letter/CJK character once
-/// punctuation and whitespace are stripped. Pure-punctuation output ("。")
-/// is the signature of a noise trunk and is not persisted.
+/// True when the transcript contains at least two letters/CJK characters once
+/// punctuation and whitespace are stripped. Bare punctuation ("。") is the
+/// signature of a noise trunk, and single-syllable output ("嗯。", "我。")
+/// is far-field chatter — neither carries timeline value, so neither is
+/// persisted.
 fn has_meaningful_text(text: &str) -> bool {
-    text.chars()
-        .any(|c| c.is_alphanumeric())
+    text.chars().filter(|c| c.is_alphanumeric()).count() >= 2
 }
 
 fn classify_asr_err(e: AsrError) -> JobError {
@@ -557,6 +558,36 @@ mod tests {
         let worker = TranscribeWorker::new(
             Arc::clone(&store),
             Arc::new(StubAsr::new("。，！")),
+            TranscribeWorkerConfig::default(),
+        );
+        assert_eq!(worker.tick_once().await.unwrap(), 1);
+        assert!(!store.has_derived(eid, DERIVED_TRANSCRIPT_V1).unwrap());
+        assert_eq!(worker.stats().empty, 1);
+        assert_eq!(worker.stats().succeeded, 0);
+    }
+
+    #[tokio::test]
+    async fn single_syllable_transcript_is_not_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
+        let event = SourceEvent::new(
+            SourceKind::Audio,
+            event_kind::AUDIO_CHUNK_V1,
+            json!({}),
+        );
+        let eid = event.id;
+        store
+            .put_and_append(event, "audio/wav", &test_wav())
+            .unwrap();
+        store
+            .enqueue_job(eid, JOB_KIND_TRANSCRIBE_AUDIO)
+            .unwrap();
+
+        // Far-field chatter transcribes to a single syllable ("嗯。") —
+        // real audio, but no timeline value.
+        let worker = TranscribeWorker::new(
+            Arc::clone(&store),
+            Arc::new(StubAsr::new("嗯。")),
             TranscribeWorkerConfig::default(),
         );
         assert_eq!(worker.tick_once().await.unwrap(), 1);
