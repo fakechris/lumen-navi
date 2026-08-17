@@ -110,8 +110,9 @@ impl AssistantConfig {
 /// Microphone intake (S3). Enable flag is `sources.audio`.
 ///
 /// Timing defaults align with the product reference path: **16 kHz mono**,
-/// short continuous windows suitable for on-device ASR (same family as Lumen ASR
-/// / native 16 kHz capture — dictation product stays separate).
+/// short capture windows for VAD; voiced windows are merged into ASR trunks
+/// (same family as Lumen ASR / native 16 kHz capture — dictation product stays
+/// separate).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
@@ -120,16 +121,20 @@ pub struct AudioConfig {
     /// Target / preferred sample rate (16_000 product default).
     pub sample_rate: u32,
     pub channels: u16,
-    /// Chunk duration before flush to store (3s product default).
+    /// Capture quantum used by the VAD/trunk state machine (500ms default).
     pub chunk_ms: u64,
     /// Hard cap: never emit a single chunk longer than this (ms).
     pub max_chunk_ms: u64,
     pub queue_capacity: usize,
     /// 0 = run until stop; >0 = finite chunks (smoke).
     pub ticks: u64,
-    /// Session mode: close after this much silence (1.2s product default).
+    /// End a voice trunk after this much trailing silence (1.2s default).
     pub session_silence_ms: u64,
-    /// Session mode: force-close open session after this duration (10 min).
+    /// Maximum duration of one merged voice trunk (12s default).
+    pub trunk_max_ms: u64,
+    /// Audio padding retained around a detected voice trunk (300ms default).
+    pub trunk_padding_ms: u64,
+    /// Force-close an open session after this duration (10 min).
     pub max_session_ms: u64,
     /// Energy VAD threshold (RMS of float samples in [-1, 1]).
     pub vad_rms_threshold: f32,
@@ -153,11 +158,13 @@ impl Default for AudioConfig {
             mode: "continuous".into(),
             sample_rate: 16_000,
             channels: 1,
-            chunk_ms: 3_000,
+            chunk_ms: 500,
             max_chunk_ms: 30_000,
             queue_capacity: 8,
             ticks: 0,
             session_silence_ms: 1_200,
+            trunk_max_ms: 12_000,
+            trunk_padding_ms: 300,
             max_session_ms: 600_000,
             vad_rms_threshold: 0.01,
             drop_silent_chunks: true,
@@ -682,7 +689,9 @@ mod tests {
         assert_eq!(c.api.bind, "127.0.0.1:7420");
         assert!(c.sources.audio);
         assert_eq!(c.audio.sample_rate, 16_000);
-        assert_eq!(c.audio.chunk_ms, 3_000);
+        assert_eq!(c.audio.chunk_ms, 500);
+        assert_eq!(c.audio.trunk_max_ms, 12_000);
+        assert_eq!(c.audio.trunk_padding_ms, 300);
         assert!(c.audio.device.is_empty());
         assert_eq!(c.audio.session_silence_ms, 1_200);
         assert_eq!(c.audio.max_session_ms, 600_000);

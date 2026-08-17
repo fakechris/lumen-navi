@@ -32,7 +32,7 @@ use lumen_process::{
 use lumen_sources_browser::BrowserIngestPolicy;
 use lumen_sources_media::{
     drain_transition, session_matches_frontmost, ActivityPoll, AudioOrchestrator,
-    CaptureOrchestrator, CapturedBatch, InteractionCoalescer, InteractionContext,
+    CaptureOrchestrator, CapturedAudio, CapturedBatch, InteractionCoalescer, InteractionContext,
     SessionTransition, SharedSessionBinder,
 };
 use lumen_store::{
@@ -1512,6 +1512,39 @@ fn stored_voice_flag(event: &lumen_types::SourceEvent) -> bool {
         .unwrap_or(true)
 }
 
+fn persist_audio_capture(
+    store: &SqliteStore,
+    cap: CapturedAudio,
+    enqueue_asr: bool,
+    counters: &control_server::ObserveCounters,
+) {
+    let bytes = cap.wav.len();
+    let voiced = stored_voice_flag(&cap.event);
+    match store.put_and_append(cap.event, cap.media_type, &cap.wav) {
+        Ok(stored) => {
+            note_write();
+            counters.note_persisted();
+            if enqueue_asr && voiced {
+                match store.enqueue_job(stored.id, JOB_KIND_TRANSCRIBE_AUDIO) {
+                    Ok(Some(_)) | Ok(None) => {}
+                    Err(e) => warn!(error = %e, "enqueue transcribe_audio failed"),
+                }
+            }
+            info!(
+                id = %stored.id,
+                kind = %stored.kind,
+                bytes,
+                session = ?stored.session_id,
+                "persisted audio trunk"
+            );
+        }
+        Err(e) => {
+            warn!(error = %e, "audio persist failed");
+            counters.note_persist_failed();
+        }
+    }
+}
+
 async fn run_audio_loop(
     store: Arc<SqliteStore>,
     config: AudioConfig,
@@ -1595,35 +1628,7 @@ async fn run_audio_loop(
                     last_audio_report = Instant::now();
                 }
                 for cap in batch {
-                    let bytes = cap.wav.len();
-                    // Only voiced chunks are worth ASR; silent ones may still be
-                    // stored (drop_silent_chunks=false) but must not burn
-                    // transcription work.
-                    let voiced = stored_voice_flag(&cap.event);
-                    match store.put_and_append(cap.event, cap.media_type, &cap.wav) {
-                        Ok(stored) => {
-                            note_write();
-                            counters.note_persisted();
-                            if enqueue_asr && voiced {
-                                match store.enqueue_job(stored.id, JOB_KIND_TRANSCRIBE_AUDIO) {
-                                    Ok(Some(_)) => {}
-                                    Ok(None) => {}
-                                    Err(e) => warn!(error = %e, "enqueue transcribe_audio failed"),
-                                }
-                            }
-                            info!(
-                                id = %stored.id,
-                                kind = %stored.kind,
-                                bytes,
-                                session = ?stored.session_id,
-                                "persisted audio chunk"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "audio persist failed");
-                            counters.note_persist_failed();
-                        }
-                    }
+                    persist_audio_capture(&store, cap, enqueue_asr, &counters);
                     if max_ticks > 0 && orch.stats().chunks_emitted >= max_ticks {
                         break;
                     }
@@ -1632,6 +1637,9 @@ async fn run_audio_loop(
         }
     }
 
+    if let Some(cap) = orch.take_pending_audio() {
+        persist_audio_capture(&store, cap, enqueue_asr, &counters);
+    }
     orch.force_close_session();
     stream.stop();
     if let Ok(mut status) = audio_status.lock() {

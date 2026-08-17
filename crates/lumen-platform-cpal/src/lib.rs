@@ -13,7 +13,7 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, StreamConfig};
 use lumen_platform::{MicCapturer, MicOpenConfig, MicStream, PcmChunk, PlatformError};
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 /// Desktop mic capturer over the cpal default host.
 pub struct CpalMicCapturer;
@@ -101,8 +101,12 @@ fn open_mic(cfg: MicOpenConfig) -> Result<MicStream, PlatformError> {
                         )));
                         return;
                     };
-                    let mut def_cfg: StreamConfig = def.config();
-                    def_cfg.channels = preferred_channels.min(def_cfg.channels.max(1));
+                    // Match lumen-asr's capture path: once the preferred
+                    // product format is rejected, use the device's complete
+                    // native config. Keeping the native channel count matters
+                    // for aggregate/CoreAudio inputs where the active mic is
+                    // not the first channel.
+                    let def_cfg: StreamConfig = def.config();
                     match try_build_stream(
                         &device,
                         &def_cfg,
@@ -144,7 +148,7 @@ fn open_mic(cfg: MicOpenConfig) -> Result<MicStream, PlatformError> {
                 return;
             }
             let _ = ready_tx.send(Ok(()));
-            debug!(
+            info!(
                 device = %name_for_thread,
                 sample_rate,
                 channels,
