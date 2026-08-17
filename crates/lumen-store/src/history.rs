@@ -168,23 +168,37 @@ pub fn history_slot_key(start: DateTime<Utc>) -> String {
 
 /// Overlay a persisted narrative onto a freshly folded card.
 ///
-/// `ready` is the LLM card. `extracted` is the AX/OCR digest written
-/// before the model runs — the UI should show that instead of the
-/// duration laundry list. `pending` / `failed` keep fold copy.
+/// `ready` is the LLM card. `extracted` is the AX/OCR digest. `pending` /
+/// `failed` still keep that digest — never fall back to the duration list.
 pub fn overlay_slot_narrative(slot: &mut HistorySlotDto, persisted: &HistorySlotDto) {
     match persisted.narrative_status.as_str() {
-        "ready" | "extracted" => {
-            slot.title = persisted.title.clone();
-            slot.body = persisted.body.clone();
+        "ready" | "extracted" | "pending" | "failed" => {
+            if !persisted.title.is_empty() {
+                slot.title = persisted.title.clone();
+            }
+            if !persisted.body.is_empty() && !is_duration_laundry(&persisted.body) {
+                slot.body = persisted.body.clone();
+            } else if !persisted.body.is_empty() && is_duration_laundry(&slot.body) {
+                // both laundry — keep fold
+            } else if !persisted.body.is_empty() {
+                slot.body = persisted.body.clone();
+            }
             slot.narrative_status = persisted.narrative_status.clone();
             slot.suggested_skills = persisted.suggested_skills.clone();
             slot.skill_checked = persisted.skill_checked;
         }
-        "pending" | "failed" => {
-            slot.narrative_status = persisted.narrative_status.clone();
-        }
         _ => {}
     }
+}
+
+/// Fold template: “这段时间在 App 上 3m 9s，随后…”.
+pub fn is_duration_laundry(body: &str) -> bool {
+    let t = body.trim();
+    if !t.starts_with("这段时间") {
+        return false;
+    }
+    let has_dur = t.contains('m') || t.contains('s') || t.contains("分钟");
+    has_dur && (t.contains("上 ") || t.contains("上"))
 }
 
 fn distinctive_title(
@@ -407,19 +421,31 @@ mod tests {
     }
 
     #[test]
-    fn overlay_failed_keeps_deterministic_copy() {
+    fn overlay_failed_keeps_extracted_not_laundry() {
         let start = Utc.with_ymd_and_hms(2026, 8, 15, 4, 20, 0).unwrap();
         let mut slot = fold_history_slots(
             &[seg("Safari", "com.apple.Safari", "Inbox", start, 10)],
             Utc,
         )
         .remove(0);
-        let original_title = slot.title.clone();
+        assert!(is_duration_laundry(&slot.body));
         let mut persisted = slot.clone();
-        persisted.title = "ignored".into();
+        persisted.title = "Inbox triage".into();
+        persisted.body = "你在 Safari 里核对了 Inbox。".into();
         persisted.narrative_status = "failed".into();
         overlay_slot_narrative(&mut slot, &persisted);
-        assert_eq!(slot.title, original_title);
+        assert_eq!(slot.title, "Inbox triage");
+        assert_eq!(slot.body, "你在 Safari 里核对了 Inbox。");
         assert_eq!(slot.narrative_status, "failed");
+    }
+
+    #[test]
+    fn wechat_laundry_is_detected() {
+        assert!(is_duration_laundry(
+            "这段时间在WeChat → Weixin上 3m 9s，随后在ZCode上 11s，以及在Lumen Navi上 5s。"
+        ));
+        assert!(!is_duration_laundry(
+            "你在 WeChat 表情面板里翻看了多组贴纸，随后切到 Ghostty。"
+        ));
     }
 }

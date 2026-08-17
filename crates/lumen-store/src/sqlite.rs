@@ -2194,22 +2194,27 @@ impl SqliteStore {
                 }
             }
         }
+        drop(conn);
+        for slot in &mut slots {
+            if slot.narrative_status == "ready" {
+                continue;
+            }
+            if slot.narrative_status != "none" && !crate::is_duration_laundry(&slot.body) {
+                continue;
+            }
+            let ev = self.extract_slot_evidence(slot.slot_start, slot.slot_end)?;
+            crate::apply_slot_evidence(slot, &ev);
+        }
         Ok(slots)
     }
 
-    /// Persist closed 15-minute cards so agents can read them without
-    /// rescanning every activity segment. The open slot is left to the query.
+    /// Persist today's 15-minute cards. The still-open slot is extracted
+    /// too so the Time tab is not stuck on a duration list until :15.
     /// An existing `ready` narrative is never overwritten by the fold.
-    ///
-    /// After the fold, closed cards that are not yet `ready` get an AX/OCR
-    /// digest (`extracted`) so the UI is not stuck on a duration list while
-    /// the LLM job is queued.
     pub fn persist_closed_history_slots(&self) -> Result<usize, StoreError> {
         let day = chrono::Local::now().format("%Y-%m-%d").to_string();
         let segs = self.list_activity_segments(&day)?;
         let mut slots = crate::fold_history_slots(&segs, chrono::Local);
-        let now = Utc::now();
-        slots.retain(|s| s.slot_end <= now);
 
         {
             let conn = self
