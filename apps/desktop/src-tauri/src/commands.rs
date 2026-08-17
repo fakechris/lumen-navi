@@ -92,6 +92,13 @@ pub struct ConfigSummary {
 }
 
 #[derive(Debug, Serialize)]
+pub struct OverviewRangeDto {
+    pub stored_events: usize,
+    pub ocr_docs: usize,
+    pub audio_events: usize,
+}
+
+#[derive(Debug, Serialize)]
 pub struct BrowserPairingDto {
     pub enabled: bool,
     pub configured: bool,
@@ -197,6 +204,15 @@ pub async fn get_health(state: State<'_, AppState>) -> Result<HealthResponse, St
             .map(|h| h.closed_eyes)
             .unwrap_or(cfg.privacy.closed_eyes),
         stored_events: n,
+        stored_audio_events: daemon_health
+            .as_ref()
+            .map(|h| h.stored_audio_events)
+            .unwrap_or_else(|| {
+                state
+                    .store
+                    .event_count_by_kind(lumen_types::event_kind::AUDIO_CHUNK_V1)
+                    .unwrap_or(0)
+            }),
         ocr_docs,
         schema_version: SCHEMA_VERSION,
         browser,
@@ -1532,6 +1548,23 @@ pub fn activity_range(
         .map_err(err)
 }
 
+#[tauri::command]
+pub fn overview_range(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> Result<OverviewRangeDto, String> {
+    let (stored_events, ocr_docs, audio_events) = state
+        .store
+        .overview_range_counts(&from, &to)
+        .map_err(err)?;
+    Ok(OverviewRangeDto {
+        stored_events,
+        ocr_docs,
+        audio_events,
+    })
+}
+
 /// Parse the `group_by` invoke param: "site"/"domain"/"website" → Site,
 /// anything else (including None) → App (default).
 fn parse_group_by(s: Option<&str>) -> lumen_store::GroupBy {
@@ -2185,6 +2218,7 @@ mod command_tests {
             paused: false,
             closed_eyes: false,
             stored_events: 0,
+            stored_audio_events: 0,
             ocr_docs: 0,
             schema_version: 0,
             browser: None,

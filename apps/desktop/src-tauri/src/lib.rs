@@ -422,6 +422,7 @@ pub fn run() {
             commands::llm_list_models,
             commands::activity_stats,
             commands::activity_range,
+            commands::overview_range,
             commands::activity_add_manual_segment,
             commands::activity_delete_segment,
             commands::activity_list_category_rules,

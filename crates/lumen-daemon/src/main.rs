@@ -1585,7 +1585,7 @@ async fn run_audio_loop(
                     if let Ok(mut status) = audio_status.lock() {
                         if stats.chunks_received > 0 && stats.chunks_emitted == 0 {
                             status.last_error = Some(format!(
-                                "已收到 {} 个音频块，但都被静音检测过滤（最大 RMS {:.4}），因此没有写入 audio_chunk.v1。请靠近麦克风说话，或检查系统输入设备。",
+                                "本进程已收到 {} 个音频块，但当前运行期间都被静音检测过滤（最大 RMS {:.4}），暂未新增 audio_chunk.v1。请靠近麦克风说话，或检查系统输入设备。",
                                 stats.chunks_received, stats.max_rms
                             ));
                         } else if stats.chunks_emitted > 0 {

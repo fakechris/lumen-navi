@@ -151,6 +151,12 @@ export interface RangeStats {
   by_category: CategoryTotal[];
 }
 
+export interface OverviewRange {
+  stored_events: number;
+  ocr_docs: number;
+  audio_events: number;
+}
+
 export type MatchField = "bundle_id" | "app_name" | "domain" | "url" | "title";
 export type ProductivityLevel = "productive" | "neutral" | "distracting";
 
@@ -182,6 +188,7 @@ export interface Health {
   paused: boolean;
   closed_eyes?: boolean;
   stored_events: number;
+  stored_audio_events: number;
   ocr_docs: number;
   schema_version: number;
   browser: BrowserHealth | null;

@@ -294,12 +294,12 @@ export function Onboarding({
         {step === 1 && (
           <div className="row mt">
             <span className={`pill ${permClass(perms?.screen_recording)}`}>
-              Screen {perms?.screen_recording ?? "…"}
+              Screen {permissionLabel(perms?.screen_recording)}
             </span>
             {platform?.screen_permission_gate !== false && (
               <>
                 <span className={`pill ${perms?.screen_capture_ready ? "ok" : "warn"}`}>
-                  Capture {perms?.direct_capture_status ?? "…"}
+                  Capture {captureStatusLabel(perms?.direct_capture_status)}
                 </span>
                 <button
                   className="btn primary"
@@ -317,7 +317,7 @@ export function Onboarding({
           <div className="stack mt">
             <div className="row">
               <span className={`pill ${permClass(perms?.microphone)}`}>
-                Mic {perms?.microphone ?? "…"}
+                Mic {permissionLabel(perms?.microphone)}
               </span>
               <button
                 className="btn primary"
@@ -642,4 +642,38 @@ function permClass(v?: string): "ok" | "warn" | "err" {
   if (s.includes("granted")) return "ok";
   if (s.includes("denied") || s.includes("restricted")) return "err";
   return "warn";
+}
+
+function permissionLabel(v?: string | null): string {
+  switch ((v ?? "").toLowerCase()) {
+    case "granted":
+      return "已允许";
+    case "denied":
+      return "已拒绝";
+    case "restricted":
+      return "受限";
+    case "notdetermined":
+      return "未确认";
+    default:
+      return v || "待确认";
+  }
+}
+
+function captureStatusLabel(v?: string | null): string {
+  switch ((v ?? "").toLowerCase()) {
+    case "ready":
+      return "已验证";
+    case "not_checked":
+      return "待验证";
+    case "blocked_by_screen_recording":
+      return "等待屏幕权限";
+    case "unavailable":
+      return "不可用";
+    case "probe_failed":
+      return "验证失败";
+    case "timed_out":
+      return "验证超时";
+    default:
+      return v || "待验证";
+  }
 }

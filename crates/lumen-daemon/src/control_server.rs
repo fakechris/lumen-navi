@@ -877,6 +877,9 @@ async fn handle_control(
 
 async fn build_health(st: &ControlState) -> Result<HealthResponse, anyhow::Error> {
     let stored = st.store.len().await?;
+    let stored_audio_events = st
+        .store
+        .event_count_by_kind(lumen_types::event_kind::AUDIO_CHUNK_V1)?;
     let ocr_docs = st.store.ocr_doc_count().unwrap_or(0);
     let mut sources = st.sources.clone();
     if let Some(audio) = sources.iter_mut().find(|source| source.id == "audio") {
@@ -896,6 +899,7 @@ async fn build_health(st: &ControlState) -> Result<HealthResponse, anyhow::Error
         paused: st.paused.load(Ordering::Relaxed),
         closed_eyes: st.closed_eyes.load(Ordering::Relaxed),
         stored_events: stored,
+        stored_audio_events,
         ocr_docs,
         schema_version: SCHEMA_VERSION,
         observe: Some(st.counters.snapshot()),

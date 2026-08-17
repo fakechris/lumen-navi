@@ -1003,6 +1003,41 @@ impl SqliteStore {
         Ok(n as usize)
     }
 
+    /// Count overview records whose event timestamps fall within an inclusive
+    /// local-date range.
+    pub fn overview_range_counts(
+        &self,
+        from_day: &str,
+        to_day: &str,
+    ) -> Result<(usize, usize, usize), StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM events WHERE date(ts,'localtime') BETWEEN ?1 AND ?2",
+                params![from_day, to_day],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::db)?;
+        let audio_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM events
+                 WHERE kind = ?1 AND date(ts,'localtime') BETWEEN ?2 AND ?3",
+                params![lumen_types::event_kind::AUDIO_CHUNK_V1, from_day, to_day],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::db)?;
+        let ocr_docs: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM ocr_docs d
+                 JOIN events e ON e.id = d.event_id
+                 WHERE date(e.ts,'localtime') BETWEEN ?1 AND ?2",
+                params![from_day, to_day],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::db)?;
+        Ok((events as usize, ocr_docs as usize, audio_events as usize))
+    }
+
     pub fn has_derived(&self, event_id: Uuid, kind: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let n: i64 = conn
@@ -3619,6 +3654,19 @@ impl SqliteStore {
     pub fn total_event_count(&self) -> Result<i64, StoreError> {
         Ok(self.len_sync()? as i64)
     }
+
+    /// Count persisted events of a specific kind.
+    pub fn event_count_by_kind(&self, kind: &str) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = ?1",
+                params![kind],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::db)?;
+        Ok(count as usize)
+    }
 }
 
 #[async_trait]
@@ -5044,6 +5092,51 @@ mod tests {
         assert_eq!(
             store.blobs().read_relative(&got.artifacts[0].path).unwrap(),
             b"png-bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_count_by_kind_counts_raw_kind_values() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store
+            .append(vec![
+                SourceEvent::new(
+                    SourceKind::Audio,
+                    event_kind::AUDIO_CHUNK_V1,
+                    json!({"text": "one"}),
+                ),
+                SourceEvent::new(
+                    SourceKind::Audio,
+                    event_kind::AUDIO_CHUNK_V1,
+                    json!({"text": "two"}),
+                ),
+                SourceEvent::new(
+                    SourceKind::Screen,
+                    event_kind::SCREENSHOT_V1,
+                    json!({}),
+                ),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .event_count_by_kind(event_kind::AUDIO_CHUNK_V1)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .event_count_by_kind(event_kind::SCREENSHOT_V1)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .overview_range_counts("1970-01-01", "2999-12-31")
+                .unwrap(),
+            (3, 0, 2)
         );
     }
 

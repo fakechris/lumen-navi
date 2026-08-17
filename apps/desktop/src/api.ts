@@ -21,6 +21,7 @@ import type {
   CategoryRule,
   ConfigSummary,
   DayStats,
+  OverviewRange,
   RangeStats,
   EventSummary,
   Health,
@@ -102,6 +103,8 @@ export const api = {
     invoke<DayStats>("activity_stats", { day, groupBy }),
   activityRange: (from: string, to: string, groupBy?: "app" | "site") =>
     invoke<RangeStats>("activity_range", { from, to, groupBy }),
+  overviewRange: (from: string, to: string) =>
+    invoke<OverviewRange>("overview_range", { from, to }),
   activityAddManualSegment: (opts: {
     startedAt: string;
     endedAt: string;

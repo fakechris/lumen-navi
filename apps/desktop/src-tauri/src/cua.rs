@@ -37,13 +37,32 @@ impl CuaController {
     pub fn open_lenient() -> Result<Self> {
         let paths = CuaPaths::for_current_user();
         lumen_cua::ensure_token_file(&paths.token_file).context("initialize Lumen Cua token")?;
-        // Best-effort bundle prep: accept whatever prepare gives us, fall back
-        // to the payload path if the strict verify inside prepare fails.
-        let app = prepare_runtime_cua_app(&paths).unwrap_or_else(|_| {
-            resolve_cua_payload_app()
-                .or_else(|| Some(paths.app.clone()))
-                .unwrap_or_else(|| paths.app.clone())
-        });
+        // Best-effort bundle prep, but never fall back to the payload nested
+        // inside Lumen Navi. macOS assigns Screen Recording permission to the
+        // running app identity; launching that nested payload makes a grant
+        // for /Applications/Lumen Cua.app appear to be ignored.
+        let app = match prepare_runtime_cua_app(&paths) {
+            Ok(app) => app,
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    app = %paths.app.display(),
+                    "Lumen Cua standalone preparation failed"
+                );
+                #[cfg(target_os = "macos")]
+                {
+                    if validate_cua_bundle(&paths.app, true).is_ok() {
+                        paths.app.clone()
+                    } else {
+                        return Err(error);
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    return Err(error);
+                }
+            }
+        };
         Ok(Self {
             paths,
             app,
@@ -164,7 +183,9 @@ impl CuaController {
             .lock()
             .map_err(|_| "Lumen Cua lifecycle lock was poisoned".to_string())?;
         let client = self.ensure_running_unlocked()?;
-        self.restart_and_read_permission(client)
+        // A TCC preflight only proves the grant exists. Reopen the helper and
+        // capture one bounded frame so the UI can report actual readiness.
+        self.restart_and_verify_capture(client)
     }
 
     fn request_screen_permission_via_launch_services(&self) -> Result<CuaStatus, String> {
@@ -281,19 +302,6 @@ impl CuaController {
         Ok(frame.width > 0 && frame.height > 0 && !frame.png_or_jpeg_bytes.is_empty())
     }
 
-    fn restart_and_read_permission(&self, client: CuaClient) -> Result<bool, String> {
-        client
-            .shutdown()
-            .map_err(|error| format!("stop Lumen Cua before permission refresh: {error}"))?;
-        if !wait_for_path_state(&self.paths.socket, false, Duration::from_secs(5)) {
-            return Err("Lumen Cua acknowledged shutdown but its IPC endpoint remained".into());
-        }
-        let status = self
-            .ensure_running_unlocked()?
-            .status()
-            .map_err(|error| error.to_string())?;
-        Ok(status.screen_recording == PermissionState::Granted)
-    }
 }
 
 fn permission_setup_is_ready(status: &CuaStatus) -> bool {
