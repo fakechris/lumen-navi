@@ -268,9 +268,10 @@ impl TranscribeWorker {
                 + "\n…[truncated]";
         }
 
-        // Skip empty transcripts: silence/noise chunks that slipped past VAD
-        // produce no value in the FTS index or timeline — don't persist them.
-        let nonempty = !result.text.trim().is_empty();
+        // Skip transcripts without any word character: noise trunks that
+        // slipped past VAD typically transcribe to bare punctuation ("。").
+        // They carry no meaning for the timeline or FTS index.
+        let nonempty = has_meaningful_text(&result.text);
         if !nonempty {
             info!(
                 event = %job.event_id,
@@ -388,6 +389,14 @@ fn retry_delay(attempts: i64, base: Duration, max: Duration) -> Duration {
     let mult = 1u64 << shift;
     let ms = base.as_millis() as u64 * mult;
     Duration::from_millis(ms.min(max.as_millis() as u64))
+}
+
+/// True when the transcript contains at least one letter/CJK character once
+/// punctuation and whitespace are stripped. Pure-punctuation output ("。")
+/// is the signature of a noise trunk and is not persisted.
+fn has_meaningful_text(text: &str) -> bool {
+    text.chars()
+        .any(|c| c.is_alphanumeric())
 }
 
 fn classify_asr_err(e: AsrError) -> JobError {
@@ -524,6 +533,34 @@ mod tests {
         // Job completes but nothing is written or indexed; counted as empty.
         assert!(!store.has_derived(eid, DERIVED_TRANSCRIPT_V1).unwrap());
         assert!(store.search_ocr("transcript", 5).unwrap().is_empty());
+        assert_eq!(worker.stats().empty, 1);
+        assert_eq!(worker.stats().succeeded, 0);
+    }
+
+    #[tokio::test]
+    async fn punctuation_only_transcript_is_not_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
+        let event = SourceEvent::new(
+            SourceKind::Audio,
+            event_kind::AUDIO_CHUNK_V1,
+            json!({}),
+        );
+        let eid = event.id;
+        store
+            .put_and_append(event, "audio/wav", &test_wav())
+            .unwrap();
+        store
+            .enqueue_job(eid, JOB_KIND_TRANSCRIBE_AUDIO)
+            .unwrap();
+
+        let worker = TranscribeWorker::new(
+            Arc::clone(&store),
+            Arc::new(StubAsr::new("。，！")),
+            TranscribeWorkerConfig::default(),
+        );
+        assert_eq!(worker.tick_once().await.unwrap(), 1);
+        assert!(!store.has_derived(eid, DERIVED_TRANSCRIPT_V1).unwrap());
         assert_eq!(worker.stats().empty, 1);
         assert_eq!(worker.stats().succeeded, 0);
     }

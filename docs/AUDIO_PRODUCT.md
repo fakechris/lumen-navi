@@ -25,8 +25,10 @@ Defaults match the product reference capture path (native 16 kHz mono / Lumen AS
 |------|---------|--------|
 | `sample_rate` | **16000** | Preferred mic open; device may negotiate |
 | `channels` | **1** | Mono |
-| `chunk_ms` | **3000** | Continuous Observe window (ASR-friendly) |
+| `chunk_ms` | **500** | VAD capture quantum; voice is merged into trunks |
 | `max_chunk_ms` | **30000** | Hard cap per chunk |
+| `trunk_max_ms` | **12000** | Maximum merged voice trunk before forced flush |
+| `trunk_padding_ms` | **300** | Tail padding retained around an utterance (+300ms onset pre-roll) |
 | `session_silence_ms` | **1200** | End utterance / session after quiet |
 | `max_session_ms` | **600000** | 10 min force-close / roll session id |
 | `vad_rms_threshold` | **0.01** | Energy VAD |
@@ -37,9 +39,9 @@ Defaults match the product reference capture path (native 16 kHz mono / Lumen AS
 ```
 mic (cpal stream on audio thread)
         ↓
-  chunk every chunk_ms (PCM → WAV)  + privacy / VAD / size gates
+chunk every chunk_ms (PCM) → frame VAD → trunk/hangover
         ↓
-  store event + audio/wav blob
+  store voiced trunk + audio/wav blob
         ↓
   enqueue job transcribe_audio (deduped if open)
         ↓
@@ -54,8 +56,8 @@ mic (cpal stream on audio thread)
 
 | Mode | Behavior |
 |------|----------|
-| `continuous` | Fixed-duration chunks; session id rolls every `max_session_ms` |
-| `session` | Open on voice (RMS ≥ threshold); close after silence or `max_session_ms` |
+| `continuous` | Merge voiced quanta into trunks; session id rolls every `max_session_ms` |
+| `session` | Open on voice; flush after trailing silence or `max_session_ms` |
 
 ## Payloads
 
@@ -67,8 +69,8 @@ mic (cpal stream on audio thread)
   "device": "MacBook Pro Microphone",
   "sample_rate": 48000,
   "channels": 1,
-  "duration_ms": 3000,
-  "samples": 144000,
+  "duration_ms": 1200,
+  "samples": 57600,
   "mode": "continuous",
   "rms": 0.02,
   "peak": 0.4,
@@ -107,14 +109,16 @@ audio = true
 mode = "continuous"          # continuous | session
 sample_rate = 16000
 channels = 1
-chunk_ms = 3000
+chunk_ms = 500
 max_chunk_ms = 30000
 queue_capacity = 8
 ticks = 0                    # 0 = until stop; >0 finite chunks (smoke)
 session_silence_ms = 1200
+trunk_max_ms = 12000
+trunk_padding_ms = 300
 max_session_ms = 600000
 vad_rms_threshold = 0.01
-drop_silent_chunks = true     # silent chunks (RMS below threshold) are not stored
+drop_silent_chunks = true     # retained for config compatibility; silence is never trunked
 max_audio_bytes = 8388608
 device = ""
 enqueue_transcribe = true     # voiced chunks only; empty transcripts are not persisted
