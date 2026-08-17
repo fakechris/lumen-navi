@@ -34,7 +34,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub use blob::BlobStore;
-pub use history::{fold_history_slots, history_slot_key, overlay_slot_narrative};
+pub use history::{
+    fold_history_slots, history_slot_key, is_duration_laundry, overlay_slot_narrative,
+};
 pub use pixel_hash::PixelHashWindow;
 pub use scene::fold_scene_day;
 pub use schema::SCHEMA_VERSION;
