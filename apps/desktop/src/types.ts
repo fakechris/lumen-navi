@@ -214,6 +214,12 @@ export interface Permissions {
   accessibility: string;
 }
 
+export interface AudioReadiness {
+  permission: string;
+  ready: boolean;
+  error: string | null;
+}
+
 /** What the OS backend can actually do — drives platform-specific copy. */
 export interface PlatformInfo {
   os: "macos" | "windows" | "other";

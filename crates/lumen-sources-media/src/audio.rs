@@ -26,6 +26,9 @@ pub struct CapturedAudio {
 
 #[derive(Debug, Clone, Default)]
 pub struct AudioStats {
+    pub chunks_received: u64,
+    pub last_rms: f32,
+    pub max_rms: f32,
     pub chunks_emitted: u64,
     pub chunks_dropped_silent: u64,
     pub chunks_dropped_queue: u64,
@@ -44,6 +47,9 @@ pub struct AudioOrchestrator {
     last_voice: Option<Instant>,
     ordinal: u64,
     stats_emitted: AtomicU64,
+    stats_received: AtomicU64,
+    last_rms: f32,
+    max_rms: f32,
     stats_silent: AtomicU64,
     stats_pause: AtomicU64,
     stats_oversized: AtomicU64,
@@ -61,6 +67,9 @@ impl AudioOrchestrator {
             last_voice: None,
             ordinal: 0,
             stats_emitted: AtomicU64::new(0),
+            stats_received: AtomicU64::new(0),
+            last_rms: 0.0,
+            max_rms: 0.0,
             stats_silent: AtomicU64::new(0),
             stats_pause: AtomicU64::new(0),
             stats_oversized: AtomicU64::new(0),
@@ -75,6 +84,9 @@ impl AudioOrchestrator {
 
     pub fn stats(&self) -> AudioStats {
         AudioStats {
+            chunks_received: self.stats_received.load(Ordering::Relaxed),
+            last_rms: self.last_rms,
+            max_rms: self.max_rms,
             chunks_emitted: self.stats_emitted.load(Ordering::Relaxed),
             chunks_dropped_silent: self.stats_silent.load(Ordering::Relaxed),
             chunks_dropped_queue: 0,
@@ -87,6 +99,9 @@ impl AudioOrchestrator {
 
     /// Process one PCM chunk according to mode / privacy / VAD / size limits.
     pub fn on_chunk(&mut self, chunk: PcmChunk) -> Option<CapturedAudio> {
+        self.stats_received.fetch_add(1, Ordering::Relaxed);
+        self.last_rms = chunk.rms;
+        self.max_rms = self.max_rms.max(chunk.rms);
         if self.privacy.paused {
             self.stats_pause.fetch_add(1, Ordering::Relaxed);
             return None;
@@ -177,7 +192,10 @@ impl AudioOrchestrator {
     }
 
     /// Drain pending chunks from the mic stream (non-blocking).
-    pub fn drain_ready(&mut self, stream: &MicStream) -> Vec<CapturedAudio> {
+    pub fn drain_ready(
+        &mut self,
+        stream: &MicStream,
+    ) -> Result<Vec<CapturedAudio>, lumen_platform::PlatformError> {
         let mut out = Vec::new();
         loop {
             match stream.try_recv() {
@@ -187,11 +205,11 @@ impl AudioOrchestrator {
                     }
                 }
                 Ok(None) => break,
-                Err(_) => break,
+                Err(error) => return Err(error),
             }
         }
         self.apply_idle_session_timeouts();
-        out
+        Ok(out)
     }
 
     fn apply_idle_session_timeouts(&mut self) {

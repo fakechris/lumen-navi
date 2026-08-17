@@ -209,7 +209,19 @@ export default function App() {
   const [asrModels, setAsrModels] = useState<AsrModelStatus | null>(null);
   const [assistant, setAssistant] = useState<AssistantConfig | null>(null);
   const [assistantKey, setAssistantKey] = useState("");
+  const [assistantSaveState, setAssistantSaveState] = useState<
+    "idle" | "saving" | "saved" | "error"
+  >("idle");
+  const [assistantSaveMessage, setAssistantSaveMessage] = useState<string | null>(null);
+  const [llmTestState, setLlmTestState] = useState<
+    "idle" | "testing" | "success" | "error"
+  >("idle");
+  const [llmTestMessage, setLlmTestMessage] = useState<string | null>(null);
+  const [modelListBusy, setModelListBusy] = useState(false);
+  const [modelListMessage, setModelListMessage] = useState<string | null>(null);
   const [browserPairing, setBrowserPairing] = useState<BrowserPairing | null>(null);
+  const assistantSaveRef = useRef<Promise<void>>(Promise.resolve());
+  const assistantLastSaveRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     void api.getBuildInfo().then(setBuildInfo).catch(() => {});
@@ -387,21 +399,53 @@ export default function App() {
 
   async function requestMicrophone() {
     setBusy(true);
+    setError(null);
     try {
-      const granted = await api.requestMicrophonePermission();
       await api.openPrivacySettings("microphone");
-      setStatusNote(
-        granted
-          ? "麦克风权限已生效；已打开系统设置供你核对。"
-          : "麦克风权限尚未允许；Lumen Navi 现在应已出现在系统列表中。",
-      );
-      setError(null);
+      const nextPerms = await api.getPermissions();
+      setPerms(nextPerms);
+      if (nextPerms.microphone.toLowerCase() !== "granted") {
+        setStatusNote(
+          "已打开系统设置。请在隐私与安全性 → 麦克风中打开 Lumen Navi，返回后点击“检查采集”。应用不会替你修改权限。",
+        );
+        return;
+      }
+      const probe = await api.checkAudioReadiness();
+      if (!probe.ready) {
+        setError(`麦克风权限已允许，但采集无法启动：${probe.error ?? "未知错误"}`);
+        setStatusNote("请检查系统输入设备，修复后点击“检查采集”重试。");
+        return;
+      }
+      setStatusNote("麦克风权限和采集设备均已验证。点击“启动采集”开启持续录音。");
     } catch (e) {
-      setError(`请求麦克风权限失败：${String(e)}`);
+      setError(`检查麦克风失败：${String(e)}`);
     } finally {
       setBusy(false);
     }
   }
+
+  const restartAudio = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    setStatusNote("正在检查麦克风设备…");
+    try {
+      const probe = await api.checkAudioReadiness();
+      if (!probe.ready) {
+        setError(
+          `麦克风还不能启动：${probe.error ?? "未知错误"}。请先完成系统权限和输入设备设置。`,
+        );
+        return;
+      }
+      const next = await api.updateSourcesConfig({ audio: true });
+      setCfg(next);
+      await refresh();
+      setStatusNote("麦克风采集已启动，正在等待实时状态确认。");
+    } catch (e) {
+      setError(`启动麦克风采集失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh]);
 
   async function configureBrowserPairing(rotate = false) {
     setBusy(true);
@@ -492,6 +536,7 @@ export default function App() {
   }, [activeImage]);
 
   const nav = NAV.find((n) => n.id === tab)!;
+  const audioSource = health?.sources.find((source) => source.id === "audio");
 
   const updateRuntimeConfig = useCallback(async (
     update: SourcesUpdate,
@@ -539,17 +584,41 @@ export default function App() {
   }, [cfg, refresh]);
 
   const updateAssistant = useCallback(async (update: AssistantUpdate) => {
-    setBusy(true);
-    try {
-      const a = await api.assistantUpdateConfig(update);
-      setAssistant(a);
-      setStatusNote("划词助手配置已保存。");
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
+    const operation = assistantSaveRef.current.then(async () => {
+      setAssistantSaveState("saving");
+      setAssistantSaveMessage("正在保存配置…");
+      try {
+        const a = await api.assistantUpdateConfig(update);
+        setAssistant(a);
+        setAssistantSaveState("saved");
+        setAssistantSaveMessage(`已保存 · ${new Date().toLocaleTimeString()}`);
+        return;
+      } catch (e) {
+        const message = String(e);
+        setAssistantSaveState("error");
+        setAssistantSaveMessage(`保存失败：${message}`);
+        throw e;
+      }
+    });
+    assistantLastSaveRef.current = operation;
+    assistantSaveRef.current = operation.catch(() => {});
+    return operation;
   }, []);
+
+  async function testLlm() {
+    setLlmTestState("testing");
+    setLlmTestMessage("正在测试当前配置…");
+    try {
+      await assistantLastSaveRef.current;
+      const result = await api.llmTest();
+      setLlmTestState("success");
+      setLlmTestMessage(result || "连接成功");
+      setError(null);
+    } catch (e) {
+      setLlmTestState("error");
+      setLlmTestMessage(`连接失败：${String(e)}`);
+    }
+  }
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -786,9 +855,20 @@ export default function App() {
                 />
                 <StatCard
                   label="Audio / ASR"
-                  tone={cfg?.asr ? "accent" : "default"}
-                  value={cfg?.audio ? (cfg.asr ? "转写" : "仅摄入") : "关闭"}
-                  hint={`${cfg?.asr_engine ?? "sensevoice"} · ${cfg?.asr_locale ?? ""} · ${cfg?.audio_chunk_ms ?? "—"}ms`}
+                  tone={audioSource?.last_error ? "danger" : audioSource?.running ? "accent" : "default"}
+                  value={
+                    !audioSource?.enabled
+                      ? "关闭"
+                      : audioSource.running
+                        ? cfg?.asr
+                          ? "运行中 · 转写"
+                          : "运行中 · 仅摄入"
+                        : "已启用但未运行"
+                  }
+                  hint={
+                    audioSource?.last_error ??
+                    `${cfg?.asr_engine ?? "sensevoice"} · ${cfg?.asr_locale ?? ""} · ${cfg?.audio_chunk_ms ?? "—"}ms`
+                  }
                 />
                 {health?.observe && (
                   <>
@@ -881,12 +961,57 @@ export default function App() {
                 {perms?.direct_capture_error && (
                   <p className="meta mt">{perms.direct_capture_error}</p>
                 )}
+                <div
+                  className={`onboard-status mt ${audioSource?.running ? "ok" : ""}`}
+                  role={audioSource?.last_error ? "alert" : "status"}
+                >
+                  <div className="row" style={{ justifyContent: "space-between" }}>
+                    <strong>麦克风采集</strong>
+                    <span
+                      className={`pill ${
+                        audioSource?.last_error
+                          ? "err"
+                          : audioSource?.running
+                            ? "ok"
+                            : "warn"
+                      }`}
+                    >
+                      {!audioSource?.enabled
+                        ? "已关闭"
+                        : audioSource?.running
+                          ? "运行中"
+                          : "未运行"}
+                    </span>
+                  </div>
+                  <p className="meta mt">
+                    {audioSource?.last_error ??
+                      (audioSource?.running
+                        ? "已成功打开输入设备，音频会按配置写入本地事件。"
+                        : "权限可能已允许，但采集设备还没有成功启动。")}
+                  </p>
+                  <div className="row mt">
+                    <Button
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() => void requestMicrophone()}
+                    >
+                      检查采集
+                    </Button>
+                    <Button
+                      variant="primary"
+                      disabled={busy}
+                      onClick={() => void restartAudio()}
+                    >
+                      启动采集
+                    </Button>
+                  </div>
+                </div>
                 <div className="row mt">
                   <Button variant="secondary" disabled={busy} onClick={() => void requestScreenRecording()}>
                     请求屏幕录制
                   </Button>
                   <Button variant="secondary" disabled={busy} onClick={() => void requestMicrophone()}>
-                    请求麦克风
+                    打开麦克风设置
                   </Button>
                   <Button variant="secondary" disabled={busy} onClick={() => void requestAccessibility()}>
                     请求辅助功能
@@ -1710,6 +1835,81 @@ export default function App() {
                   全应用共用一份配置：划词助手、Roast 我的一天、AI Chat。
                 </p>
                 <div className="stack mt">
+                  <div
+                    className={`onboard-status ${
+                      assistantSaveState === "saved" ? "ok" : ""
+                    }`}
+                    role={assistantSaveState === "error" ? "alert" : "status"}
+                  >
+                    <div className="row" style={{ justifyContent: "space-between" }}>
+                      <strong>配置状态</strong>
+                      <span
+                        className={`pill ${
+                          assistantSaveState === "error"
+                            ? "err"
+                            : assistantSaveState === "saved"
+                              ? "ok"
+                              : assistantSaveState === "saving"
+                                ? "warn"
+                                : "warn"
+                        }`}
+                      >
+                        {assistantSaveState === "saving"
+                          ? "保存中…"
+                          : assistantSaveState === "saved"
+                            ? "已保存"
+                            : assistantSaveState === "error"
+                              ? "保存失败"
+                              : "待修改"}
+                      </span>
+                    </div>
+                    <p className="meta mt" style={{ marginBottom: 0 }}>
+                      {assistantSaveMessage ??
+                        (assistant?.api_key_set
+                          ? "当前配置已加载，API key 已保存（不会显示明文）。"
+                          : "填写配置后会自动保存，保存成功后会在这里确认。")}
+                    </p>
+                  </div>
+                  {(llmTestState !== "idle" || llmTestMessage) && (
+                    <div
+                      className={`onboard-status ${
+                        llmTestState === "success" ? "ok" : ""
+                      }`}
+                      role={llmTestState === "error" ? "alert" : "status"}
+                    >
+                      <div className="row" style={{ justifyContent: "space-between" }}>
+                        <strong>连接测试</strong>
+                        <span
+                          className={`pill ${
+                            llmTestState === "success"
+                              ? "ok"
+                              : llmTestState === "error"
+                                ? "err"
+                                : "warn"
+                          }`}
+                        >
+                          {llmTestState === "testing"
+                            ? "测试中…"
+                            : llmTestState === "success"
+                              ? "成功"
+                              : "失败"}
+                        </span>
+                      </div>
+                      <p className="meta mt" style={{ marginBottom: 0 }}>
+                        {llmTestMessage}
+                      </p>
+                      {llmTestState === "error" && (
+                        <Button
+                          variant="secondary"
+                          className="mt"
+                          disabled={busy}
+                          onClick={() => void testLlm()}
+                        >
+                          重试测试
+                        </Button>
+                      )}
+                    </div>
+                  )}
                   <label className="field">
                     <span className="meta">LLM Provider</span>
                     <select
@@ -1822,27 +2022,50 @@ export default function App() {
                       )}
                       <Button
                         variant="secondary"
-                        disabled={busy}
+                        disabled={busy || modelListBusy}
                         onClick={() => {
+                          setModelListBusy(true);
+                          setModelListMessage("正在获取模型列表…");
                           void api
                             .llmListModels()
                             .then((models) => {
                               const pid = assistant?.provider_id ?? "custom";
-                              if (pid === "custom" || models.length === 0) return;
+                              if (pid === "custom") {
+                                setModelListMessage(
+                                  "自定义提供商不会自动发现模型，请直接填写模型名。",
+                                );
+                                return;
+                              }
+                              if (models.length === 0) {
+                                setModelListMessage(
+                                  "提供商没有返回可用模型，请检查 API key、Endpoint，或直接填写模型名。",
+                                );
+                                return;
+                              }
                               // Merge fetched models into the preset's list for this session.
                               const existing = getProvider(pid);
                               if (existing) {
-                                existing.models = Array.from(new Set([...existing.models, ...models]));
+                                existing.models = Array.from(
+                                  new Set([...existing.models, ...models]),
+                                );
                               }
-                              setStatusNote(`获取到 ${models.length} 个模型`);
+                              setModelListMessage(`已获取 ${models.length} 个模型。`);
                             })
-                            .catch((e) => setError(`获取模型列表失败：${String(e)}`));
+                            .catch((e) => {
+                              setModelListMessage(`获取失败：${String(e)}`);
+                            })
+                            .finally(() => setModelListBusy(false));
                         }}
                       >
-                        刷新模型
+                        {modelListBusy ? "获取中…" : "刷新模型"}
                       </Button>
                     </div>
                   </label>
+                  {modelListMessage && (
+                    <p className="meta" role="status">
+                      {modelListMessage}
+                    </p>
+                  )}
                   <label className="field">
                     <span className="meta">
                       API key（{assistant?.api_key_set ? "已配置，输入以更换" : "未配置"}）
@@ -1856,8 +2079,10 @@ export default function App() {
                       onBlur={() => {
                         const k = assistantKey.trim();
                         if (k) {
-                          void updateAssistant({ api_key: k });
-                          setAssistantKey("");
+                          void updateAssistant({ api_key: k }).then(
+                            () => setAssistantKey(""),
+                            () => {},
+                          );
                         }
                       }}
                     />
@@ -1866,23 +2091,23 @@ export default function App() {
                     {assistant?.api_key_set && (
                       <button
                         className="btn"
-                        disabled={busy}
-                        onClick={() => void updateAssistant({ api_key: "" })}
+                        disabled={busy || assistantSaveState === "saving"}
+                        onClick={() => {
+                          void updateAssistant({ api_key: "" }).then(
+                            () => setAssistantKey(""),
+                            () => {},
+                          );
+                        }}
                       >
                         清除 API key
                       </button>
                     )}
                     <Button
                       variant="secondary"
-                      disabled={busy}
-                      onClick={() => {
-                        void api
-                          .llmTest()
-                          .then((r) => setStatusNote(`✓ ${r}`))
-                          .catch((e) => setError(`连接测试失败：${String(e)}`));
-                      }}
+                      disabled={busy || llmTestState === "testing"}
+                      onClick={() => void testLlm()}
                     >
-                      测试连接
+                      {llmTestState === "testing" ? "测试中…" : "测试连接"}
                     </Button>
                   </div>
                   <p className="meta">

@@ -7,6 +7,7 @@ import type {
   AiThread,
   AiMessage,
   AiSendResult,
+  AudioReadiness,
   RoastRecord,
   RoastIndexEntry,
   AsrModelCandidate,
@@ -32,6 +33,7 @@ import type {
 
 export const api = {
   getHealth: () => invoke<Health>("get_health"),
+  checkAudioReadiness: () => invoke<AudioReadiness>("check_audio_readiness"),
   getPermissions: () => invoke<Permissions>("get_permissions"),
   getPlatformInfo: () => invoke<PlatformInfo>("get_platform_info"),
   searchText: (query: string, limit = 30) =>

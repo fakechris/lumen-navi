@@ -30,6 +30,8 @@ fn open_mic(cfg: MicOpenConfig) -> Result<MicStream, PlatformError> {
     let device_name = device.name().unwrap_or_else(|_| "default-input".into());
 
     let (tx, rx) = mpsc::sync_channel::<PcmChunk>(8);
+    let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), String>>(1);
+    let (first_data_tx, first_data_rx) = mpsc::sync_channel::<()>(1);
     let stop = Arc::new(AtomicBool::new(false));
     let stop_t = Arc::clone(&stop);
     let epoch = Arc::new(AtomicU64::new(1));
@@ -45,6 +47,8 @@ fn open_mic(cfg: MicOpenConfig) -> Result<MicStream, PlatformError> {
             let supported = match device.default_input_config() {
                 Ok(c) => c,
                 Err(e) => {
+                    let message = format!("no default input config: {e}");
+                    let _ = ready_tx.send(Err(message.clone()));
                     warn!(error = %e, "no default input config");
                     return;
                 }
@@ -65,11 +69,15 @@ fn open_mic(cfg: MicOpenConfig) -> Result<MicStream, PlatformError> {
                 &epoch_t,
                 &tx,
                 &name_for_thread,
+                &first_data_tx,
             ) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(error = %e, "mic preferred config failed; using device default");
                     let Ok(def) = device.default_input_config() else {
+                        let _ = ready_tx.send(Err(format!(
+                            "microphone default configuration is unavailable: {e}"
+                        )));
                         return;
                     };
                     let mut def_cfg: StreamConfig = def.config();
@@ -82,9 +90,12 @@ fn open_mic(cfg: MicOpenConfig) -> Result<MicStream, PlatformError> {
                         &epoch_t,
                         &tx,
                         &name_for_thread,
+                        &first_data_tx,
                     ) {
                         Ok(v) => v,
                         Err(e2) => {
+                            let _ =
+                                ready_tx.send(Err(format!("microphone stream open failed: {e2}")));
                             warn!(error = %e2, "mic stream open failed");
                             return;
                         }
@@ -93,9 +104,25 @@ fn open_mic(cfg: MicOpenConfig) -> Result<MicStream, PlatformError> {
             };
 
             if let Err(e) = stream.play() {
+                let _ = ready_tx.send(Err(format!("microphone stream play failed: {e}")));
                 warn!(error = %e, "mic stream play failed");
                 return;
             }
+            if let Err(error) = first_data_rx.recv_timeout(Duration::from_secs(3)) {
+                let message = match error {
+                    mpsc::RecvTimeoutError::Timeout => {
+                        "microphone stream started but produced no input frames within 3 seconds"
+                            .to_string()
+                    }
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        "microphone input callback exited before producing input frames".into()
+                    }
+                };
+                let _ = ready_tx.send(Err(message.clone()));
+                warn!(error = %message, "mic stream produced no input frames");
+                return;
+            }
+            let _ = ready_tx.send(Ok(()));
             debug!(
                 device = %name_for_thread,
                 sample_rate,
@@ -123,6 +150,29 @@ fn open_mic(cfg: MicOpenConfig) -> Result<MicStream, PlatformError> {
         })
         .map_err(|e| PlatformError::Message(format!("spawn mic thread: {e}")))?;
 
+    match ready_rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(Ok(())) => {}
+        Ok(Err(message)) => {
+            stop.store(true, Ordering::SeqCst);
+            let _ = join.join();
+            return Err(PlatformError::Message(message));
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            stop.store(true, Ordering::SeqCst);
+            let _ = join.join();
+            return Err(PlatformError::Message(
+                "microphone stream did not become ready within 3 seconds".into(),
+            ));
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            stop.store(true, Ordering::SeqCst);
+            let _ = join.join();
+            return Err(PlatformError::Message(
+                "microphone startup thread exited without a status".into(),
+            ));
+        }
+    }
+
     Ok(MicStream::new(rx, stop, join))
 }
 
@@ -136,6 +186,7 @@ fn try_build_stream(
     epoch: &Arc<AtomicU64>,
     tx: &mpsc::SyncSender<PcmChunk>,
     device_name: &str,
+    first_data_tx: &mpsc::SyncSender<()>,
 ) -> Result<BuiltStream, PlatformError> {
     let channels = stream_cfg.channels.max(1);
     let sample_rate = stream_cfg.sample_rate.0;
@@ -148,6 +199,9 @@ fn try_build_stream(
     let my_epoch = epoch.load(Ordering::SeqCst);
     let tx_cb = tx.clone();
     let name_cb = device_name.to_string();
+    let first_data_f32 = first_data_tx.clone();
+    let first_data_i16 = first_data_tx.clone();
+    let first_data_u16 = first_data_tx.clone();
     let err_fn = |e| warn!(error = %e, "mic stream error");
 
     let stream = match sample_format {
@@ -158,6 +212,7 @@ fn try_build_stream(
                     if epoch_cb.load(Ordering::Relaxed) != my_epoch {
                         return;
                     }
+                    let _ = first_data_f32.try_send(());
                     append_samples(&buf_cb, data.iter().map(|s| s.to_sample::<i16>()));
                     flush_if_ready(
                         &buf_cb,
@@ -179,6 +234,7 @@ fn try_build_stream(
                     if epoch_cb.load(Ordering::Relaxed) != my_epoch {
                         return;
                     }
+                    let _ = first_data_i16.try_send(());
                     append_samples(&buf_cb, data.iter().copied());
                     flush_if_ready(
                         &buf_cb,
@@ -200,6 +256,7 @@ fn try_build_stream(
                     if epoch_cb.load(Ordering::Relaxed) != my_epoch {
                         return;
                     }
+                    let _ = first_data_u16.try_send(());
                     append_samples(&buf_cb, data.iter().map(|s| (*s as i32 - 32768) as i16));
                     flush_if_ready(
                         &buf_cb,
