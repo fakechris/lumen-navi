@@ -396,6 +396,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_health,
+            commands::check_audio_readiness,
+            commands::check_audio_readiness,
             commands::get_permissions,
             commands::get_platform_info,
             commands::get_build_info,

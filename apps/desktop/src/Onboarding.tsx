@@ -4,6 +4,7 @@ import { api } from "./api";
 import type {
   AsrDownloadProgress,
   AsrModelStatus,
+  AudioReadiness,
   OnboardingState,
   Permissions,
   PlatformInfo,
@@ -54,6 +55,7 @@ export function Onboarding({
   const STEPS = stepsFor(platform);
   const [step, setStep] = useState(Math.min(initial.step, 4));
   const [perms, setPerms] = useState<Permissions | null>(null);
+  const [audioProbe, setAudioProbe] = useState<AudioReadiness | null>(null);
   const [launch, setLaunch] = useState(initial.launch_observe);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -64,6 +66,7 @@ export function Onboarding({
   const [dlMsg, setDlMsg] = useState("");
   const [dlPct, setDlPct] = useState<number | null>(null);
   const screenPermissionPending = useRef(false);
+  const microphonePermissionPending = useRef(false);
 
   const refreshAsr = useCallback(async () => {
     try {
@@ -85,21 +88,39 @@ export function Onboarding({
 
   useEffect(() => {
     const refreshPendingScreenPermission = async () => {
-      if (!screenPermissionPending.current) return;
+      if (!screenPermissionPending.current && step !== 2) return;
       try {
-        const granted = await api.refreshScreenPermission();
-        setPerms(await api.getPermissions());
-        if (granted) {
-          screenPermissionPending.current = false;
-          setError(null);
+        if (screenPermissionPending.current) {
+          const granted = await api.refreshScreenPermission();
+          if (granted) {
+            screenPermissionPending.current = false;
+            setError(null);
+          }
+        }
+        const nextPerms = await api.getPermissions();
+        setPerms(nextPerms);
+        if (step === 2 && nextPerms.microphone.toLowerCase() === "granted") {
+          const probe = await api.checkAudioReadiness();
+          setAudioProbe(probe);
+          if (probe.ready) {
+            microphonePermissionPending.current = false;
+            setError(null);
+          }
         }
       } catch (e) {
-        setError(`刷新屏幕录制权限失败：${String(e)}`);
+        setError(`刷新权限状态失败：${String(e)}`);
       }
     };
     window.addEventListener("focus", refreshPendingScreenPermission);
     return () => window.removeEventListener("focus", refreshPendingScreenPermission);
-  }, []);
+  }, [step]);
+
+  useEffect(() => {
+    if (step !== 2) return;
+    void api.checkAudioReadiness().then(setAudioProbe).catch((e) => {
+      setError(`检测麦克风失败：${String(e)}`);
+    });
+  }, [step]);
 
   useEffect(() => {
     if (step === 3) void refreshAsr();
@@ -225,13 +246,35 @@ export function Onboarding({
     }
   }
 
-  async function requestMicrophone() {
+  async function inspectMicrophone(openSettings: boolean) {
     setBusy(true);
+    setError(null);
     try {
-      const granted = await api.requestMicrophonePermission();
-      await api.openPrivacySettings("microphone");
-      setPerms(await api.getPermissions());
-      setError(granted ? null : "麦克风权限尚未允许，请在系统列表中开启 Lumen Navi。");
+      if (openSettings) {
+        await api.openPrivacySettings("microphone");
+      }
+      const nextPerms = await api.getPermissions();
+      setPerms(nextPerms);
+      if (nextPerms.microphone.toLowerCase() !== "granted") {
+        microphonePermissionPending.current = true;
+        setAudioProbe({
+          permission: nextPerms.microphone,
+          ready: false,
+          error: "麦克风权限尚未允许",
+        });
+        setError(
+          "请在系统设置 → 隐私与安全性 → 麦克风中打开 Lumen Navi。授权后回到这里，点击“重新检查”，应用不会替你修改权限。",
+        );
+        return;
+      }
+      const probe = await api.checkAudioReadiness();
+      setAudioProbe(probe);
+      microphonePermissionPending.current = !probe.ready;
+      setError(
+        probe.ready
+          ? null
+          : `麦克风权限已允许，但采集无法启动：${probe.error ?? "未知错误"}。请检查输入设备后重试。`,
+      );
     } catch (e) {
       setError(`请求麦克风权限失败：${String(e)}`);
     } finally {
@@ -279,9 +322,15 @@ export function Onboarding({
               <button
                 className="btn primary"
                 disabled={busy}
-                onClick={() => void requestMicrophone()}
+                onClick={() =>
+                  void inspectMicrophone(
+                    perms?.microphone.toLowerCase() !== "granted",
+                  )
+                }
               >
-                请求 / 打开麦克风权限
+                {perms?.microphone.toLowerCase() === "granted"
+                  ? "重新检查麦克风"
+                  : "打开系统设置配置麦克风"}
               </button>
               {platform?.system_speech_asr !== false && (
                 <button
@@ -292,6 +341,27 @@ export function Onboarding({
                   语音识别设置（Speech 回退）
                 </button>
               )}
+            </div>
+            <div className={`onboard-status ${audioProbe?.ready ? "ok" : ""}`}>
+              <div className="row" style={{ justifyContent: "space-between" }}>
+                <strong>采集设备检查</strong>
+                <span className={`pill ${audioProbe?.ready ? "ok" : "warn"}`}>
+                  {audioProbe
+                    ? audioProbe.ready
+                      ? "可用"
+                      : "需要处理"
+                    : "检查中…"}
+                </span>
+              </div>
+              <p className="meta" style={{ marginTop: 6 }}>
+                {audioProbe?.ready
+                  ? "设备和音频格式已验证。完成 onboarding 后，点击“开始采集”才会启动持续录音。"
+                  : audioProbe?.error ??
+                    "先在系统设置允许麦克风访问，再回来重新检查。"}
+              </p>
+              <p className="meta" style={{ marginTop: 6 }}>
+                不想现在配置也可以继续，之后可在“概览 → 麦克风”完成设置。
+              </p>
             </div>
           </div>
         )}

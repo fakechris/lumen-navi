@@ -9,7 +9,7 @@ mod summarizer;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -860,12 +860,12 @@ async fn main() -> Result<()> {
         running: false,
         last_error: screen_error,
     };
-    let mut audio_status = SourceStatus {
+    let audio_status = Arc::new(std::sync::Mutex::new(SourceStatus {
         id: "audio".into(),
         enabled: config.sources.audio,
         running: false,
         last_error: None,
-    };
+    }));
 
     // --- Local control API ---
     // Two listeners: a Unix socket (primary — the shell connects here, no TCP
@@ -880,7 +880,15 @@ async fn main() -> Result<()> {
             config.retention.max_blob_mb.saturating_mul(1024 * 1024),
             vec![
                 screen_status.clone(),
-                audio_status.clone(),
+                audio_status
+                    .lock()
+                    .map(|status| status.clone())
+                    .unwrap_or(SourceStatus {
+                        id: "audio".into(),
+                        enabled: config.sources.audio,
+                        running: false,
+                        last_error: Some("audio status unavailable".into()),
+                    }),
                 SourceStatus {
                     id: "browser".into(),
                     enabled: config.sources.browser,
@@ -889,6 +897,7 @@ async fn main() -> Result<()> {
                     last_error: None,
                 },
             ],
+            Arc::clone(&audio_status),
             control_server::BrowserRuntimeConfig {
                 enabled: config.sources.browser,
                 token: config.browser.effective_ingest_token(),
@@ -985,14 +994,29 @@ async fn main() -> Result<()> {
 
     // --- Audio (concurrent with screen) ---
     let audio_task = if config.sources.audio {
-        audio_status.running = true;
         let store_a = Arc::clone(&store);
         let audio_cfg = config.audio.clone();
         let privacy = config.privacy.clone();
         let cancel = observe_cancel_rx.clone();
         let counters = Arc::clone(&observe_counters);
+        let audio_status_for_task = Arc::clone(&audio_status);
         Some(tokio::spawn(async move {
-            run_audio_loop(store_a, audio_cfg, privacy, cancel, counters).await
+            let result = run_audio_loop(
+                store_a,
+                audio_cfg,
+                privacy,
+                cancel,
+                counters,
+                audio_status_for_task.clone(),
+            )
+            .await;
+            if let Err(error) = &result {
+                if let Ok(mut status) = audio_status_for_task.lock() {
+                    status.running = false;
+                    status.last_error = Some(error.to_string());
+                }
+            }
+            result
         }))
     } else {
         None
@@ -1339,7 +1363,6 @@ async fn main() -> Result<()> {
     if let Some(handle) = audio_task {
         match handle.await {
             Ok(Ok(st)) => {
-                audio_status.running = false;
                 info!(
                     emitted = st.chunks_emitted,
                     silent = st.chunks_dropped_silent,
@@ -1350,12 +1373,13 @@ async fn main() -> Result<()> {
                 );
             }
             Ok(Err(e)) => {
-                audio_status.running = false;
-                audio_status.last_error = Some(e.to_string());
                 warn!(error = %e, "audio task failed");
             }
             Err(e) => {
-                audio_status.running = false;
+                if let Ok(mut status) = audio_status.lock() {
+                    status.running = false;
+                    status.last_error = Some(format!("audio task join failed: {e}"));
+                }
                 warn!(error = %e, "audio task join failed");
             }
         }
@@ -1454,8 +1478,18 @@ async fn main() -> Result<()> {
         info!("Ctrl+C");
     }
 
+    let final_audio_status =
+        audio_status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or(SourceStatus {
+                id: "audio".into(),
+                enabled: config.sources.audio,
+                running: false,
+                last_error: Some("audio status unavailable".into()),
+            });
     let health = HealthResponse::scaffold(
-        vec![screen_status, audio_status],
+        vec![screen_status, final_audio_status],
         store.len().await?,
         config.privacy.paused,
         store.ocr_doc_count().unwrap_or(0),
@@ -1484,6 +1518,7 @@ async fn run_audio_loop(
     privacy: PrivacyConfig,
     mut cancel: watch::Receiver<bool>,
     counters: Arc<control_server::ObserveCounters>,
+    audio_status: Arc<std::sync::Mutex<SourceStatus>>,
 ) -> Result<lumen_sources_media::AudioStats> {
     let open_cfg = MicOpenConfig {
         preferred_sample_rate: config.sample_rate,
@@ -1497,6 +1532,10 @@ async fn run_audio_loop(
         .context("join mic open")?
         .context("open microphone")?;
 
+    if let Ok(mut status) = audio_status.lock() {
+        status.running = true;
+        status.last_error = None;
+    }
     info!(
         mode = %config.mode,
         chunk_ms = config.effective_chunk_ms(),
@@ -1512,6 +1551,7 @@ async fn run_audio_loop(
     let max_ticks = config.ticks;
     let mut poll = tokio::time::interval(Duration::from_millis(100));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_audio_report = Instant::now();
 
     loop {
         if *cancel.borrow() {
@@ -1528,7 +1568,32 @@ async fn run_audio_loop(
                 }
             }
             _ = poll.tick() => {
-                let batch = orch.drain_ready(&stream);
+                let batch = orch
+                    .drain_ready(&stream)
+                    .context("microphone stream disconnected")?;
+                if last_audio_report.elapsed() >= Duration::from_secs(10) {
+                    let stats = orch.stats();
+                    info!(
+                        received = stats.chunks_received,
+                        last_rms = stats.last_rms,
+                        max_rms = stats.max_rms,
+                        emitted = stats.chunks_emitted,
+                        silent = stats.chunks_dropped_silent,
+                        paused = stats.chunks_dropped_pause,
+                        "audio input stats"
+                    );
+                    if let Ok(mut status) = audio_status.lock() {
+                        if stats.chunks_received > 0 && stats.chunks_emitted == 0 {
+                            status.last_error = Some(format!(
+                                "已收到 {} 个音频块，但都被静音检测过滤（最大 RMS {:.4}），因此没有写入 audio_chunk.v1。请靠近麦克风说话，或检查系统输入设备。",
+                                stats.chunks_received, stats.max_rms
+                            ));
+                        } else if stats.chunks_emitted > 0 {
+                            status.last_error = None;
+                        }
+                    }
+                    last_audio_report = Instant::now();
+                }
                 for cap in batch {
                     let bytes = cap.wav.len();
                     // Only voiced chunks are worth ASR; silent ones may still be
@@ -1569,6 +1634,10 @@ async fn run_audio_loop(
 
     orch.force_close_session();
     stream.stop();
+    if let Ok(mut status) = audio_status.lock() {
+        status.running = false;
+        status.last_error = None;
+    }
     Ok(orch.stats())
 }
 

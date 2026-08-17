@@ -36,6 +36,7 @@ pub struct ControlState {
     max_blob_bytes: u64,
     screen_locked: Arc<dyn Fn() -> bool + Send + Sync>,
     pub sources: Vec<SourceStatus>,
+    pub audio_status: Arc<Mutex<SourceStatus>>,
     pub browser: BrowserRuntimeState,
     pub counters: Arc<ObserveCounters>,
     app_blocklist: Vec<String>,
@@ -105,6 +106,7 @@ impl ControlState {
         closed_eyes: Arc<AtomicBool>,
         max_blob_bytes: u64,
         sources: Vec<SourceStatus>,
+        audio_status: Arc<Mutex<SourceStatus>>,
         browser: BrowserRuntimeConfig,
         counters: Arc<ObserveCounters>,
         app_blocklist: Vec<String>,
@@ -116,6 +118,7 @@ impl ControlState {
             max_blob_bytes,
             screen_locked: Arc::new(lumen_platform_host::is_screen_locked),
             sources,
+            audio_status,
             counters,
             app_blocklist,
             browser: BrowserRuntimeState {
@@ -875,6 +878,12 @@ async fn handle_control(
 async fn build_health(st: &ControlState) -> Result<HealthResponse, anyhow::Error> {
     let stored = st.store.len().await?;
     let ocr_docs = st.store.ocr_doc_count().unwrap_or(0);
+    let mut sources = st.sources.clone();
+    if let Some(audio) = sources.iter_mut().find(|source| source.id == "audio") {
+        if let Ok(runtime) = st.audio_status.lock() {
+            *audio = runtime.clone();
+        }
+    }
     let browser_metrics = st
         .browser
         .metrics
@@ -883,7 +892,7 @@ async fn build_health(st: &ControlState) -> Result<HealthResponse, anyhow::Error
     Ok(HealthResponse {
         api_version: API_VERSION,
         product: "lumen-navi".into(),
-        sources: st.sources.clone(),
+        sources,
         paused: st.paused.load(Ordering::Relaxed),
         closed_eyes: st.closed_eyes.load(Ordering::Relaxed),
         stored_events: stored,
@@ -964,12 +973,13 @@ pub fn spawn_tcp(
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use chrono::Utc;
     use http_body_util::BodyExt;
+    use lumen_api::SourceStatus;
     use lumen_sources_browser::{
         BrowserArtifact, BrowserBatch, BrowserIngestPolicy, BrowserObservation,
         BROWSER_SCHEMA_VERSION,
@@ -990,6 +1000,12 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             1024 * 1024,
             vec![],
+            Arc::new(Mutex::new(SourceStatus {
+                id: "audio".into(),
+                enabled: true,
+                running: false,
+                last_error: None,
+            })),
             BrowserRuntimeConfig {
                 enabled: true,
                 token: "fixture-browser-token".into(),

@@ -10,6 +10,7 @@ use lumen_api::{
     RoastRecordDto, SourceStatus, API_VERSION,
 };
 use lumen_config::Config;
+use lumen_platform::MicOpenConfig;
 use lumen_platform_host as host;
 use lumen_store::{EventStore, SCHEMA_VERSION, TimelineQuery};
 use lumen_types::event_kind;
@@ -30,6 +31,13 @@ pub struct PermissionsDto {
     pub direct_capture_error: Option<String>,
     pub microphone: String,
     pub accessibility: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AudioReadinessDto {
+    pub permission: String,
+    pub ready: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,6 +173,58 @@ pub async fn get_health(state: State<'_, AppState>) -> Result<HealthResponse, St
         browser,
         observe: daemon_health.as_ref().and_then(|h| h.observe.clone()),
     })
+}
+
+/// Validate the microphone without changing macOS permissions.
+///
+/// This checks permission first, then opens the configured input stream long
+/// enough to verify that the device/configuration can actually start. The
+/// stream is dropped immediately; the daemon owns the real capture lifecycle.
+#[tauri::command]
+pub async fn check_audio_readiness(
+    state: State<'_, AppState>,
+) -> Result<AudioReadinessDto, String> {
+    let permission = host::permissions().status().await.map_err(err)?;
+    let permission_label = format!("{:?}", permission.microphone);
+    if !permission.can_record_mic() {
+        return Ok(AudioReadinessDto {
+            permission: permission_label,
+            ready: false,
+            error: Some(
+                "麦克风权限尚未允许。请在系统设置中允许 Lumen Navi 访问麦克风，然后回来重试。"
+                    .into(),
+            ),
+        });
+    }
+
+    let config = state.load_config().map_err(err)?;
+    let open_config = MicOpenConfig {
+        preferred_sample_rate: config.audio.sample_rate,
+        preferred_channels: config.audio.channels,
+        chunk_ms: config.audio.chunk_ms,
+        device: config.audio.device,
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        host::mic()
+            .open(open_config)
+            .map(|stream| drop(stream))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("麦克风检测任务失败: {error}"))?;
+
+    match result {
+        Ok(()) => Ok(AudioReadinessDto {
+            permission: permission_label,
+            ready: true,
+            error: None,
+        }),
+        Err(error) => Ok(AudioReadinessDto {
+            permission: permission_label,
+            ready: false,
+            error: Some(error),
+        }),
+    }
 }
 
 fn health_sources(
