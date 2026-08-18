@@ -2415,14 +2415,28 @@ impl SqliteStore {
     }
 
     /// Closed cards that still need an LLM narrative (`none` or `failed`).
+    ///
+    /// A slot that closes just after midnight belongs to *yesterday's* fold
+    /// (e.g. 23:45 ends at 00:00). Folding only today means that card is
+    /// never narrated once the day rolls over and stays on its AX/OCR
+    /// digest forever. Fold today and yesterday so those cards are picked up.
     pub fn list_closed_slots_needing_narrative(
         &self,
         limit: usize,
     ) -> Result<Vec<HistorySlotDto>, StoreError> {
-        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
         let now = Utc::now();
-        Ok(self
-            .list_history_slots(&day)?
+        let local_now = now.with_timezone(&chrono::Local);
+        let days = [
+            local_now.format("%Y-%m-%d").to_string(),
+            (local_now - chrono::Duration::days(1))
+                .format("%Y-%m-%d")
+                .to_string(),
+        ];
+        let mut slots = Vec::new();
+        for day in &days {
+            slots.extend(self.list_history_slots(day)?);
+        }
+        Ok(slots
             .into_iter()
             .filter(|s| {
                 s.slot_end <= now
@@ -2438,10 +2452,19 @@ impl SqliteStore {
         &self,
         limit: usize,
     ) -> Result<Vec<HistorySlotDto>, StoreError> {
-        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
         let now = Utc::now();
-        Ok(self
-            .list_history_slots(&day)?
+        let local_now = now.with_timezone(&chrono::Local);
+        let days = [
+            local_now.format("%Y-%m-%d").to_string(),
+            (local_now - chrono::Duration::days(1))
+                .format("%Y-%m-%d")
+                .to_string(),
+        ];
+        let mut slots = Vec::new();
+        for day in &days {
+            slots.extend(self.list_history_slots(day)?);
+        }
+        Ok(slots
             .into_iter()
             .filter(|s| {
                 s.slot_end <= now && s.narrative_status == "ready" && !s.skill_checked
@@ -5451,6 +5474,46 @@ mod tests {
             .unwrap();
         let missing = store.list_ready_slots_missing_skill(8).unwrap();
         assert!(missing.iter().all(|s| s.slot_start != slot.slot_start));
+    }
+
+    #[test]
+    fn list_narrative_candidates_includes_yesterday_late_slot() {
+        use chrono::TimeZone;
+
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        // A 23:50 segment on *yesterday*: its slot closes at 00:00, so after
+        // the day rolls over it no longer belongs to today's fold.
+        let start_local = (chrono::Local::now() - chrono::Duration::days(1))
+            .date_naive()
+            .and_hms_opt(23, 50, 0)
+            .expect("valid time");
+        let start = chrono::Local
+            .from_local_datetime(&start_local)
+            .single()
+            .expect("unambiguous time")
+            .with_timezone(&Utc);
+        let end = start + chrono::Duration::minutes(5);
+        store
+            .add_manual_segment(start, end, "Safari", Some("Inbox"), None, None)
+            .unwrap();
+
+        let floored_start = chrono::Local
+            .from_local_datetime(
+                &start_local
+                    .date()
+                    .and_hms_opt(23, 45, 0)
+                    .expect("valid time"),
+            )
+            .single()
+            .expect("unambiguous time")
+            .with_timezone(&Utc);
+        let pending = store.list_closed_slots_needing_narrative(8).unwrap();
+        assert!(
+            pending.iter().any(|s| s.slot_start == floored_start),
+            "yesterday 23:45 closed slot must still be narratable the next day; got {:?}",
+            pending.iter().map(|s| s.slot_start).collect::<Vec<_>>()
+        );
     }
 
     #[test]
