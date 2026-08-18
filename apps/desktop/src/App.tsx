@@ -143,6 +143,12 @@ function fmtTime(iso?: string | null): string {
   }
 }
 
+/** Thousands separator for counts: 1234567 → "1,234,567". */
+function fmtNum(n: number | null | undefined): string {
+  if (n === null || n === undefined) return "0";
+  return n.toLocaleString("en-US");
+}
+
 function permStatus(v: string): "done" | "failed" | "idle" {
   const s = v.toLowerCase();
   if (s.includes("granted")) return "done";
@@ -1051,12 +1057,12 @@ export default function App() {
               <div className="grid mt">
                 <StatCard
                   label="Events"
-                  value={overviewStats?.stored_events ?? "—"}
+                  value={overviewStats ? fmtNum(overviewStats.stored_events) : "—"}
                   hint={`${OVERVIEW_RANGE_LABELS[overviewRange]} · schema v${health?.schema_version ?? "—"}`}
                 />
                 <StatCard
                   label="Search docs"
-                  value={overviewStats?.ocr_docs ?? "—"}
+                  value={overviewStats ? fmtNum(overviewStats.ocr_docs) : "—"}
                   hint={`${OVERVIEW_RANGE_LABELS[overviewRange]} · OCR 与转写`}
                 />
                 <StatCard
@@ -1069,7 +1075,9 @@ export default function App() {
                   tone={
                     health?.sources.find((s) => s.id === "screen")?.running
                       ? "accent"
-                      : "default"
+                      : health?.sources.find((s) => s.id === "screen")?.enabled
+                        ? "success"
+                        : "danger"
                   }
                   value={
                     health?.sources.find((s) => s.id === "screen")?.enabled
@@ -1082,13 +1090,15 @@ export default function App() {
                 <StatCard
                   label="Audio / ASR"
                   tone={
-                    audioSignalFiltered
-                      ? "warn"
-                      : audioSource?.last_error
-                        ? "danger"
-                        : audioSource?.running
-                          ? "accent"
-                          : "default"
+                    !audioSource?.enabled
+                      ? "danger"
+                      : audioSignalFiltered
+                        ? "warn"
+                        : audioSource?.last_error
+                          ? "danger"
+                          : audioSource?.running
+                            ? "accent"
+                            : "default"
                   }
                   value={
                     !audioSource?.enabled
@@ -1108,25 +1118,25 @@ export default function App() {
                   <>
                     <StatCard
                       label="已写入"
-                      value={health.observe.persisted}
+                      value={fmtNum(health.observe.persisted)}
                       hint="本进程成功落库"
                     />
                     <StatCard
                       label="写入失败"
                       tone={health.observe.persist_failed > 0 ? "danger" : "default"}
-                      value={health.observe.persist_failed}
+                      value={fmtNum(health.observe.persist_failed)}
                       hint="SQLite / 磁盘"
                     />
                     <StatCard
                       label="门挡下"
                       tone={health.observe.skipped_gate > 0 ? "warn" : "default"}
-                      value={health.observe.skipped_gate}
+                      value={fmtNum(health.observe.skipped_gate)}
                       hint="暂停 / 闭眼 / 锁屏 / 名单"
                     />
                     <StatCard
                       label="队列丢弃"
                       tone={health.observe.dropped_backpressure > 0 ? "danger" : "default"}
-                      value={health.observe.dropped_backpressure}
+                      value={fmtNum(health.observe.dropped_backpressure)}
                       hint="截图背压"
                     />
                   </>

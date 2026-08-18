@@ -950,12 +950,15 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {slots.map((slot) => (
+      {slots.map((slot) => {
+        const narrated = slot.narrative_status === "ready";
+        return (
         <div
           key={slot.slot_start}
           style={{
             paddingBottom: 14,
             borderBottom: "1px solid var(--border)",
+            opacity: narrated ? 1 : 0.62,
           }}
         >
           <div
@@ -964,15 +967,33 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
               color: "var(--text-tertiary)",
               fontFamily: "var(--font-mono)",
               marginBottom: 4,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
             }}
           >
             {fmtClock(slot.slot_start)}
+            {!narrated && (
+              <span
+                style={{
+                  fontSize: 9,
+                  padding: "1px 6px",
+                  borderRadius: "var(--radius-pill)",
+                  background: "var(--graph-grid)",
+                  color: "var(--text-tertiary)",
+                }}
+                title="AI 叙事尚未生成，当前为临时占位摘要"
+              >
+                待 AI
+              </span>
+            )}
           </div>
           <div
             style={{
               fontSize: "var(--text-sm)",
               fontWeight: "var(--weight-semibold)",
               marginBottom: 4,
+              color: narrated ? undefined : "var(--text-secondary)",
             }}
           >
             {slot.title}
@@ -981,7 +1002,7 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
             <div
               style={{
                 fontSize: "var(--text-sm)",
-                color: "var(--text-secondary)",
+                color: narrated ? "var(--text-secondary)" : "var(--text-tertiary)",
                 lineHeight: 1.45,
                 marginBottom: 8,
               }}
@@ -1070,7 +1091,8 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
             ))}
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
