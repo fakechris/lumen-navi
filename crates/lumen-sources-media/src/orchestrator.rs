@@ -32,6 +32,35 @@ pub struct CapturedBatch {
     pub session_events: Vec<SourceEvent>,
 }
 
+/// One discardable safety-valve frame. Not a `screenshot.v1` event.
+#[derive(Debug, Clone)]
+pub struct LivenessFrame {
+    pub display_id: u32,
+    pub display_index: usize,
+    pub is_main: bool,
+    pub width: u32,
+    pub height: u32,
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Overwrite-only proof that the capture loop is still running.
+#[derive(Debug, Clone)]
+pub struct LivenessSnapshot {
+    pub captured_at: chrono::DateTime<chrono::Utc>,
+    pub app_name: Option<String>,
+    pub bundle_id: Option<String>,
+    pub frames: Vec<LivenessFrame>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CaptureOutcome {
+    /// Evidence: session bind, blob, OCR/AX, timeline.
+    Evidence(CapturedBatch),
+    /// Safety valve: last frame only, no processing.
+    Liveness(LivenessSnapshot),
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct CaptureStats {
     pub full_captures: u64,
@@ -41,6 +70,7 @@ pub struct CaptureStats {
     pub skipped_debounce: u64,
     pub skipped_gate: u64,
     pub dropped_backpressure: u64,
+    pub liveness_captures: u64,
 }
 
 #[derive(Debug, Default)]
@@ -80,20 +110,18 @@ pub struct CaptureOrchestrator {
     stats_skip_debounce: AtomicU64,
     stats_skip_gate: AtomicU64,
     stats_drop_bp: AtomicU64,
+    stats_liveness: AtomicU64,
 }
 
 const DHASH_HISTORY_LEN: usize = 12;
 const DHASH_HAMMING_THRESHOLD: u32 = 5;
 /// Heartbeat interval for a visually-static screen: even when the MAD probe
-/// reports no change (a browser page being read, a paused video, a PDF), force
-/// one capture this often so the user still gets occasional evidence frames.
+/// reports no change, grab one overwrite-only liveness frame so we know the
+/// capture loop is still alive. This is not evidence — it does not bind a
+/// session, write `screenshot.v1`, or enqueue OCR/AX.
 ///
-/// Tuned to 2 minutes. At the previous 10s this fired every 10s on a static
-/// browser page (Safari reading), producing ~6 screenshots/minute that crowded
-/// out every other app in the 60-item timeline ("Comet never shows up"). A
-/// 2-minute cadence is enough to record "user still on this page" without
-/// flooding storage or the timeline. Dynamic activity still captures at its
-/// own cadence (same_app_min_ms / visual_change_threshold), unaffected.
+/// Tuned to 2 minutes. Dynamic activity still captures at its own cadence
+/// (same_app_min_ms / visual_change_threshold), unaffected.
 const DHASH_SAFETY_VALVE: Duration = Duration::from_secs(120);
 const DHASH_HISTORY_TTL: Duration = Duration::from_secs(60);
 
@@ -168,6 +196,7 @@ impl CaptureOrchestrator {
             stats_skip_debounce: AtomicU64::new(0),
             stats_skip_gate: AtomicU64::new(0),
             stats_drop_bp: AtomicU64::new(0),
+            stats_liveness: AtomicU64::new(0),
         }
     }
 
@@ -180,6 +209,7 @@ impl CaptureOrchestrator {
             skipped_debounce: self.stats_skip_debounce.load(Ordering::Relaxed),
             skipped_gate: self.stats_skip_gate.load(Ordering::Relaxed),
             dropped_backpressure: self.stats_drop_bp.load(Ordering::Relaxed),
+            liveness_captures: self.stats_liveness.load(Ordering::Relaxed),
         }
     }
 
@@ -331,7 +361,7 @@ impl CaptureOrchestrator {
     pub async fn capture_tick(
         &mut self,
         reason: TriggerReason,
-    ) -> Result<Option<CapturedBatch>, String> {
+    ) -> Result<Option<CaptureOutcome>, String> {
         let locked = self.lock.is_locked().await.unwrap_or(false);
         let front = match self.frontmost.frontmost().await {
             Ok(front) => front,
@@ -369,8 +399,9 @@ impl CaptureOrchestrator {
         let mut max_distance = 0.0f64;
         // dHash of each display's current probe (for recording into history on capture).
         let mut probe_hashes: HashMap<u32, u64> = HashMap::new();
-        if !reason.forces_full_capture() {
-            let mut any_change = false;
+        let liveness_only = if !reason.forces_full_capture() {
+            let mut visual_changed = false;
+            let mut liveness_due = false;
             let mut skipped_near_dup = false;
             let now = Instant::now();
             for d in &displays {
@@ -388,53 +419,42 @@ impl CaptureOrchestrator {
                 max_distance = max_distance.max(dist);
                 self.probe_gray.insert(d.id.0, gray.clone());
 
-                // Safety valve must be evaluated BEFORE the MAD stable-skip
-                // below: a visually static frame (a browser showing a fixed
-                // article, a paused video, a PDF) never exceeds the MAD
-                // threshold, so the old code `continue`d here and the safety
-                // valve — written after the continue — was unreachable. That
-                // meant a stable frame produced zero screenshots indefinitely.
-                // Evaluating safety_due first guarantees a heartbeat capture
-                // every DHASH_SAFETY_VALVE regardless of visual change.
                 let safety_due = self
                     .last_full_capture
                     .get(&d.id.0)
                     .is_none_or(|t| now.duration_since(*t) >= DHASH_SAFETY_VALVE);
 
-                if dist < self.capture.visual_change_threshold && !safety_due {
-                    continue; // MAD stable and not overdue — no change
-                }
+                if dist >= self.capture.visual_change_threshold {
+                    // Real visual change: dHash near-duplicate check.
+                    let hash = dhash(&gray, raw.width as usize, raw.height as usize);
+                    probe_hashes.insert(d.id.0, hash);
 
-                if safety_due {
-                    // Force a heartbeat capture; skip the near-dup check so a
-                    // long-static screen still captures on schedule.
-                    any_change = true;
-                    continue;
-                }
+                    let history = self.dhash_history.entry(d.id.0).or_default();
+                    while history
+                        .front()
+                        .is_some_and(|(_, t)| now.duration_since(*t) > DHASH_HISTORY_TTL)
+                    {
+                        history.pop_front();
+                    }
+                    let near_dup = history
+                        .iter()
+                        .any(|(h, _)| hamming64(hash, *h) <= DHASH_HAMMING_THRESHOLD);
 
-                // MAD says changed. Second layer: dHash near-duplicate check.
-                let hash = dhash(&gray, raw.width as usize, raw.height as usize);
-                probe_hashes.insert(d.id.0, hash);
-
-                let history = self.dhash_history.entry(d.id.0).or_default();
-                while history
-                    .front()
-                    .is_some_and(|(_, t)| now.duration_since(*t) > DHASH_HISTORY_TTL)
-                {
-                    history.pop_front();
-                }
-                let near_dup = history
-                    .iter()
-                    .any(|(h, _)| hamming64(hash, *h) <= DHASH_HAMMING_THRESHOLD);
-
-                if near_dup {
-                    skipped_near_dup = true;
-                } else {
-                    any_change = true;
+                    if near_dup {
+                        skipped_near_dup = true;
+                    } else {
+                        visual_changed = true;
+                    }
+                } else if safety_due {
+                    liveness_due = true;
                 }
             }
 
-            if !any_change {
+            if visual_changed {
+                false
+            } else if liveness_due {
+                true
+            } else {
                 if skipped_near_dup {
                     self.stats_skip_near_dup.fetch_add(1, Ordering::Relaxed);
                     debug!(max_distance, "skip: near-duplicate");
@@ -456,6 +476,14 @@ impl CaptureOrchestrator {
                 }
             }
             max_distance = 1.0;
+            false
+        };
+
+        if liveness_only {
+            return self
+                .capture_liveness(&displays, front.as_ref())
+                .await
+                .map(Some);
         }
 
         let capture_id = Uuid::new_v4();
@@ -565,7 +593,7 @@ impl CaptureOrchestrator {
             "full capture batch"
         );
 
-        Ok(Some(CapturedBatch {
+        Ok(Some(CaptureOutcome::Evidence(CapturedBatch {
             capture_id,
             session_id,
             reason,
@@ -573,6 +601,48 @@ impl CaptureOrchestrator {
             closed_session,
             open_session,
             session_events: trans.events,
+        })))
+    }
+
+    /// Full encode for the safety valve: pixels only, no session, no events.
+    async fn capture_liveness(
+        &mut self,
+        displays: &[DisplayInfo],
+        front: Option<&FrontmostApp>,
+    ) -> Result<CaptureOutcome, String> {
+        let mut frames = Vec::with_capacity(displays.len());
+        for (index, d) in displays.iter().enumerate() {
+            let frame = self
+                .capturer
+                .capture_display(
+                    d.id,
+                    self.capture.screen_max_edge,
+                    self.capture.use_jpeg(),
+                    self.capture.jpeg_quality,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            frames.push(LivenessFrame {
+                display_id: d.id.0,
+                display_index: index,
+                is_main: d.is_main,
+                width: frame.width,
+                height: frame.height,
+                media_type: frame.media_type,
+                bytes: frame.png_or_jpeg_bytes,
+            });
+        }
+        let now = Instant::now();
+        for d in displays {
+            self.last_full_capture.insert(d.id.0, now);
+        }
+        self.stats_liveness.fetch_add(1, Ordering::Relaxed);
+        info!(displays = frames.len(), "liveness overwrite");
+        Ok(CaptureOutcome::Liveness(LivenessSnapshot {
+            captured_at: chrono::Utc::now(),
+            app_name: front.map(|f| f.app_name.clone()),
+            bundle_id: front.and_then(|f| f.bundle_id.clone()),
+            frames,
         }))
     }
 
@@ -748,6 +818,22 @@ mod tests {
         }
     }
 
+    fn expect_evidence(out: Option<CaptureOutcome>) -> CapturedBatch {
+        match out {
+            Some(CaptureOutcome::Evidence(batch)) => batch,
+            Some(CaptureOutcome::Liveness(_)) => panic!("expected evidence, got liveness"),
+            None => panic!("expected evidence, got none"),
+        }
+    }
+
+    fn expect_liveness(out: Option<CaptureOutcome>) -> LivenessSnapshot {
+        match out {
+            Some(CaptureOutcome::Liveness(snap)) => snap,
+            Some(CaptureOutcome::Evidence(_)) => panic!("expected liveness, got evidence"),
+            None => panic!("expected liveness, got none"),
+        }
+    }
+
     fn orch(cap: FakeCap) -> CaptureOrchestrator {
         CaptureOrchestrator::new(
             Arc::new(FakeDisplays),
@@ -782,9 +868,8 @@ mod tests {
     #[tokio::test]
     async fn interval_skips_when_visual_stable() {
         let mut o = orch(FakeCap { n: Mutex::new(10) });
-        let first = o.capture_tick(TriggerReason::Interval).await.unwrap();
-        assert!(first.is_some());
-        assert_eq!(first.unwrap().frames.len(), 2); // dual display
+        let first = expect_evidence(o.capture_tick(TriggerReason::Interval).await.unwrap());
+        assert_eq!(first.frames.len(), 2); // dual display
         let second = o.capture_tick(TriggerReason::Interval).await.unwrap();
         assert!(second.is_none());
     }
@@ -794,17 +879,13 @@ mod tests {
         let mut o = orch(FakeCap { n: Mutex::new(10) });
         let _ = o.capture_tick(TriggerReason::Interval).await.unwrap();
         let forced = o.capture_tick(TriggerReason::FocusChange).await.unwrap();
-        assert!(forced.is_some());
+        expect_evidence(forced);
     }
 
     #[tokio::test]
     async fn screenshot_payload_has_hash_and_title_reason() {
         let mut o = orch(FakeCap { n: Mutex::new(1) });
-        let batch = o
-            .capture_tick(TriggerReason::FocusChange)
-            .await
-            .unwrap()
-            .expect("captured");
+        let batch = expect_evidence(o.capture_tick(TriggerReason::FocusChange).await.unwrap());
         let payload = &batch.frames[0].0.payload;
         let hash = payload["pixel_hash"].as_str().unwrap();
         assert!(hash.starts_with("dhash:") || hash.starts_with("blake3:"));
@@ -937,43 +1018,46 @@ mod tests {
         assert!(focus.payload["url"].is_null());
     }
 
-    /// Regression: a visually static screen (browser showing a fixed page,
-    /// paused video, PDF) used to never capture because the MAD `continue`
-    /// fired before the safety valve was consulted. The safety valve must
-    /// force a heartbeat every DHASH_SAFETY_VALVE even when MAD is stable.
+    /// Regression: a visually static screen used to never capture because the
+    /// MAD skip fired before the safety valve. The valve must still fire, but
+    /// as overwrite-only liveness — not a `screenshot.v1` evidence batch.
     #[tokio::test]
     async fn safety_valve_captures_static_screen_when_overdue() {
         // FakeCap returns the same gray value every probe -> MAD is always 0
         // below threshold after the first capture, i.e. a perfectly static frame.
         let mut o = orch(FakeCap { n: Mutex::new(10) });
 
-        // First tick captures (establishes baseline).
-        let first = o.capture_tick(TriggerReason::Interval).await.unwrap();
-        assert!(first.is_some(), "first tick should capture");
+        let first = expect_evidence(o.capture_tick(TriggerReason::Interval).await.unwrap());
+        let session_id = first.session_id;
+        let snapshot_count = o
+            .session_binder()
+            .current()
+            .expect("evidence opens a session")
+            .snapshot_count;
 
-        // Second tick, immediately after: stable + not overdue -> skip.
         let second = o.capture_tick(TriggerReason::Interval).await.unwrap();
         assert!(
             second.is_none(),
             "stable frame within safety window should skip"
         );
 
-        // Pretend DHASH_SAFETY_VALVE has elapsed by backdating last_full_capture.
         for d in o.select_displays().await.unwrap() {
             o.last_full_capture
                 .insert(d.id.0, Instant::now() - Duration::from_secs(121));
         }
 
-        // Third tick, same static screen but safety valve overdue -> MUST capture.
-        let third = o.capture_tick(TriggerReason::Interval).await.unwrap();
-        assert!(
-            third.is_some(),
-            "safety valve must force a capture even on a static screen when overdue"
-        );
+        let live = expect_liveness(o.capture_tick(TriggerReason::Interval).await.unwrap());
+        assert_eq!(live.frames.len(), 2, "liveness should capture all displays");
+        assert_eq!(o.stats().liveness_captures, 1);
+        assert_eq!(o.stats().full_captures, 1);
+        assert_eq!(o.current_session_id(), Some(session_id));
         assert_eq!(
-            third.unwrap().frames.len(),
-            2,
-            "heartbeat should capture all displays"
+            o.session_binder()
+                .current()
+                .expect("session still open")
+                .snapshot_count,
+            snapshot_count,
+            "liveness must not bind/touch the activity session"
         );
     }
 }

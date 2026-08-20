@@ -36,6 +36,9 @@ pub struct HealthResponse {
     /// Persist / skip / drop counters since this daemon process started.
     #[serde(default)]
     pub observe: Option<ObserveCountersDto>,
+    /// Last overwrite-only safety-valve frame. Not evidence.
+    #[serde(default)]
+    pub liveness: Option<LivenessHealthDto>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -44,6 +47,17 @@ pub struct ObserveCountersDto {
     pub persist_failed: u64,
     pub skipped_gate: u64,
     pub dropped_backpressure: u64,
+    /// Safety-valve overwrites this process (not screenshot.v1 rows).
+    #[serde(default)]
+    pub liveness_overwrites: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivenessHealthDto {
+    pub captured_at: DateTime<Utc>,
+    pub displays: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +195,7 @@ impl HealthResponse {
             schema_version,
             browser: None,
             observe: None,
+            liveness: None,
         }
     }
 }

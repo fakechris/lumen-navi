@@ -37,13 +37,17 @@ FocusPoll + IntervalTick
         │
  VisualProbe (1/N gray distance)   [skip for force triggers]
         │
- Lumen Cua IPC → FullCapture (all|main displays) → JPEG/PNG
+        ├─ visual / focus change → Lumen Cua FullCapture
+        │         │
+        │         SessionManager
+        │         │
+        │         bounded queue → SqliteStore + blobs
+        │         │
+        │         enqueue ocr_screen / ax_screen
         │
- SessionManager
-        │
- bounded queue → SqliteStore + blobs
-        │
- enqueue ocr_screen job (consumer later)
+        └─ static + 2 min safety valve → liveness overwrite
+                  (`data_dir/liveness/display-{id}.jpg`, last frame only)
+                  no session · no screenshot.v1 · no OCR/AX
 ```
 
 ---
@@ -60,6 +64,8 @@ FocusPoll + IntervalTick
 **Debounce defaults:** 1000 ms normal · 3000 ms after focus churn · same-app skip unless ≥ 10000 ms (non-force).
 
 **Visual probe defaults:** scale divisor **6**, mean gray distance threshold **0.05**.
+
+**Static-screen safety valve:** every **2 minutes** while pixels are unchanged, capture still runs as a **liveness** overwrite (last frame per display). It proves Observe is alive. It is not evidence: not stored as `screenshot.v1`, not OCR'd, not AX'd, not bound to an activity session, not counted against the blob quota. Pause / closed_eyes / lock still block it. Wipe deletes `$data_dir/liveness/`.
 
 ---
 
@@ -79,14 +85,17 @@ One batch = shared `session_id` + `capture_id`; **one event per display**.
 | Format | JPEG quality 75 |
 | Max edge | 1920 |
 | Probe frames | memory only, not stored |
+| Liveness (safety valve) | `$data_dir/liveness/display-{id}.jpg` overwritten in place |
 
-Payload `screenshot.v1` includes reason, app/bundle/title, display_id/index, size, probe_distance, capture_id, session_id.
+Payload `screenshot.v1` includes reason, app/bundle/title, display_id/index, size, probe_distance, capture_id, session_id. Liveness frames are not events.
 
 ---
 
 ## 7. Activity sessions (Observe-level)
 
-Table `activity_sessions`: open on first capture, touch on each batch, close after idle (default 5 min) or privacy/shutdown.
+Table `activity_sessions`: open on first **evidence** capture, touch on each evidence batch, close after idle (default 5 min HID silence) or privacy/shutdown. Liveness overwrites do not touch the session.
+
+Time tracking is independent of screenshots. After **5 minutes** with no keyboard/mouse and no display-sleep assertion, the current app is marked idle/away and excluded from 15-minute History cards. A completely static page with no input for 5 minutes counts as away.
 
 Not full Timeline L2/L3 — only grouping for later OCR/timeline.
 
@@ -141,7 +150,7 @@ closed_eyes = false
 
 1. Multi-monitor → distinct `display_id` frames  
 2. App switch → capture without waiting for visual miss  
-3. Static desktop → no full captures (probe under threshold)  
-4. Lock / closed_eyes → zero new screenshots  
+3. Static desktop → no evidence captures (probe under threshold); one liveness overwrite every 2 min  
+4. Lock / closed_eyes → zero new screenshots and zero liveness frames  
 5. Focus flood → queue bounded, drops counted  
 6. Session id stable across a work stretch  

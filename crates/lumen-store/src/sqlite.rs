@@ -228,6 +228,21 @@ impl SqliteStore {
         Ok(event)
     }
 
+    /// Overwrite the discardable liveness slot. Not an event, not a CA blob.
+    pub fn put_liveness_snapshot(
+        &self,
+        captured_at: chrono::DateTime<chrono::Utc>,
+        app_name: Option<&str>,
+        bundle_id: Option<&str>,
+        frames: &[crate::LivenessFrameInput],
+    ) -> Result<crate::LivenessMeta, StoreError> {
+        crate::liveness::put(&self.data_dir, captured_at, app_name, bundle_id, frames)
+    }
+
+    pub fn last_liveness(&self) -> Result<Option<crate::LivenessMeta>, StoreError> {
+        crate::liveness::read_meta(&self.data_dir)
+    }
+
     /// Persist a single event with no artifact bytes (metadata-only events,
     /// e.g. `activity.focus.v1` heartbeats). Projects into derived tables via
     /// the same insert path as screenshot events.
@@ -3661,6 +3676,7 @@ impl SqliteStore {
         )
         .map_err(StoreError::db)?;
         self.blobs.wipe_all()?;
+        crate::liveness::wipe(&self.data_dir)?;
         Ok(())
     }
 
@@ -5399,9 +5415,74 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.len().await.unwrap(), 1);
+        store
+            .put_liveness_snapshot(
+                Utc::now(),
+                Some("Safari"),
+                None,
+                &[crate::LivenessFrameInput {
+                    display_id: 1,
+                    display_index: 0,
+                    is_main: true,
+                    media_type: "image/jpeg".into(),
+                    width: 2,
+                    height: 2,
+                    bytes: b"jpeg".to_vec(),
+                }],
+            )
+            .unwrap();
+        assert!(store.last_liveness().unwrap().is_some());
         store.wipe_all().await.unwrap();
         assert_eq!(store.len().await.unwrap(), 0);
         assert!(store.list_recent(10).await.unwrap().is_empty());
+        assert!(store.last_liveness().unwrap().is_none());
+    }
+
+    #[test]
+    fn liveness_overwrite_is_not_an_event_or_blob() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store
+            .put_liveness_snapshot(
+                Utc::now(),
+                Some("Safari"),
+                Some("com.apple.Safari"),
+                &[crate::LivenessFrameInput {
+                    display_id: 1,
+                    display_index: 0,
+                    is_main: true,
+                    media_type: "image/jpeg".into(),
+                    width: 8,
+                    height: 8,
+                    bytes: b"frame-one".to_vec(),
+                }],
+            )
+            .unwrap();
+        store
+            .put_liveness_snapshot(
+                Utc::now(),
+                Some("Mail"),
+                None,
+                &[crate::LivenessFrameInput {
+                    display_id: 1,
+                    display_index: 0,
+                    is_main: true,
+                    media_type: "image/jpeg".into(),
+                    width: 8,
+                    height: 8,
+                    bytes: b"frame-two".to_vec(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(store.total_event_count().unwrap(), 0);
+        assert_eq!(store.blobs().total_bytes().unwrap(), 0);
+        let meta = store.last_liveness().unwrap().unwrap();
+        assert_eq!(meta.app_name.as_deref(), Some("Mail"));
+        assert_eq!(meta.displays.len(), 1);
+        assert_eq!(
+            std::fs::read(dir.path().join(&meta.displays[0].path)).unwrap(),
+            b"frame-two"
+        );
     }
 
     #[test]
