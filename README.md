@@ -1,128 +1,125 @@
 # Lumen Navi
 
-Local-first **continuous context** platform.
+Local-first **continuous context**. Watch the screen (and optionally the mic), keep it on your machine, and turn the day into a timeline you can search — and, if you want, talk to.
 
-Lumen Navi continuously ingests multi-modal signals (screen, audio, later browser & tools), stores them under clear privacy boundaries, and turns them into structured memory and actionable context.
+**Repo:** https://github.com/fakechris/lumen-navi
 
-**Greenfield Rust workspace** — https://github.com/fakechris/lumen-navi
+<p align="center">
+  <img src="docs/images/overview.jpg" alt="Overview — capture health, channel toggles, local stats" width="900" />
+</p>
+<p align="center">
+  <img src="docs/images/time.jpg" alt="Time — 15-minute history cards, app marks, day timeline" width="900" />
+</p>
 
 ## One-liner
 
-**Keep watching what matters — screen and sound first — then make that stream useful.**
+**Keep watching what matters — then make that stream useful, without sending it to a hosted service.**
 
-## Architecture (summary)
+## What it does
 
-Three planes:
+| Surface | What you get |
+|---------|----------------|
+| **Observe** | Smart screenshots (focus / visual change / 2-min liveness overwrite). Optional mic + local ASR. Hard gates: pause, closed-eyes, lock, app blocklist. |
+| **Time** | Frontmost-app tracking, idle vs away, 15-minute History cards with LLM narrative, app/scene ranking, day timeline. |
+| **Search** | On-device OCR + transcript FTS over what was on screen. |
+| **AI** | Optional local/OpenAI-compat Roast and Chat over the day's evidence. Conservative CUA-replay chips on long stretches. |
+| **Act (optional)** | Selection popup today; computer-use later via MIT **cua-driver** only. Never used for capture. |
+
+All of it stays under `~/Library/Application Support/LumenNavi/` (Windows: `%LOCALAPPDATA%\LumenNavi\`).
+
+## Architecture
 
 | Plane | Role | Status |
 |-------|------|--------|
-| **Observe** | Multi-source intake | Screen + mic productized |
-| **Memory** | Durable store + async process | SQLite + FTS + jobs |
-| **Act** | Optional computer-use | Later, via open-source **cua-driver** (MIT) |
+| **Observe** | Multi-source intake | Screen + mic productized; browser extension optional |
+| **Memory** | Durable store + async process | SQLite + FTS + jobs (OCR / AX / ASR) |
+| **Act** | Optional computer-use | Selection popup now; **cua-driver** (MIT) later |
 
-Full write-up: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · roadmap: [`docs/PLAN.md`](docs/PLAN.md) · vision: [`docs/VISION.md`](docs/VISION.md)
+Full write-up: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · roadmap: [`docs/PLAN.md`](docs/PLAN.md) · capture policy: [`docs/OBSERVE_CAPTURE.md`](docs/OBSERVE_CAPTURE.md)
 
-## Status (current)
+## Status
 
-| Phase | Status |
-|-------|--------|
-| S0–S1 skeleton + store | ✅ |
-| S2 screen Observe | ✅ (manual soak open) |
-| S3 audio + Observe ASR | ✅ (16 kHz / 3s; SenseVoice default + Whisper/Speech/Qwen HTTP) |
-| S4 Vision OCR + FTS API | ✅ |
-| **U1 Tauri Mac app** | ✅ shell (control + search + start/stop daemon) |
-| S4.1 OCR helper isolation | optional later |
-| Chrome Observe MVP | ✅ implementation; manual soak pending |
-| System audio / Act | later |
+| Area | Status |
+|------|--------|
+| Screen Observe + OCR | ✅ (manual soak still open) |
+| Time tracking + 15-min History cards | ✅ |
+| Audio + Observe ASR | ✅ (SenseVoice default; Whisper / Speech / Qwen HTTP) |
+| Desktop app (macOS) | ✅ |
+| Windows 10/11 x64 | ✅ port; hardware soak pending — [`WINDOWS_PORT_STATUS.md`](docs/WINDOWS_PORT_STATUS.md) |
+| Chrome Observe | ✅ implementation; soak pending |
+| System audio / full Act | later |
+
+## Install
+
+Stable tags publish macOS DMGs (Apple Silicon + Intel) and a Windows x64 NSIS installer:
+
+**[GitHub Releases](https://github.com/fakechris/lumen-navi/releases)** — current: **[v0.2.0](https://github.com/fakechris/lumen-navi/releases/tag/v0.2.0)**
+
+Install notes (permissions, Gatekeeper, checksums): [`docs/DESKTOP_RELEASE_NOTES.md`](docs/DESKTOP_RELEASE_NOTES.md).
+
+Screen Recording is owned by the nested **Lumen Cua** helper (`/Applications/Lumen Cua.app`). Start Observe from the Navi app so Cua can request it.
 
 ## Workspace
 
 ```
 lumen-navi/
 ├── crates/          # daemon + libraries
-├── apps/desktop/    # Tauri 2 Mac shell
+├── apps/desktop/    # Tauri 2 shell (macOS + Windows)
 ├── extensions/      # Chrome Browser Observe MVP
 └── docs/
 ```
 
-## Quick start (daemon)
+## Quick start (from source)
 
 ```bash
-cargo build
 cargo test
-cargo run -p lumen-daemon
+# Desktop (signed sidecars required for screen capture on macOS):
+bash scripts/macos/tauri-dev-signed.sh
+# or a release-shaped local build:
+scripts/macos/build-desktop-release.sh aarch64-apple-darwin dmg
 ```
-
-Requires Rust stable (edition 2021+). Start Observe from the desktop app so its
-bundled **Lumen Cua** helper can request Screen Recording. Microphone and optional
-Speech Recognition permissions remain owned by Lumen Navi.
 
 Default continuous ASR is **SenseVoice** (local sherpa-onnx). Models live under the **shared Lumen cluster** path  
-`~/Library/Application Support/Lumen/models/` (override with `LUMEN_MODELS_DIR` / `asr.models_root`) so navi and asr share one download.  
-Pick any ready folder via `asr.model_dir` or onboarding. Optional engines: `whisper`, `speech`, OpenAI-compatible HTTP (`qwen`). See [`docs/AUDIO_PRODUCT.md`](docs/AUDIO_PRODUCT.md).
+`~/Library/Application Support/Lumen/models/` (override with `LUMEN_MODELS_DIR` / `asr.models_root`).  
+See [`docs/AUDIO_PRODUCT.md`](docs/AUDIO_PRODUCT.md) and [`docs/DESKTOP.md`](docs/DESKTOP.md).
 
 ```bash
-# search while daemon is up
+# search while the daemon is up
 curl -s 'http://127.0.0.1:7420/v1/ocr/search?q=关键词&limit=5' | jq .
 ```
-
-## Desktop (Mac app)
-
-```bash
-cargo build -p lumen-daemon --release
-cd apps/desktop && npm install && npm run build
-cargo run -p lumen-navi-desktop
-# or: cd apps/desktop && npx tauri dev
-```
-
-See [`docs/DESKTOP.md`](docs/DESKTOP.md).
 
 ### Time-tracking categories (rules, not code)
 
 App categories use a **fixed match engine** + **editable JSON rules** (no rebuild to tune keywords):
 
 - Spec & usage: [`crates/lumen-store/rules/README.md`](crates/lumen-store/rules/README.md)
-- Defaults: `category_mapping.v1.json` (text / iTunes / LS), `app_catalog.v1.json` (known apps)
 - Live overrides: `~/Library/Application Support/LumenNavi/rules/`
 
 ## Browser Observe
 
-The Chrome MV3 extension records a privacy-gated lifecycle stream into its own local IndexedDB archive and can optionally sync a transport copy into the local daemon. Standalone capture needs no token or daemon. Page content remains metadata-only unless its host appears in an explicit extension or daemon allow-list. The extension includes a local full-page archive for activity, domain, attention, and source-detail review. No HTML, input values, selections, clipboard data, or DOM link lists are collected.
+The Chrome MV3 extension records a privacy-gated lifecycle stream into its own local IndexedDB archive and can optionally sync a transport copy into the local daemon. Page content remains metadata-only unless the host is on an explicit allow-list. No HTML, input values, selections, clipboard data, or DOM link lists are collected.
 
-Setup, build, API, and privacy contract: [`docs/BROWSER_CAPTURE.md`](docs/BROWSER_CAPTURE.md).
-
-### Release installers
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-# → GitHub Actions builds macOS arm64 + x64 DMGs and a Windows x64 NSIS
-#   installer, then one aggregate job publishes them with SHA256SUMS.txt
-```
-
-Install notes: [`docs/DESKTOP_RELEASE_NOTES.md`](docs/DESKTOP_RELEASE_NOTES.md).
-
-Windows support status, architecture and known gaps:
-[`docs/WINDOWS_PORT_STATUS.md`](docs/WINDOWS_PORT_STATUS.md).
+[`docs/BROWSER_CAPTURE.md`](docs/BROWSER_CAPTURE.md)
 
 ## Related projects
 
 | Project | Link | Relationship |
 |---------|------|----------------|
 | **Lumen ASR** | https://github.com/fakechris/lumen-asr | Separate **voice dictation** product. Share patterns only; **not** merged. |
+| **lumen-suite** | https://github.com/fakechris/lumen-suite | Shared ASR engines, model contract, transcript interchange (git deps). |
 | **cua-driver** | https://github.com/trycua/cua | Open-source **MIT** computer-use for optional **Act**. Never for Observe. |
 
 ## Config highlights
 
 | Key | Default |
 |-----|---------|
-| `capture.*` | multi-display, probe, debounce — `docs/OBSERVE_CAPTURE.md` |
+| `capture.*` | multi-display, probe, debounce, 2-min liveness — `docs/OBSERVE_CAPTURE.md` |
+| `capture.idle_session_ms` | `300000` (5 min HID silence → away) |
 | `audio.sample_rate` / `chunk_ms` | 16000 / 3000 |
 | `asr.enabled` / `locale` | true / `zh-CN` |
 | `ocr.enabled` | true |
 | `api.bind` | `127.0.0.1:7420` |
 | `sources.browser` | `false` |
-| `browser.content_allow_hosts` | `[]` (metadata only) |
 
 **cua-driver is not used for capture/OCR/ASR.**
 
