@@ -11,9 +11,19 @@ Product notes and Windows install: [`DESKTOP_RELEASE_NOTES.md`](DESKTOP_RELEASE_
 
 双击 DMG，将 **Lumen Navi** 拖入 Applications。
 
-### 首次打开
+### 首次打开（未公证）
 
-发布构建使用 **Developer ID 签名并公证**。如果 macOS 仍阻止启动，请先确认安装包来自本仓库发布页且校验值一致，不要绕过来源不明应用的 Gatekeeper 提示。
+GitHub 上的 macOS 包 **没有 Apple 公证**。拖进 Applications 后若提示无法验证开发者或已损坏，先清隔离：
+
+```bash
+xattr -d com.apple.quarantine "/Applications/Lumen Navi.app"
+```
+
+不行再用 `xattr -cr "/Applications/Lumen Navi.app"`，然后 **右键 → 打开**。Cua 装好后若屏幕录制弹不出来：
+
+```bash
+xattr -d com.apple.quarantine "/Applications/Lumen Cua.app"
+```
 
 请只从本仓库的 [GitHub Releases](https://github.com/fakechris/lumen-navi/releases) 下载，并用 `SHA256SUMS.txt` 校验：
 
