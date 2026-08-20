@@ -217,6 +217,7 @@ pub async fn get_health(state: State<'_, AppState>) -> Result<HealthResponse, St
         schema_version: SCHEMA_VERSION,
         browser,
         observe: daemon_health.as_ref().and_then(|h| h.observe.clone()),
+        liveness: daemon_health.as_ref().and_then(|h| h.liveness.clone()),
     })
 }
 
@@ -2223,6 +2224,7 @@ mod command_tests {
             schema_version: 0,
             browser: None,
             observe: None,
+            liveness: None,
         };
 
         let sources = health_sources(true, true, false, Some(&daemon));

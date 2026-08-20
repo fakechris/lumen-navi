@@ -14,7 +14,10 @@ pub use audio::{
     synthetic_silence_chunk, synthetic_tone_chunk, AudioOrchestrator, AudioStats, CapturedAudio,
 };
 pub use interaction::{InteractionCoalescer, InteractionContext};
-pub use orchestrator::{ActivityPoll, CaptureOrchestrator, CaptureStats, CapturedBatch};
+pub use orchestrator::{
+    ActivityPoll, CaptureOrchestrator, CaptureOutcome, CaptureStats, CapturedBatch, LivenessFrame,
+    LivenessSnapshot,
+};
 pub use session::{
     drain_transition, session_matches_frontmost, SessionManager, SessionTransition,
     SharedSessionBinder,

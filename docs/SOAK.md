@@ -49,6 +49,7 @@ Permissions: Screen Recording, Microphone, Speech Recognition.
 | Process still alive | desktop tray shows Running / no crash loop in logs |
 | Events grow | Overview Events count increases |
 | Screenshots land | Activity filter `screenshot` has rows + thumbnails |
+| Static desk does not flood | Leave a still window 10+ min: screenshot count stays flat; `$data_dir/liveness/` has at most one file per display |
 | Audio chunks land | filter `audio_chunk` |
 | OCR text | search finds recent on-screen words |
 | Transcripts | search finds spoken phrases (if Speech authorized) |

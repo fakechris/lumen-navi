@@ -14,7 +14,8 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use lumen_api::{
     BrowserHealthResponse, BrowserIngestResponse, BrowserPolicyResponse, ControlRequest,
-    ControlResponse, EventSummary, HealthResponse, OcrSearchHitDto, SourceStatus, API_VERSION,
+    ControlResponse, EventSummary, HealthResponse, LivenessHealthDto, OcrSearchHitDto,
+    SourceStatus, API_VERSION,
 };
 use lumen_sources_browser::{
     validate_batch, BrowserBatch, BrowserIngestPolicy, BROWSER_SCHEMA_VERSION,
@@ -48,6 +49,7 @@ pub struct ObserveCounters {
     pub persist_failed: AtomicU64,
     pub skipped_gate: AtomicU64,
     pub dropped_backpressure: AtomicU64,
+    pub liveness_overwrites: AtomicU64,
 }
 
 impl ObserveCounters {
@@ -57,6 +59,7 @@ impl ObserveCounters {
             persist_failed: self.persist_failed.load(Ordering::Relaxed),
             skipped_gate: self.skipped_gate.load(Ordering::Relaxed),
             dropped_backpressure: self.dropped_backpressure.load(Ordering::Relaxed),
+            liveness_overwrites: self.liveness_overwrites.load(Ordering::Relaxed),
         }
     }
 
@@ -66,6 +69,10 @@ impl ObserveCounters {
 
     pub fn note_persist_failed(&self) {
         self.persist_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn note_liveness(&self) {
+        self.liveness_overwrites.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn sync_capture_stats(&self, skipped_gate: u64, dropped_backpressure: u64) {
@@ -903,6 +910,11 @@ async fn build_health(st: &ControlState) -> Result<HealthResponse, anyhow::Error
         ocr_docs,
         schema_version: SCHEMA_VERSION,
         observe: Some(st.counters.snapshot()),
+        liveness: st.store.last_liveness()?.map(|meta| LivenessHealthDto {
+            captured_at: meta.captured_at,
+            displays: meta.displays.len(),
+            app_name: meta.app_name,
+        }),
         browser: Some(BrowserHealthResponse {
             enabled: st.browser.enabled,
             configured: !st.browser.token.is_empty(),

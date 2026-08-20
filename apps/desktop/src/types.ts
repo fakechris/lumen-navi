@@ -179,6 +179,7 @@ export interface ObserveCounters {
   persist_failed: number;
   skipped_gate: number;
   dropped_backpressure: number;
+  liveness_overwrites?: number;
 }
 
 export interface Health {
@@ -193,6 +194,13 @@ export interface Health {
   schema_version: number;
   browser: BrowserHealth | null;
   observe?: ObserveCounters | null;
+  liveness?: LivenessHealth | null;
+}
+
+export interface LivenessHealth {
+  captured_at: string;
+  displays: number;
+  app_name?: string | null;
 }
 
 export interface BrowserHealth {

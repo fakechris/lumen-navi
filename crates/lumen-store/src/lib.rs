@@ -7,6 +7,7 @@ mod blob;
 mod categorization;
 mod enrichment;
 mod history;
+mod liveness;
 mod pixel_hash;
 mod rule_engine;
 mod scene;
@@ -37,6 +38,7 @@ pub use blob::BlobStore;
 pub use history::{
     fold_history_slots, history_slot_key, is_duration_laundry, overlay_slot_narrative,
 };
+pub use liveness::{LivenessDisplayMeta, LivenessFrameInput, LivenessMeta};
 pub use pixel_hash::PixelHashWindow;
 pub use scene::fold_scene_day;
 pub use schema::SCHEMA_VERSION;

@@ -32,11 +32,12 @@ use lumen_process::{
 use lumen_sources_browser::BrowserIngestPolicy;
 use lumen_sources_media::{
     drain_transition, session_matches_frontmost, ActivityPoll, AudioOrchestrator,
-    CaptureOrchestrator, CapturedAudio, CapturedBatch, InteractionCoalescer, InteractionContext,
-    SessionTransition, SharedSessionBinder,
+    CaptureOrchestrator, CaptureOutcome, CapturedAudio, CapturedBatch, InteractionCoalescer,
+    InteractionContext, LivenessSnapshot, SessionTransition, SharedSessionBinder,
 };
 use lumen_store::{
-    EventStore, PixelHashWindow, ReclaimKind, RecoveryPolicy, SqliteStore, SCHEMA_VERSION,
+    EventStore, LivenessFrameInput, PixelHashWindow, ReclaimKind, RecoveryPolicy, SqliteStore,
+    SCHEMA_VERSION,
 };
 use lumen_types::{event_kind, SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
@@ -146,6 +147,64 @@ fn persist_activity_poll(
     }
     note_write();
     counters.note_persisted();
+}
+
+fn persist_liveness(
+    store: &SqliteStore,
+    snap: LivenessSnapshot,
+    counters: &control_server::ObserveCounters,
+) {
+    let app = snap.app_name.clone();
+    let bundle = snap.bundle_id.clone();
+    let n = snap.frames.len();
+    let frames: Vec<LivenessFrameInput> = snap
+        .frames
+        .into_iter()
+        .map(|f| LivenessFrameInput {
+            display_id: f.display_id,
+            display_index: f.display_index,
+            is_main: f.is_main,
+            media_type: f.media_type,
+            width: f.width,
+            height: f.height,
+            bytes: f.bytes,
+        })
+        .collect();
+    match store.put_liveness_snapshot(snap.captured_at, app.as_deref(), bundle.as_deref(), &frames)
+    {
+        Ok(_) => {
+            note_write();
+            counters.note_liveness();
+            info!(displays = n, "liveness overwrite");
+        }
+        Err(e) => {
+            warn!(error = %e, "liveness overwrite failed");
+            counters.note_persist_failed();
+        }
+    }
+}
+
+fn take_capture_outcome(
+    outcome: Option<CaptureOutcome>,
+    tx: &mpsc::Sender<CapturedBatch>,
+    orch: &mut CaptureOrchestrator,
+    store: &SqliteStore,
+    counters: &control_server::ObserveCounters,
+    full_ticks: &mut u64,
+) {
+    match outcome {
+        Some(CaptureOutcome::Evidence(batch)) => {
+            *full_ticks += 1;
+            if tx.try_send(batch).is_err() {
+                orch.note_backpressure_drop();
+                warn!("backpressure: drop capture batch");
+            }
+        }
+        Some(CaptureOutcome::Liveness(snap)) => {
+            persist_liveness(store, snap, counters);
+        }
+        None => {}
+    }
 }
 
 fn persist_session_transition(
@@ -1269,14 +1328,14 @@ async fn main() -> Result<()> {
                     if cua_ready.load(Ordering::Relaxed) {
                         if let Some(reason) = orch.poll_focus_trigger().await {
                             match orch.capture_tick(reason).await {
-                                Ok(Some(batch)) => {
-                                    full_ticks += 1;
-                                    if tx.try_send(batch).is_err() {
-                                        orch.note_backpressure_drop();
-                                        warn!("backpressure: drop capture batch");
-                                    }
-                                }
-                                Ok(None) => {}
+                                Ok(outcome) => take_capture_outcome(
+                                    outcome,
+                                    &tx,
+                                    &mut orch,
+                                    &store,
+                                    &observe_counters,
+                                    &mut full_ticks,
+                                ),
                                 Err(e) => {
                                     warn!(error = %e, "focus capture failed");
                                     screen_status.last_error = Some(e);
@@ -1304,14 +1363,14 @@ async fn main() -> Result<()> {
                     if cua_ready.load(Ordering::Relaxed) {
                         interval_ticks += 1;
                         match orch.capture_tick(TriggerReason::Interval).await {
-                            Ok(Some(batch)) => {
-                                full_ticks += 1;
-                                if tx.try_send(batch).is_err() {
-                                    orch.note_backpressure_drop();
-                                    warn!("backpressure: drop capture batch");
-                                }
-                            }
-                            Ok(None) => {}
+                            Ok(outcome) => take_capture_outcome(
+                                outcome,
+                                &tx,
+                                &mut orch,
+                                &store,
+                                &observe_counters,
+                                &mut full_ticks,
+                            ),
                             Err(e) => {
                                 warn!(error = %e, "interval capture failed");
                                 screen_status.last_error = Some(e);
@@ -1336,6 +1395,7 @@ async fn main() -> Result<()> {
         let st = orch.stats();
         info!(
             full = st.full_captures,
+            liveness = st.liveness_captures,
             probes = st.probes,
             skip_visual = st.skipped_visual,
             skip_debounce = st.skipped_debounce,
