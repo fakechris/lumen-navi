@@ -2150,7 +2150,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lumen-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "lumen-types",
@@ -2179,7 +2179,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2188,7 +2188,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-cua"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2216,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2253,7 +2253,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-intake"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "lumen-types",
@@ -2276,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-navi-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2307,7 +2307,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -2316,7 +2316,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-platform-cpal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cpal",
  "lumen-platform",
@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-platform-host"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "lumen-platform",
  "lumen-platform-cpal",
@@ -2335,7 +2335,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-platform-macos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2358,7 +2358,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-platform-windows"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "image",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-process"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2391,7 +2391,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-scene"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2401,7 +2401,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-sources-browser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "lumen-types",
@@ -2414,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-sources-media"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2431,7 +2431,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2462,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "lumen-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",

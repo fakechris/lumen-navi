@@ -1,3 +1,7 @@
+# Lumen Navi v0.2.0 (macOS)
+
+Product notes and Windows install: [`DESKTOP_RELEASE_NOTES.md`](DESKTOP_RELEASE_NOTES.md).
+
 ## macOS 安装说明
 
 请根据 Mac 类型下载对应的 DMG：
