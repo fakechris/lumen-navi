@@ -51,13 +51,37 @@ Full write-up: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · roadmap: [`docs
 
 ## Install
 
-Stable tags publish macOS DMGs (Apple Silicon + Intel) and a Windows x64 NSIS installer:
+Download from **[GitHub Releases](https://github.com/fakechris/lumen-navi/releases/tag/v0.2.0)** (macOS arm64 / Intel DMG, Windows x64 NSIS).
 
-**[GitHub Releases](https://github.com/fakechris/lumen-navi/releases)** — current: **[v0.2.0](https://github.com/fakechris/lumen-navi/releases/tag/v0.2.0)**
+These builds are **not Apple-notarized** (and the Windows installer is unsigned). That is expected.
 
-Install notes (permissions, Gatekeeper, checksums): [`docs/DESKTOP_RELEASE_NOTES.md`](docs/DESKTOP_RELEASE_NOTES.md).
+### macOS
 
-Screen Recording is owned by the nested **Lumen Cua** helper (`/Applications/Lumen Cua.app`). Start Observe from the Navi app so Cua can request it.
+1. Drag **Lumen Navi** into `/Applications`.
+2. Clear the quarantine flag — otherwise Gatekeeper says the app is damaged / can't be verified:
+
+```bash
+xattr -d com.apple.quarantine "/Applications/Lumen Navi.app"
+```
+
+If it still refuses (nested helper, or a folder-level quarantine):
+
+```bash
+xattr -cr "/Applications/Lumen Navi.app"
+```
+
+3. **Right-click → Open** (don't double-click the first time). On Sequoia: System Settings → Privacy & Security → Open Anyway.
+4. Start Observe from the app so it can install **Lumen Cua** and request Screen Recording. If Cua is blocked too:
+
+```bash
+xattr -d com.apple.quarantine "/Applications/Lumen Cua.app"
+```
+
+Checksums: `SHA256SUMS.txt` next to the DMG. Full permission list: [`docs/DESKTOP_RELEASE_NOTES.md`](docs/DESKTOP_RELEASE_NOTES.md).
+
+### Windows
+
+SmartScreen: **More info → Run anyway**. Install is per-user (`%LOCALAPPDATA%\Lumen Navi`), no admin.
 
 ## Workspace
 
