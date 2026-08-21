@@ -3,7 +3,7 @@ import * as d3 from "d3";
 import { api } from "../api";
 import { Button, Card, EmptyState, IconButton, Input, Select, StatCard } from "../design";
 import type { CategoryRule, MatchField, ProductivityLevel, ActivitySegment, DayStats, RangeStats, SceneDay, HistorySlot } from "../types";
-import { WeeklyView } from "./WeeklyView";
+import { DailyStackChart, PulseTrendChart } from "./WeeklyView";
 
 // --- helpers --------------------------------------------------------------
 
@@ -103,23 +103,68 @@ export function DashboardView() {
   const [groupBy, setGroupBy] = useState<"app" | "site" | "scene">("app");
   const [scenes, setScenes] = useState<SceneDay | null>(null);
   const [slots, setSlots] = useState<HistorySlot[] | null>(null);
+  // Range views: days that have history slots, paginated one day per page.
+  const [historyDays, setHistoryDays] = useState<string[]>([]);
+  const [historyByDay, setHistoryByDay] = useState<Record<string, HistorySlot[]>>({});
+  const [historyPage, setHistoryPage] = useState(0);
   // Calendar popover open state for the day picker.
   const [calendarOpen, setCalendarOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      if (view === "last7" || view === "month" || view === "total") {
+      if (view === "week" || view === "last7" || view === "month" || view === "total") {
         const today = todayStr();
+        const monday = (() => {
+          const d = new Date(today + "T00:00:00");
+          const dow = d.getDay(); // 0=Sun
+          const back = dow === 0 ? 6 : dow - 1;
+          return shiftDay(today, -back);
+        })();
         const from =
-          view === "last7"
-            ? shiftDay(today, -6)
-            : view === "month"
-              ? `${today.slice(0, 8)}01`
-              : "1970-01-01";
+          view === "week"
+            ? monday
+            : view === "last7"
+              ? shiftDay(today, -6)
+              : view === "month"
+                ? `${today.slice(0, 8)}01`
+                : "1970-01-01";
         setRangeStats(null);
         setSegments([]);
         setStats(null);
         setRangeStats(await api.activityRange(from, today, groupBy === "scene" ? "app" : groupBy));
+        // 历史回顾：范围内逐天拉取 slot 卡，翻页一天一页。
+        const days: string[] = [];
+        if (view === "last7") {
+          for (let i = 0; i < 7; i++) days.push(shiftDay(today, -i));
+        } else if (view === "month") {
+          const dim = new Date(
+            Number(today.slice(0, 4)),
+            Number(today.slice(5, 7)),
+            0,
+          ).getDate();
+          for (let i = 0; i < dim; i++) {
+            const d = shiftDay(today, -i);
+            if (d < `${today.slice(0, 8)}01`) break;
+            days.push(d);
+          }
+        } else {
+          // "全部" caps at the most recent 60 days.
+          for (let i = 0; i < 60; i++) days.push(shiftDay(today, -i));
+        }
+        const perDay = await Promise.all(
+          days.map((d) => api.activityHistorySlots(d).catch(() => [])),
+        );
+        const byDay: Record<string, HistorySlot[]> = {};
+        days.forEach((d, i) => {
+          if (perDay[i].length > 0) byDay[d] = perDay[i];
+        });
+        const withSlots = days.filter((d) => byDay[d]);
+        setHistoryByDay(byDay);
+        setHistoryDays(withSlots);
+        const page =
+          withSlots.length > 0 ? Math.min(historyPage, withSlots.length - 1) : 0;
+        setHistoryPage(page);
+        setSlots(withSlots.length > 0 ? byDay[withSlots[page]] : []);
         setError(null);
         return;
       }
@@ -157,7 +202,7 @@ export function DashboardView() {
     );
   }
 
-  const rangeView = view === "last7" || view === "month" || view === "total";
+  const rangeView = view === "week" || view === "last7" || view === "month" || view === "total";
   const loading = rangeView ? rangeStats === null : segments === null || stats === null;
   const hasData = !loading && (segments!.length > 0);
 
@@ -172,14 +217,119 @@ export function DashboardView() {
         <ViewTab active={view === "total"} onClick={() => setView("total")}>全部</ViewTab>
       </div>
 
-      {view === "week" && <WeeklyView />}
-
       {rangeView && (
         <RangeSummary
-          label={view === "last7" ? "最近 7 天" : view === "month" ? "本月" : "全部累计"}
+          label={
+            view === "week"
+              ? "本周"
+              : view === "last7"
+                ? "最近 7 天"
+                : view === "month"
+                  ? "本月"
+                  : "全部累计"
+          }
           stats={rangeStats}
           loading={loading}
         />
+      )}
+
+      {rangeView && view !== "total" && rangeStats && rangeStats.days.length > 1 && (
+        <Card pad={16}>
+          <SectionHeader title="每日趋势" subtitle="按类别堆叠的每日活跃 · 生产力分走势" />
+          <DailyStackChart stats={rangeStats} />
+          {rangeStats.days.some((d) => d.pulse_score !== null) && (
+            <div style={{ marginTop: 12 }}>
+              <PulseTrendChart stats={rangeStats} />
+            </div>
+          )}
+        </Card>
+      )}
+
+      {rangeView && historyDays.length > 0 && slots && slots.length > 0 && (
+        <Card pad={16}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
+              marginBottom: 12,
+            }}
+          >
+            <SectionHeader
+              title="历史回顾"
+              subtitle="范围内有记录的天 · 一天一页 · 图标是这段出现过的 app"
+            />
+            <div className="row" style={{ gap: 6, flexShrink: 0 }}>
+              <button
+                className="btn"
+                disabled={historyPage >= historyDays.length - 1}
+                onClick={() => {
+                  const next = historyPage + 1;
+                  setHistoryPage(next);
+                  setSlots(historyByDay[historyDays[next]] ?? []);
+                }}
+                title="更早一天"
+              >
+                ◀
+              </button>
+              <span className="mono" style={{ fontSize: "var(--text-xs)", minWidth: 96, textAlign: "center" }}>
+                {historyDays[historyPage]}（{historyPage + 1}/{historyDays.length}）
+              </span>
+              <button
+                className="btn"
+                disabled={historyPage <= 0}
+                onClick={() => {
+                  const prev = historyPage - 1;
+                  setHistoryPage(prev);
+                  setSlots(historyByDay[historyDays[prev]] ?? []);
+                }}
+                title="更近一天"
+              >
+                ▶
+              </button>
+            </div>
+          </div>
+          <HistorySlotList slots={slots} />
+        </Card>
+      )}
+
+      {rangeView && rangeStats && rangeStats.top_apps.length > 0 && (
+        <Card pad={16}>
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
+            <SectionHeader
+              title={groupBy === "site" ? "网站排行" : "应用排行"}
+              subtitle={
+                (view === "week" ? "本周" : view === "last7" ? "最近 7 天" : view === "month" ? "本月" : "全部")
+                + " · 按活跃时长排序"
+              }
+            />
+            <GroupToggle
+              value={groupBy === "scene" ? "app" : groupBy}
+              onChange={(g) => setGroupBy(g)}
+              options={[["app", "应用"], ["site", "网站"]]}
+            />
+          </div>
+          <TopApps
+            stats={{
+              day: "range",
+              total_active_ms: rangeStats.total_active_ms,
+              total_idle_ms: rangeStats.total_idle_ms,
+              pulse_score: rangeStats.pulse_score,
+              context_switches: 0,
+              by_category: rangeStats.by_category,
+              top_apps: rangeStats.top_apps,
+              by_hour: [],
+            }}
+            groupBy={groupBy === "scene" ? "app" : groupBy}
+          />
+        </Card>
+      )}
+
+      {rangeView && !loading && rangeStats && rangeStats.total_active_ms === 0 && historyDays.length === 0 && (
+        <EmptyState icon="clock" title="这段时间还没有活动数据">
+          启动观察后，这里会显示范围内的统计、趋势与回顾。
+        </EmptyState>
       )}
 
       {view === "today" && (
@@ -302,26 +452,11 @@ export function DashboardView() {
                       : "按活跃时长排序"
                 }
               />
-              <div style={{ display: "flex", gap: 0, borderRadius: "var(--radius-md)", overflow: "hidden", border: "1px solid var(--border)", flex: "0 0 auto" }}>
-                {(["app", "site", "scene"] as const).map((g) => (
-                  <button
-                    key={g}
-                    onClick={() => setGroupBy(g)}
-                    style={{
-                      padding: "4px 10px",
-                      fontSize: "var(--text-xs)",
-                      cursor: "pointer",
-                      background: groupBy === g ? "var(--accent)" : "transparent",
-                      color: groupBy === g ? "#fff" : "var(--text-secondary)",
-                      fontWeight: groupBy === g ? "var(--weight-semibold)" : "normal",
-                      border: "none",
-                      borderBottom: "none",
-                    }}
-                  >
-                    {g === "app" ? "应用" : g === "site" ? "网站" : "场景"}
-                  </button>
-                ))}
-              </div>
+              <GroupToggle
+                value={groupBy}
+                onChange={setGroupBy}
+                options={[["app", "应用"], ["site", "网站"], ["scene", "场景"]]}
+              />
             </div>
             {groupBy === "scene" ? (
               <SceneRanking scenes={scenes} />
@@ -467,7 +602,7 @@ function RangeSummary({
 
   return (
     <div className="stack">
-      <div className="meta">统计范围：{label} · 活跃时长按日期范围汇总，事件总数见概览页</div>
+      <div className="meta">统计范围：{label} · 与「今日」同一套指标口径</div>
       <div className="grid">
         <StatCard
           label="活跃时长"
@@ -491,22 +626,39 @@ function RangeSummary({
           hint={topCategory ? fmtDuration(topCategory.ms) : undefined}
         />
       </div>
+    </div>
+  );
+}
 
-      {stats.top_apps.length > 0 && (
-        <Card pad={16}>
-          <SectionHeader title="应用排行" subtitle={`${label} · 按活跃时长排序`} />
-          <TopApps stats={{
-            day: label,
-            total_active_ms: stats.total_active_ms,
-            total_idle_ms: stats.total_idle_ms,
-            pulse_score: stats.pulse_score,
-            context_switches: 0,
-            by_category: stats.by_category,
-            top_apps: stats.top_apps,
-            by_hour: [],
-          }} groupBy="app" />
-        </Card>
-      )}
+/** Segmented toggle used by every 排行 card (today + range views). */
+function GroupToggle({
+  value,
+  onChange,
+  options,
+}: {
+  value: string;
+  onChange: (v: "app" | "site" | "scene") => void;
+  options: Array<["app" | "site" | "scene", string]>;
+}) {
+  return (
+    <div style={{ display: "flex", gap: 0, borderRadius: "var(--radius-md)", overflow: "hidden", border: "1px solid var(--border)", flex: "0 0 auto" }}>
+      {options.map(([g, label]) => (
+        <button
+          key={g}
+          onClick={() => onChange(g)}
+          style={{
+            padding: "4px 10px",
+            fontSize: "var(--text-xs)",
+            cursor: "pointer",
+            background: value === g ? "var(--accent)" : "transparent",
+            color: value === g ? "#fff" : "var(--text-secondary)",
+            fontWeight: value === g ? "var(--weight-semibold)" : "normal",
+            border: "none",
+          }}
+        >
+          {label}
+        </button>
+      ))}
     </div>
   );
 }

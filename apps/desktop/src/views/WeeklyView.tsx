@@ -189,7 +189,7 @@ function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }
 
 // --- Daily stacked bar chart (category × day) ----------------------------
 
-function DailyStackChart({ stats }: { stats: RangeStats }) {
+export function DailyStackChart({ stats }: { stats: RangeStats }) {
   const ref = useRef<HTMLDivElement>(null);
   const [tooltip, setTooltip] = useState<{
     x: number; y: number; day: string; cats: { category: string; ms: number }[]; total: number;
@@ -363,7 +363,7 @@ function d_segDay(seg: unknown): string {
 
 // --- Pulse trend line chart ----------------------------------------------
 
-function PulseTrendChart({ stats }: { stats: RangeStats }) {
+export function PulseTrendChart({ stats }: { stats: RangeStats }) {
   const ref = useRef<HTMLDivElement>(null);
   const pts = stats.days.filter((d) => d.pulse_score !== null) as {
     day: string; pulse_score: number;
