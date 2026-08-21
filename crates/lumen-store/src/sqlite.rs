@@ -1018,6 +1018,37 @@ impl SqliteStore {
         Ok(n as usize)
     }
 
+    /// Most recent OCR texts (newest first), each truncated to `max_chars`.
+    /// Feeds the assistant's <attached-screen-ocr> context block.
+    pub fn latest_ocr_texts(
+        &self,
+        limit: usize,
+        max_chars: usize,
+    ) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT text FROM ocr_docs WHERE event_ts IS NOT NULL \
+                 ORDER BY event_ts DESC LIMIT ?1",
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map(params![limit as i64], |r| {
+                let t: String = r.get(0)?;
+                Ok(t)
+            })
+            .map_err(StoreError::db)?;
+        let mut out = Vec::new();
+        for r in rows {
+            let t = r.map_err(StoreError::db)?;
+            let cut: String = t.chars().take(max_chars).collect();
+            if !cut.trim().is_empty() {
+                out.push(cut);
+            }
+        }
+        Ok(out)
+    }
+
     /// Count overview records whose event timestamps fall within an inclusive
     /// local-date range.
     pub fn overview_range_counts(
