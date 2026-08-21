@@ -462,6 +462,7 @@ pub fn run() {
             commands::assistant_update_config,
             commands::assistant_run,
             commands::assistant_cancel,
+            commands::assistant_inject,
             commands::request_accessibility_permission,
             commands::selection_popup_hide,
             commands::selection_popup_current,

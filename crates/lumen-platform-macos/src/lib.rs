@@ -15,6 +15,7 @@ mod input_counter;
 pub mod ax_tree;
 mod capture;
 mod clipboard;
+pub mod inject;
 mod frontmost;
 mod idle;
 mod lock;

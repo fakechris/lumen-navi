@@ -52,8 +52,19 @@ fn run_step(step: &InputStep) -> Result<()> {
             key_combo(keys)?;
         }
         "type" => {
-            // No recorded text — skip rather than invent.
-            tracing::info!("skip type step (no recorded text)");
+            // Typed text is never recorded; only user-provided text (entered
+            // in the replay confirm dialog) is typed, via pasteboard + ⌘V.
+            let text = step
+                .text
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .context("type 步没有用户提供文本（回放确认时未填写）")?;
+            if let Some(bundle) = step.bundle_id.as_deref().filter(|s| !s.is_empty()) {
+                let _ = activate_bundle(bundle);
+                thread::sleep(Duration::from_millis(120));
+            }
+            lumen_platform_macos::inject::type_into_focused(text)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
         other => bail!("unsupported replay action {other}"),
     }

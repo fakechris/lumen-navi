@@ -792,6 +792,7 @@ pub fn activity_history_slots(
 pub fn replay_history_skill(
     state: State<'_, AppState>,
     slot_start: String,
+    type_texts: Option<Vec<Option<String>>>,
 ) -> Result<String, String> {
     let start = chrono::DateTime::parse_from_rfc3339(&slot_start)
         .or_else(|_| chrono::DateTime::parse_from_rfc3339(&slot_start.replace('Z', "+00:00")))
@@ -815,8 +816,15 @@ pub fn replay_history_skill(
         return Err("步骤太少，无法回放".into());
     }
     let mut ops = Vec::new();
-    for step in &skill.steps {
+    for (i, step) in skill.steps.iter().enumerate() {
         let bundle = step_bundle(&slot, step);
+        // User-provided text for type steps, aligned by step index. Typed
+        // text is never recorded — only what the user enters at confirm time.
+        let text = if step.action == "type" {
+            type_texts.as_ref().and_then(|v| v.get(i).cloned().flatten())
+        } else {
+            None
+        };
         ops.push(lumen_cua::InputStep {
             action: step.action.clone(),
             bundle_id: bundle,
@@ -832,6 +840,7 @@ pub fn replay_history_skill(
             nx: step.rel_x,
             ny: step.rel_y,
             wait_ms: Some(200),
+            text,
         });
     }
     let n = ops.len();
@@ -2507,6 +2516,28 @@ pub fn selection_popup_hide(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn selection_popup_current() -> Result<Option<String>, String> {
     Ok(selection_popup::take_pending_text())
+}
+
+/// Write the assistant result back into the app the text was selected from
+/// (划词 popup「写入原文」). Explicit user action — the frontend only shows the
+/// button after `assistant-done`. `mode` is "replace" or "append".
+#[tauri::command]
+pub async fn assistant_inject(app: AppHandle, mode: String, text: String) -> Result<String, String> {
+    let m = lumen_platform_host::selection::InjectMode::parse(&mode)
+        .ok_or_else(|| format!("未知注入模式 {mode}（replace|append）"))?;
+    let target = selection_popup::pending_target()
+        .ok_or_else(|| "来源应用已丢失，无法写回（重新划词后再试）".to_string())?;
+    if text.trim().is_empty() {
+        return Err("没有可写入的内容".into());
+    }
+    let pid = target.pid;
+    tauri::async_runtime::spawn_blocking(move || {
+        lumen_platform_host::selection::inject_text(pid, &text, m)
+    })
+    .await
+    .map_err(|e| format!("inject task: {e}"))??;
+    selection_popup::hide_popup(&app);
+    Ok("已写入".into())
 }
 
 #[cfg(test)]

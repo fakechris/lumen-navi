@@ -13,6 +13,8 @@ export default function PopupApp() {
   const [question, setQuestion] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [targetApp, setTargetApp] = useState<string | null>(null);
+  const [injecting, setInjecting] = useState(false);
   const reqIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -30,9 +32,10 @@ export default function PopupApp() {
       listen<T>(event, (e) => cb(e.payload)).then((u) => unlisteners.push(u));
     };
 
-    sub<{ text: string }>("selection-changed", ({ text }) => {
+    sub<{ text: string; target?: string | null }>("selection-changed", ({ text, target }) => {
       cancelInFlight();
       setText(text);
+      setTargetApp(target ?? null);
       setResult("");
       setError(null);
       setStreaming(false);
@@ -107,6 +110,19 @@ export default function PopupApp() {
     }
   }
 
+  /** Write the assistant result back into the app the text came from. */
+  async function inject(mode: "replace" | "append") {
+    if (!result.trim() || injecting) return;
+    setInjecting(true);
+    setError(null);
+    try {
+      await api.assistantInject(mode, result);
+    } catch (e) {
+      setError(String(e));
+    }
+    setInjecting(false);
+  }
+
   return (
     <div className="popup">
       <div className="popup-head">
@@ -163,6 +179,31 @@ export default function PopupApp() {
         <div className="popup-result">
           {result}
           {streaming && <span className="cursor" />}
+        </div>
+      )}
+
+      {!streaming && result.trim() && (
+        <div className="popup-actions">
+          <button
+            className="popup-btn primary"
+            disabled={!targetApp || injecting}
+            title={
+              targetApp
+                ? `把结果写回 ${targetApp} 的原文本框（替换选中内容）`
+                : "来源应用未知（⌘C 兜底路径无目标），无法写回"
+            }
+            onClick={() => inject("replace")}
+          >
+            {injecting ? "写入中…" : targetApp ? `写入 ${targetApp}` : "写入原文"}
+          </button>
+          <button
+            className="popup-btn"
+            disabled={!targetApp || injecting}
+            title={`在 ${targetApp ?? "原文本框"}现有内容后追加`}
+            onClick={() => inject("append")}
+          >
+            追加
+          </button>
         </div>
       )}
 

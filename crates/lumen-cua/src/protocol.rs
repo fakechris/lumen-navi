@@ -67,6 +67,10 @@ pub struct InputStep {
     pub ny: Option<f64>,
     #[serde(default)]
     pub wait_ms: Option<u64>,
+    /// User-provided text for `type` steps. Never recorded — only entered
+    /// explicitly in the replay confirm dialog.
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
