@@ -2027,7 +2027,7 @@ const DAEMON_BIN: &str = if cfg!(windows) {
 mod command_tests {
     use super::{
         daemon_health_url, ensure_browser_pairing, fmt_dur, health_sources, media_allowed,
-        privacy_settings_url, roast_prompt_data, MediaKind,
+        privacy_settings_url, MediaKind,
     };
     use lumen_api::{HealthResponse, SourceStatus, API_VERSION};
     use lumen_config::Config;
@@ -2063,10 +2063,10 @@ mod command_tests {
             switches_user: Some(13),
             switches_passive: Some(26),
         };
-        let data = roast_prompt_data(&summary);
+        let data = lumen_store::roast::prompt_data(&summary);
         let s = data.to_string();
         assert!(!s.contains("_ms"), "prompt JSON must not leak raw ms fields: {s}");
-        assert!(s.contains("15分57秒"));
+        assert!(s.contains("15分钟57秒"));
         assert!(s.contains("2小时47分钟"));
         assert!(s.contains("监控开启后的窗口"));
         assert_eq!(data["应用TOP"][0]["短段高活跃"], false);
@@ -2325,8 +2325,10 @@ pub fn assistant_run(
     action: String,
     text: String,
     question: Option<String>,
+    agent_id: Option<String>,
 ) -> Result<String, String> {
-    let cfg = state.load_config().map_err(err)?.assistant;
+    let full_cfg = state.load_config().map_err(err)?;
+    let cfg = full_cfg.assistant.clone();
     if !cfg.enabled {
         return Err("assistant is disabled (enable it in Settings)".into());
     }
@@ -2335,19 +2337,74 @@ pub fn assistant_run(
     if text.is_empty() {
         return Err("empty selection text".into());
     }
-    if action == assistant::AssistantAction::Ask
-        && question.as_deref().map(str::trim).unwrap_or("").is_empty()
-    {
+    let question = question.map(|q| q.trim().to_string()).filter(|q| !q.is_empty());
+    if action == assistant::AssistantAction::Ask && question.is_none() {
         return Err("ask action requires a question".into());
     }
 
     let id = Uuid::new_v4().to_string();
     let handle = app.clone();
+
+    // Local CLI agent path (ProcessAgentRunner): Ask only, template must be
+    // enabled; stdout streams through the same assistant-stream channel.
+    if let Some(agent_id) = agent_id.as_deref().filter(|a| *a != "http" && !a.is_empty()) {
+        if action != assistant::AssistantAction::Ask {
+            return Err("本地 agent 仅支持提问（Ask）".into());
+        }
+        let template = crate::agents::template_by_id(&full_cfg, agent_id)
+            .ok_or_else(|| format!("未知 agent：{agent_id}"))?;
+        if !template.enabled {
+            return Err(format!("agent {} 未启用（在 navi.toml [agents] 打开）", template.label));
+        }
+        let origin_app = selection_popup::pending_target().map(|t| t.app_name);
+        let blocks = crate::context::gather_context(&state.store, &cfg, origin_app.as_deref());
+        let context = crate::context::render_blocks(&blocks);
+        let prompt = format!(
+            "选中文字：\n\"\"\"\n{text}\n\"\"\"\n\n{context}\n任务：{}",
+            question.as_deref().unwrap_or("基于选中文字给出有用的回答")
+        );
+        let task_id = id.clone();
+        let join: tauri::async_runtime::JoinHandle<()> =
+            tauri::async_runtime::spawn_blocking(move || {
+                match crate::agents::run_process_agent(&handle, &task_id, &template, &prompt) {
+                    Ok(()) => {
+                        let _ = handle.emit_to(
+                            selection_popup::POPUP_LABEL,
+                            "assistant-done",
+                            json!({ "id": task_id }),
+                        );
+                    }
+                    Err(e) => {
+                        let _ = handle.emit_to(
+                            selection_popup::POPUP_LABEL,
+                            "assistant-error",
+                            json!({ "id": task_id, "message": e }),
+                        );
+                    }
+                }
+            });
+        if let Ok(mut tasks) = state.assistant_tasks.lock().map_err(err) {
+            tasks.insert(id.clone(), join);
+        }
+        return Ok(id);
+    }
+
+    // HTTP path (HttpAgentRunner).
+    // Gather <attached-*> reference context for Ask (latest screen OCR +
+    // recent history cards, biased to the origin app). Best-effort.
+    let context = if action == assistant::AssistantAction::Ask {
+        let origin_app = selection_popup::pending_target().map(|t| t.app_name);
+        let blocks = crate::context::gather_context(&state.store, &cfg, origin_app.as_deref());
+        crate::context::render_blocks(&blocks)
+    } else {
+        String::new()
+    };
     let job = AssistantJob {
         id: id.clone(),
         action,
         text,
         question,
+        context,
     };
     let task_id = id.clone();
     let join = tauri::async_runtime::spawn(async move {
@@ -2419,6 +2476,14 @@ pub async fn assistant_inject(app: AppHandle, mode: String, text: String) -> Res
     .map_err(|e| format!("inject task: {e}"))??;
     selection_popup::hide_popup(&app);
     Ok("已写入".into())
+}
+
+/// Agents selectable in the popup: the HTTP model plus enabled local CLI
+/// templates whose binary is found.
+#[tauri::command]
+pub fn assistant_agents(state: State<'_, AppState>) -> Result<Vec<crate::agents::AgentInfo>, String> {
+    let cfg = state.load_config().map_err(err)?;
+    Ok(crate::agents::list_available(&cfg))
 }
 
 #[cfg(test)]

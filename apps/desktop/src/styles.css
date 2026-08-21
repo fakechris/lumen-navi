@@ -614,3 +614,24 @@ input[type="password"]:focus {
   color: var(--text);
   border-color: var(--accent);
 }
+
+/* Popup agent selector */
+.popup-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.popup-agent-label {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+.popup-agent-select {
+  flex: 1;
+  font-size: var(--text-xs);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  padding: 4px 8px;
+  color: var(--text);
+}

@@ -142,6 +142,18 @@ fn tool_defs() -> Vec<Value> {
             }),
         ),
         tool(
+            "navi_suggest_skill",
+            "Reusable workflows (CUA replay skills) the user ran before, optionally filtered by app. Use to repeat a task the way the user did it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "app": { "type": "string" },
+                    "days": { "type": "integer", "minimum": 1, "maximum": 30 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 30 }
+                }
+            }),
+        ),
+        tool(
             "navi_search",
             "Full-text search over OCR / transcript / AX derived text.",
             json!({
@@ -176,6 +188,14 @@ fn call_tool(params: &Value, socket: &Path) -> Result<Value, Value> {
         "navi_pause" => ControlRequest::Pause { source: None },
         "navi_resume" => ControlRequest::Resume { source: None },
         "navi_recent_context" => ControlRequest::RecentContext {
+            limit: args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize),
+        },
+        "navi_suggest_skill" => ControlRequest::SuggestSkill {
+            app: args.get("app").and_then(|v| v.as_str()).map(str::to_string),
+            days: args.get("days").and_then(|v| v.as_u64()).map(|n| n as u32),
             limit: args
                 .get("limit")
                 .and_then(|v| v.as_u64())

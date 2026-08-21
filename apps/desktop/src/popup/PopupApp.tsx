@@ -15,6 +15,8 @@ export default function PopupApp() {
   const [copied, setCopied] = useState(false);
   const [targetApp, setTargetApp] = useState<string | null>(null);
   const [injecting, setInjecting] = useState(false);
+  const [agents, setAgents] = useState<Array<{ id: string; label: string }>>([]);
+  const [agentId, setAgentId] = useState("http");
   const reqIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -25,6 +27,10 @@ export default function PopupApp() {
       .then((t) => {
         if (t) setText(t);
       })
+      .catch(() => {});
+    api
+      .assistantAgents()
+      .then((list) => setAgents(list))
       .catch(() => {});
 
     const unlisteners: Array<() => void> = [];
@@ -86,7 +92,8 @@ export default function PopupApp() {
     setError(null);
     setStreaming(true);
     try {
-      reqIdRef.current = await api.assistantRun(action, text, q);
+      const useAgent = action === "ask" && agentId !== "http" ? agentId : undefined;
+      reqIdRef.current = await api.assistantRun(action, text, q, useAgent);
     } catch (e) {
       setStreaming(false);
       setError(String(e));
@@ -173,6 +180,25 @@ export default function PopupApp() {
           提问
         </button>
       </div>
+
+      {agents.length > 1 && (
+        <div className="popup-agent-row">
+          <span className="popup-agent-label">引擎</span>
+          <select
+            className="popup-agent-select"
+            value={agentId}
+            disabled={streaming}
+            onChange={(e) => setAgentId(e.target.value)}
+            title="本地 agent 在 navi.toml [agents] 中启用后出现"
+          >
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {error && <div className="popup-error">{error}</div>}
       {(result || streaming) && (
