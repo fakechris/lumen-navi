@@ -52,6 +52,20 @@ pub fn pending_target() -> Option<PendingTarget> {
     PENDING_TARGET.lock().ok()?.clone()
 }
 
+/// Set the injection target from outside the selection flow (quick composer).
+pub fn set_pending_target(t: Option<PendingTarget>) {
+    if let Ok(mut guard) = PENDING_TARGET.lock() {
+        *guard = t;
+    }
+}
+
+/// Clear the injection target without hiding the popup window (composer hide).
+pub fn clear_pending_target() {
+    if let Ok(mut guard) = PENDING_TARGET.lock() {
+        *guard = None;
+    }
+}
+
 pub fn popup_enabled() -> bool {
     POPUP_ENABLED.load(Ordering::SeqCst)
 }
