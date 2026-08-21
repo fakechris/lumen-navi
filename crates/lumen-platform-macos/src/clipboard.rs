@@ -98,19 +98,28 @@ unsafe fn grab_native() -> Option<String> {
 /// Post ⌘C (key down + up with Command flag) to the HID event tap.
 #[cfg(target_os = "macos")]
 fn post_cmd_c() {
+    post_cmd_key(8); // kVK_ANSI_C
+}
+
+/// Post ⌘V — used by result injection (`inject.rs`) to paste into the target.
+#[cfg(target_os = "macos")]
+pub fn post_cmd_v() {
+    post_cmd_key(9); // kVK_ANSI_V
+}
+
+#[cfg(target_os = "macos")]
+fn post_cmd_key(keycode: u16) {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-    /// kVK_ANSI_C
-    const VK_ANSI_C: u16 = 8;
 
     let Ok(source) = CGEventSource::new(CGEventSourceStateID::CombinedSessionState) else {
         return;
     };
-    if let Ok(down) = CGEvent::new_keyboard_event(source.clone(), VK_ANSI_C, true) {
+    if let Ok(down) = CGEvent::new_keyboard_event(source.clone(), keycode, true) {
         down.set_flags(CGEventFlags::CGEventFlagCommand);
         down.post(CGEventTapLocation::HID);
     }
-    if let Ok(up) = CGEvent::new_keyboard_event(source, VK_ANSI_C, false) {
+    if let Ok(up) = CGEvent::new_keyboard_event(source, keycode, false) {
         up.set_flags(CGEventFlags::CGEventFlagCommand);
         up.post(CGEventTapLocation::HID);
     }

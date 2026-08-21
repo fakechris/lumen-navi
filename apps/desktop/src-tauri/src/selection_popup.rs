@@ -36,6 +36,22 @@ static LAST_SHOWN: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 /// Text of the latest show, for the popup webview to pull on first load.
 static PENDING_TEXT: Mutex<Option<String>> = Mutex::new(None);
 
+/// Where the current selection came from — the injection target for the
+/// popup's「写入原文」. Cleared when the popup hides.
+#[derive(Debug, Clone)]
+pub struct PendingTarget {
+    pub pid: i32,
+    pub app_name: String,
+    pub bundle_id: Option<String>,
+}
+
+static PENDING_TARGET: Mutex<Option<PendingTarget>> = Mutex::new(None);
+
+/// Injection target of the currently shown popup (if the source app is known).
+pub fn pending_target() -> Option<PendingTarget> {
+    PENDING_TARGET.lock().ok()?.clone()
+}
+
 pub fn popup_enabled() -> bool {
     POPUP_ENABLED.load(Ordering::SeqCst)
 }
@@ -154,9 +170,14 @@ fn on_mouse_up(app: &AppHandle, up: selection::MouseUp) {
                     Some(text) => {
                         if should_reshow(&text) {
                             tracing::info!(chars = text.len(), pid = ?sel.pid, "selection → show popup");
+                            let target = sel.pid.and_then(|pid| {
+                                selection::app_identity_for_pid(pid).map(|(app_name, bundle_id)| {
+                                    PendingTarget { pid, app_name, bundle_id }
+                                })
+                            });
                             let h2 = handle.clone();
                             let _ = handle.run_on_main_thread(move || {
-                                show_popup(&h2, text, sel.bounds);
+                                show_popup(&h2, text, sel.bounds, target);
                             });
                         }
                     }
@@ -197,9 +218,14 @@ async fn clipboard_fallback_or_hide(handle: &AppHandle, epoch: u64) {
                 if let Some(text) = normalize_selection(&grabbed, max_chars) {
                     if should_reshow(&text) {
                         tracing::info!(chars = text.len(), "selection (⌘C) → show popup");
+                        let target = pid.and_then(|pid| {
+                            selection::app_identity_for_pid(pid).map(|(app_name, bundle_id)| {
+                                PendingTarget { pid, app_name, bundle_id }
+                            })
+                        });
                         let h2 = handle.clone();
                         let _ = handle.run_on_main_thread(move || {
-                            show_popup(&h2, text, None);
+                            show_popup(&h2, text, None, target);
                         });
                     }
                     return;
@@ -258,7 +284,12 @@ fn popup_window(app: &AppHandle) -> Result<tauri::WebviewWindow, tauri::Error> {
 
 /// Position near the selection (fallback: mouse), clamp to its monitor,
 /// show, and hand the text to the webview.
-fn show_popup(app: &AppHandle, text: String, anchor: Option<(f64, f64, f64, f64)>) {
+fn show_popup(
+    app: &AppHandle,
+    text: String,
+    anchor: Option<(f64, f64, f64, f64)>,
+    target: Option<PendingTarget>,
+) {
     let win = match popup_window(app) {
         Ok(w) => w,
         Err(e) => {
@@ -270,13 +301,21 @@ fn show_popup(app: &AppHandle, text: String, anchor: Option<(f64, f64, f64, f64)
     if let Ok(mut guard) = PENDING_TEXT.lock() {
         *guard = Some(text.clone());
     }
+    if let Ok(mut guard) = PENDING_TARGET.lock() {
+        *guard = target.clone();
+    }
     if let Err(e) = win.set_position(LogicalPosition::new(x, y)) {
         tracing::warn!(error = %e, "popup set_position failed");
     }
     if let Err(e) = win.show() {
         tracing::warn!(error = %e, "popup show failed");
     }
-    if let Err(e) = app.emit_to(POPUP_LABEL, "selection-changed", json!({ "text": text })) {
+    let target_name = target.as_ref().map(|t| t.app_name.clone());
+    if let Err(e) = app.emit_to(
+        POPUP_LABEL,
+        "selection-changed",
+        json!({ "text": text, "target": target_name }),
+    ) {
         tracing::warn!(error = %e, "popup emit failed");
     }
 }
@@ -333,6 +372,9 @@ pub(crate) fn hide_popup(app: &AppHandle) {
     // Reset debounce so re-selecting the same text right after a dismiss
     // brings the panel back.
     if let Ok(mut guard) = LAST_SHOWN.lock() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = PENDING_TARGET.lock() {
         *guard = None;
     }
     let app = app.clone();

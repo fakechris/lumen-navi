@@ -82,8 +82,11 @@ export const api = {
     invoke<SceneDay>("activity_scenes", { day }),
   activityHistorySlots: (day: string) =>
     invoke<HistorySlot[]>("activity_history_slots", { day }),
-  replayHistorySkill: (slotStart: string) =>
-    invoke<string>("replay_history_skill", { slotStart }),
+  replayHistorySkill: (slotStart: string, typeTexts?: Array<string | null>) =>
+    invoke<string>("replay_history_skill", {
+      slotStart,
+      typeTexts: typeTexts ?? null,
+    }),
   appIcons: (bundleIds: string[]) =>
     invoke<Record<string, string>>("app_icons", { bundleIds }),
   roastDay: (day: string, tone?: string) =>
@@ -170,6 +173,8 @@ export const api = {
       question: question ?? null,
     }),
   assistantCancel: (id: string) => invoke<void>("assistant_cancel", { id }),
+  assistantInject: (mode: "replace" | "append", text: string) =>
+    invoke<string>("assistant_inject", { mode, text }),
   requestAccessibilityPermission: () =>
     invoke<boolean>("request_accessibility_permission"),
   selectionPopupHide: () => invoke<void>("selection_popup_hide"),

@@ -1078,8 +1078,26 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
                   ) {
                     return;
                   }
+                  // Typed text is never recorded — ask the user for each
+                  // type step explicitly before replaying.
+                  const typeIdx: number[] = [];
+                  (sk.steps ?? []).forEach((s, i) => {
+                    if (s.action === "type") typeIdx.push(i);
+                  });
+                  const texts: Array<string | null> = (sk.steps ?? []).map(
+                    () => null,
+                  );
+                  for (const i of typeIdx) {
+                    const step = sk.steps?.[i];
+                    const input = window.prompt(
+                      `第 ${i + 1} 步需要键入文本（不会记录）：\n${step?.note ?? step?.target ?? ""}`,
+                      "",
+                    );
+                    if (input === null) return; // cancelled
+                    texts[i] = input;
+                  }
                   void api
-                    .replayHistorySkill(slot.slot_start)
+                    .replayHistorySkill(slot.slot_start, texts)
                     .then((msg) => window.alert(msg))
                     .catch((err: unknown) =>
                       window.alert(String(err ?? "回放失败")),

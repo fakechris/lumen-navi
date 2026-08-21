@@ -91,3 +91,52 @@ where
         Err("selection monitor is not implemented on this platform".into())
     }
 }
+
+/// How injected text combines with existing field content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectMode {
+    Replace,
+    Append,
+}
+
+impl InjectMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "replace" => Some(Self::Replace),
+            "append" => Some(Self::Append),
+            _ => None,
+        }
+    }
+}
+
+/// Write assistant output back into `pid`'s focused text control (explicit
+/// user action only — the 划词 popup's「写入原文」). AX write first, pasteboard
+/// + synthetic ⌘V fallback. Password-looking fields are refused.
+pub fn inject_text(pid: i32, text: &str, mode: InjectMode) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let m = match mode {
+            InjectMode::Replace => backend::inject::InjectMode::Replace,
+            InjectMode::Append => backend::inject::InjectMode::Append,
+        };
+        backend::inject::inject_text(pid, text, m)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (pid, text, mode);
+        Err("注入仅支持 macOS".into())
+    }
+}
+
+/// (app display name, bundle id) of a pid — for "将写回: X" UI.
+pub fn app_identity_for_pid(pid: i32) -> Option<(String, Option<String>)> {
+    #[cfg(target_os = "macos")]
+    {
+        backend::inject::app_identity_for_pid(pid)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
+}
