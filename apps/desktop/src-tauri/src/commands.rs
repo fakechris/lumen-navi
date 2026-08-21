@@ -2027,7 +2027,7 @@ const DAEMON_BIN: &str = if cfg!(windows) {
 mod command_tests {
     use super::{
         daemon_health_url, ensure_browser_pairing, fmt_dur, health_sources, media_allowed,
-        privacy_settings_url, roast_prompt_data, MediaKind,
+        privacy_settings_url, MediaKind,
     };
     use lumen_api::{HealthResponse, SourceStatus, API_VERSION};
     use lumen_config::Config;
@@ -2063,10 +2063,10 @@ mod command_tests {
             switches_user: Some(13),
             switches_passive: Some(26),
         };
-        let data = roast_prompt_data(&summary);
+        let data = lumen_store::roast::prompt_data(&summary);
         let s = data.to_string();
         assert!(!s.contains("_ms"), "prompt JSON must not leak raw ms fields: {s}");
-        assert!(s.contains("15分57秒"));
+        assert!(s.contains("15分钟57秒"));
         assert!(s.contains("2小时47分钟"));
         assert!(s.contains("监控开启后的窗口"));
         assert_eq!(data["应用TOP"][0]["短段高活跃"], false);
