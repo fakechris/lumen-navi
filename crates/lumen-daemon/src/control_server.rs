@@ -876,6 +876,51 @@ async fn handle_control(
             slots.truncate(keep);
             Ok(ControlResponse::RecentContext { slots })
         }
+        ControlRequest::SuggestSkill { app, days, limit } => {
+            let days = days.unwrap_or(7).clamp(1, 30);
+            let keep = limit.unwrap_or(10).clamp(1, 30);
+            let mut out: Vec<serde_json::Value> = Vec::new();
+            let today = chrono::Local::now();
+            for back in 0..days {
+                let day = (today - chrono::Duration::days(back as i64))
+                    .format("%Y-%m-%d")
+                    .to_string();
+                let slots = st.store.list_history_slots(&day)?;
+                for slot in slots {
+                    if let Some(app_filter) = app.as_deref() {
+                        let lower = app_filter.to_lowercase();
+                        let hit = slot
+                            .apps
+                            .iter()
+                            .any(|a| a.app_name.to_lowercase().contains(&lower));
+                        if !hit {
+                            continue;
+                        }
+                    }
+                    for sk in &slot.suggested_skills {
+                        if out.len() >= keep {
+                            break;
+                        }
+                        out.push(serde_json::json!({
+                            "name": sk.name,
+                            "trigger": sk.trigger,
+                            "prompt": sk.prompt,
+                            "verify": sk.verify,
+                            "steps": sk.steps,
+                            "slot_start": slot.slot_start,
+                            "apps": slot.apps.iter().map(|a| a.app_name.as_str()).collect::<Vec<_>>(),
+                        }));
+                    }
+                    if out.len() >= keep {
+                        break;
+                    }
+                }
+                if out.len() >= keep {
+                    break;
+                }
+            }
+            Ok(ControlResponse::SuggestSkill { skills: out })
+        }
         ControlRequest::Permissions => Ok(ControlResponse::Error {
             message: "permissions probe not exposed on HTTP yet".into(),
         }),

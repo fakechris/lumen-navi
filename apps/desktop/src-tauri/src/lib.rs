@@ -1,9 +1,11 @@
 //! Lumen Navi desktop shell — store browser + control + observe sidecar + tray.
 
+mod agents;
 mod app_icon;
 mod asr_models;
 mod assistant;
 mod commands;
+mod context;
 mod cua;
 mod restart;
 mod selection_popup;
@@ -463,6 +465,7 @@ pub fn run() {
             commands::assistant_run,
             commands::assistant_cancel,
             commands::assistant_inject,
+            commands::assistant_agents,
             commands::request_accessibility_permission,
             commands::selection_popup_hide,
             commands::selection_popup_current,

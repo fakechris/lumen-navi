@@ -36,6 +36,8 @@ pub struct Config {
     pub input: InputConfig,
     #[serde(default)]
     pub assistant: AssistantConfig,
+    #[serde(default)]
+    pub agents: AgentsConfig,
 }
 
 /// Selection-popup assistant (desktop 划词弹窗) — OpenAI-compatible chat LLM.
@@ -70,6 +72,11 @@ pub struct AssistantConfig {
     /// When AX exposes no selection (canvas editors, GPU terminals), grab it
     /// via simulated ⌘C with full pasteboard save/restore.
     pub clipboard_fallback: bool,
+    /// Attach the latest screen OCR as <attached-screen-ocr> context on Ask.
+    pub context_screen: bool,
+    /// Attach recent 15-min history cards as <attached-history-slot> context
+    /// on Ask (matching the origin app when known).
+    pub context_history: bool,
 }
 
 impl Default for AssistantConfig {
@@ -85,7 +92,63 @@ impl Default for AssistantConfig {
             target_lang: "中文".into(),
             max_selection_chars: 4_000,
             timeout_ms: 120_000,
+            context_screen: true,
+            context_history: true,
             clipboard_fallback: true,
+        }
+    }
+}
+
+/// Local CLI agent templates (ProcessAgentRunner). Disabled by default — the
+/// user opts in per agent. Commands embed the Atat-style sandbox discipline
+/// (`--safe-mode` / `--sandbox read-only` / `--ephemeral` / read-only tool
+/// whitelists) so a spawned agent cannot write or prompt mid-run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AgentsConfig {
+    pub templates: Vec<AgentTemplate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTemplate {
+    /// Stable id referenced by the popup ("claude", "codex", …).
+    pub id: String,
+    /// UI label.
+    pub label: String,
+    /// Command line; must contain `{prompt}` (validated before spawn).
+    /// Split on whitespace — quote-free argv only.
+    pub command: String,
+    /// Off by default; user opts in.
+    pub enabled: bool,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            templates: vec![
+                AgentTemplate {
+                    id: "claude".into(),
+                    label: "Claude Code（本地 CLI）".into(),
+                    command: "claude --safe-mode --no-session-persistence \
+                              --permission-mode dontAsk --tools Read Glob Grep \
+                              -p --output-format text {prompt}"
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    enabled: false,
+                },
+                AgentTemplate {
+                    id: "codex".into(),
+                    label: "Codex（本地 CLI）".into(),
+                    command: "codex exec --skip-git-repo-check --ephemeral \
+                              --sandbox read-only --ignore-user-config \
+                              --ignore-rules {prompt}"
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    enabled: false,
+                },
+            ],
         }
     }
 }
@@ -629,6 +692,7 @@ impl Default for Config {
             audio: AudioConfig::default(),
             asr: AsrConfig::default(),
             assistant: AssistantConfig::default(),
+            agents: AgentsConfig::default(),
             ax: AxConfig::default(),
             input: InputConfig::default(),
         }

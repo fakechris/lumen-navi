@@ -37,6 +37,9 @@ pub struct AssistantJob {
     pub action: AssistantAction,
     pub text: String,
     pub question: Option<String>,
+    /// Rendered <attached-*> blocks (header + tagged reference data).
+    /// Attached to Ask only; Translate stays pure.
+    pub context: String,
 }
 
 /// Chat messages for an action (pure, unit-testable).
@@ -45,6 +48,7 @@ pub fn build_messages(
     cfg: &AssistantConfig,
     text: &str,
     question: Option<&str>,
+    context: &str,
 ) -> Vec<serde_json::Value> {
     match action {
         AssistantAction::Translate => vec![
@@ -86,7 +90,9 @@ pub fn build_messages(
                 }),
                 json!({
                     "role": "user",
-                    "content": format!("上下文:\n\"\"\"\n{text}\n\"\"\"\n\n问题:{q}"),
+                    "content": format!(
+                        "上下文:\n\"\"\"\n{text}\n\"\"\"\n\n{context}\n问题:{q}"
+                    ),
                 }),
             ]
         }
@@ -104,7 +110,7 @@ pub async fn run_stream(
         return Err("assistant base_url / model not configured".into());
     }
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let messages = build_messages(job.action, &cfg, &job.text, job.question.as_deref());
+    let messages = build_messages(job.action, &cfg, &job.text, job.question.as_deref(), &job.context);
     let body = json!({
         "model": cfg.model,
         "messages": messages,
@@ -188,7 +194,7 @@ mod tests {
     fn translate_messages_use_target_lang() {
         let mut cfg = AssistantConfig::default();
         cfg.target_lang = "English".into();
-        let msgs = build_messages(AssistantAction::Translate, &cfg, "你好", None);
+        let msgs = build_messages(AssistantAction::Translate, &cfg, "你好", None, "");
         assert_eq!(msgs.len(), 2);
         assert!(msgs[0]["content"].as_str().unwrap().contains("English"));
         assert_eq!(msgs[1]["content"], "你好");
@@ -197,10 +203,20 @@ mod tests {
     #[test]
     fn ask_messages_embed_context_and_question() {
         let cfg = AssistantConfig::default();
-        let msgs = build_messages(AssistantAction::Ask, &cfg, "段文字", Some("什么意思?"));
+        let msgs = build_messages(AssistantAction::Ask, &cfg, "段文字", Some("什么意思?"), "");
+        let msgs_with_ctx = build_messages(
+            AssistantAction::Ask,
+            &cfg,
+            "段文字",
+            Some("什么意思?"),
+            "<attached-screen-ocr>hi</attached-screen-ocr>",
+        );
         let user = msgs[1]["content"].as_str().unwrap();
         assert!(user.contains("段文字"));
         assert!(user.contains("什么意思?"));
+        let with_ctx = msgs_with_ctx[1]["content"].as_str().unwrap();
+        assert!(with_ctx.contains("<attached-screen-ocr>"));
+        assert!(with_ctx.contains("什么意思?"));
     }
 
     #[test]

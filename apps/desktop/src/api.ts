@@ -166,12 +166,20 @@ export const api = {
   assistantGetConfig: () => invoke<AssistantConfig>("assistant_get_config"),
   assistantUpdateConfig: (update: AssistantUpdate) =>
     invoke<AssistantConfig>("assistant_update_config", { update }),
-  assistantRun: (action: AssistantAction, text: string, question?: string) =>
+  assistantRun: (
+    action: AssistantAction,
+    text: string,
+    question?: string,
+    agentId?: string,
+  ) =>
     invoke<string>("assistant_run", {
       action,
       text,
       question: question ?? null,
+      agentId: agentId ?? null,
     }),
+  assistantAgents: () =>
+    invoke<Array<{ id: string; label: string }>>("assistant_agents"),
   assistantCancel: (id: string) => invoke<void>("assistant_cancel", { id }),
   assistantInject: (mode: "replace" | "append", text: string) =>
     invoke<string>("assistant_inject", { mode, text }),
