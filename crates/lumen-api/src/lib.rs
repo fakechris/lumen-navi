@@ -130,6 +130,18 @@ pub enum ControlRequest {
         #[serde(default)]
         limit: Option<usize>,
     },
+    /// Skills (reusable CUA workflows) the user ran in a given app or time
+    /// window — lets an external agent do it "the way I did before".
+    SuggestSkill {
+        /// Filter by app display name (substring, case-insensitive).
+        #[serde(default)]
+        app: Option<String>,
+        /// How many days back to look (1–30, default 7).
+        #[serde(default)]
+        days: Option<u32>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +162,10 @@ pub enum ControlResponse {
     Settings(ObserveSettingsDto),
     RecentContext {
         slots: Vec<HistorySlotDto>,
+    },
+    SuggestSkill {
+        /// {name, trigger, prompt, verify?, steps, slot_start, apps[]}
+        skills: Vec<serde_json::Value>,
     },
     Error {
         message: String,
