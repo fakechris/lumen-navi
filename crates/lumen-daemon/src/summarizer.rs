@@ -255,7 +255,7 @@ fn slot_facts(
     })
 }
 
-fn chat_completion(assistant: &AssistantConfig, prompt: &str) -> Result<String, anyhow::Error> {
+pub fn chat_completion(assistant: &AssistantConfig, prompt: &str) -> Result<String, anyhow::Error> {
     let endpoint = resolve_chat_endpoint(assistant)?;
     let mut body = serde_json::json!({
         "model": assistant.model,

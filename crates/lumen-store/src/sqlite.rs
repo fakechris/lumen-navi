@@ -2135,6 +2135,24 @@ impl SqliteStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::db)
     }
 
+    /// Atomically claim a one-shot flag: returns Ok(true) when the flag was
+    /// NOT yet set (and now is), Ok(false) when already claimed. Used by the
+    /// daily auto-roast to guarantee at most one attempt per day.
+    pub fn kv_try_claim(&self, key: &str) -> Result<bool, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let claimed = conn
+            .execute(
+                "INSERT OR IGNORE INTO kv (key, value) VALUES (?1, '1')",
+                params![key],
+            )
+            .map_err(StoreError::db)?
+            == 1;
+        Ok(claimed)
+    }
+
     /// Days that have at least one roast, for calendar markers.
     pub fn roast_index(&self) -> Result<Vec<RoastIndexDto>, StoreError> {
         let conn = self

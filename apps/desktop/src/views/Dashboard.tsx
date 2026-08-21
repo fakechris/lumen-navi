@@ -103,6 +103,10 @@ export function DashboardView() {
   const [groupBy, setGroupBy] = useState<"app" | "site" | "scene">("app");
   const [scenes, setScenes] = useState<SceneDay | null>(null);
   const [slots, setSlots] = useState<HistorySlot[] | null>(null);
+  // Range views: days that have history slots, paginated one day per page.
+  const [historyDays, setHistoryDays] = useState<string[]>([]);
+  const [historyByDay, setHistoryByDay] = useState<Record<string, HistorySlot[]>>({});
+  const [historyPage, setHistoryPage] = useState(0);
   // Calendar popover open state for the day picker.
   const [calendarOpen, setCalendarOpen] = useState(false);
 
@@ -120,6 +124,39 @@ export function DashboardView() {
         setSegments([]);
         setStats(null);
         setRangeStats(await api.activityRange(from, today, groupBy === "scene" ? "app" : groupBy));
+        // 历史回顾：范围内逐天拉取 slot 卡，翻页一天一页。
+        const days: string[] = [];
+        if (view === "last7") {
+          for (let i = 0; i < 7; i++) days.push(shiftDay(today, -i));
+        } else if (view === "month") {
+          const dim = new Date(
+            Number(today.slice(0, 4)),
+            Number(today.slice(5, 7)),
+            0,
+          ).getDate();
+          for (let i = 0; i < dim; i++) {
+            const d = shiftDay(today, -i);
+            if (d < `${today.slice(0, 8)}01`) break;
+            days.push(d);
+          }
+        } else {
+          // "全部" caps at the most recent 60 days.
+          for (let i = 0; i < 60; i++) days.push(shiftDay(today, -i));
+        }
+        const perDay = await Promise.all(
+          days.map((d) => api.activityHistorySlots(d).catch(() => [])),
+        );
+        const byDay: Record<string, HistorySlot[]> = {};
+        days.forEach((d, i) => {
+          if (perDay[i].length > 0) byDay[d] = perDay[i];
+        });
+        const withSlots = days.filter((d) => byDay[d]);
+        setHistoryByDay(byDay);
+        setHistoryDays(withSlots);
+        const page =
+          withSlots.length > 0 ? Math.min(historyPage, withSlots.length - 1) : 0;
+        setHistoryPage(page);
+        setSlots(withSlots.length > 0 ? byDay[withSlots[page]] : []);
         setError(null);
         return;
       }
@@ -180,6 +217,55 @@ export function DashboardView() {
           stats={rangeStats}
           loading={loading}
         />
+      )}
+
+      {rangeView && historyDays.length > 0 && slots && slots.length > 0 && (
+        <Card pad={16}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
+              marginBottom: 12,
+            }}
+          >
+            <SectionHeader
+              title="历史回顾"
+              subtitle="范围内有记录的天 · 一天一页 · 图标是这段出现过的 app"
+            />
+            <div className="row" style={{ gap: 6, flexShrink: 0 }}>
+              <button
+                className="btn"
+                disabled={historyPage >= historyDays.length - 1}
+                onClick={() => {
+                  const next = historyPage + 1;
+                  setHistoryPage(next);
+                  setSlots(historyByDay[historyDays[next]] ?? []);
+                }}
+                title="更早一天"
+              >
+                ◀
+              </button>
+              <span className="mono" style={{ fontSize: "var(--text-xs)", minWidth: 96, textAlign: "center" }}>
+                {historyDays[historyPage]}（{historyPage + 1}/{historyDays.length}）
+              </span>
+              <button
+                className="btn"
+                disabled={historyPage <= 0}
+                onClick={() => {
+                  const prev = historyPage - 1;
+                  setHistoryPage(prev);
+                  setSlots(historyByDay[historyDays[prev]] ?? []);
+                }}
+                title="更近一天"
+              >
+                ▶
+              </button>
+            </div>
+          </div>
+          <HistorySlotList slots={slots} />
+        </Card>
       )}
 
       {view === "today" && (

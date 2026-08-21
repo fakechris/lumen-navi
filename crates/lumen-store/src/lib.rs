@@ -5,6 +5,7 @@
 
 mod blob;
 mod categorization;
+pub mod roast;
 mod enrichment;
 mod history;
 mod liveness;

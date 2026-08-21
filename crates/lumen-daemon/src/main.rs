@@ -1012,6 +1012,65 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Daily auto-roast: once the previous day is closed, generate its
+    // advisor-tone 真诚建议 automatically (user never has to click). One
+    // attempt per day via the kv claim flag; skipped silently when no LLM
+    // is configured or the day already has any roast (manual included).
+    {
+        let store_roast = Arc::clone(&store);
+        let assistant = config.assistant.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(Duration::from_secs(10 * 60));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                every.tick().await;
+                if assistant.model.trim().is_empty() || assistant.effective_api_key().is_empty() {
+                    continue;
+                }
+                let yesterday = (chrono::Local::now() - chrono::Duration::days(1))
+                    .format("%Y-%m-%d")
+                    .to_string();
+                let flag = format!("roast.auto.{yesterday}");
+                // Already attempted (or already roasted)?
+                let already = store_roast
+                    .roast_list_for_day(&yesterday)
+                    .map(|r| !r.is_empty())
+                    .unwrap_or(false);
+                if already {
+                    let _ = store_roast.kv_try_claim(&flag);
+                    continue;
+                }
+                if !store_roast.kv_try_claim(&flag).unwrap_or(false) {
+                    continue;
+                }
+                let summary = match store_roast.day_roast_summary(&yesterday) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(error = %e, day = %yesterday, "auto roast summary failed");
+                        continue;
+                    }
+                };
+                if summary.total_active_ms <= 0 {
+                    info!(day = %yesterday, "auto roast skipped: no activity");
+                    continue;
+                }
+                let prompt = lumen_store::roast::build_prompt(&summary, "advisor");
+                match summarizer::chat_completion(&assistant, &prompt) {
+                    Ok(content) => match store_roast.roast_save(
+                        &yesterday,
+                        &assistant.model,
+                        &content,
+                        None,
+                    ) {
+                        Ok(_) => info!(day = %yesterday, "auto roast (advisor) generated"),
+                        Err(e) => warn!(error = %e, "auto roast save failed"),
+                    },
+                    Err(e) => warn!(error = %e, day = %yesterday, "auto roast llm failed"),
+                }
+            }
+        });
+    }
+
     // Background category enrichment (Homebrew index + iTunes). Off the
     // sampling path; fills app_category_cache and re-applies segments.
     {
