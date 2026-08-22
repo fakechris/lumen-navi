@@ -467,3 +467,26 @@ export interface AssistantUpdate {
 }
 
 export type AssistantAction = "translate" | "ask" | "compose";
+
+export interface SkillDto {
+  name: string;
+  trigger: string;
+  prompt: string;
+  verify: string;
+  steps: Array<{
+    action: string;
+    app?: string | null;
+    window?: string | null;
+    target?: string | null;
+    keys?: string | null;
+    rel_x?: number | null;
+    rel_y?: number | null;
+    note?: string | null;
+  }>;
+  apps: string[];
+  enabled: boolean;
+  use_count: number;
+  last_used_at?: string | null;
+  last_suggested_at?: string | null;
+  updated_at: string;
+}

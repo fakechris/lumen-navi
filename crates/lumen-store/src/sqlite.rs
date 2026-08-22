@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use lumen_api::{
+use lumen_api::{SkillDto, 
     ActivitySegmentDto, AiMessageDto, AiThreadDto, AppTotal, CategoryTotal, DayRoastSummaryDto,
     DayRollupDto, DayStatsDto, HistorySlotDto, RangeStatsDto, RoastAppTotal, RoastDomainTotal,
     RoastHour, RoastIndexDto, RoastInputCounts, RoastRecordDto, RoastSceneTotal, RoastTitleTotal,
@@ -25,7 +25,7 @@ use crate::categorization::{
 use crate::enrichment::{self, BrewCaskRow};
 use crate::schema::{
     MIGRATE_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, MIGRATE_V5, MIGRATE_V6, MIGRATE_V7,
-    MIGRATE_V10, MIGRATE_V8, MIGRATE_V9, SCHEMA_VERSION,
+    MIGRATE_V10, MIGRATE_V11, MIGRATE_V8, MIGRATE_V9, SCHEMA_VERSION,
 };
 use crate::{EventStore, JobRecord, JobStatus, RecoveryPolicy, RecoveryReport, StoreError};
 #[cfg(test)]
@@ -2563,6 +2563,7 @@ impl SqliteStore {
         if let Some(skills) = skills {
             slot.suggested_skills = skills.to_vec();
             slot.skill_checked = true;
+            upsert_skills_tx(&conn, &slot)?;
         }
         kv_set(
             &conn,
@@ -2570,6 +2571,186 @@ impl SqliteStore {
             &serde_json::to_string(&slot).map_err(StoreError::json)?,
         )?;
         Ok(())
+    }
+
+    /// One-time backfill: promote skills from existing history slots into
+    /// the library (upsert). Returns the number of slots touched.
+    pub fn backfill_skills(&self, days: i64) -> Result<usize, StoreError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        let today = chrono::Local::now();
+        let mut n = 0usize;
+        for back in 0..days.max(1) {
+            let day = (today - chrono::Duration::days(back as i64))
+                .format("%Y-%m-%d")
+                .to_string();
+            let raws: Vec<String> = {
+                let mut stmt = tx
+                    .prepare("SELECT value FROM kv WHERE key LIKE 'history.slot.%'")
+                    .map_err(StoreError::db)?;
+                // Slots are kv-prefixed per start ts; filter by day inside Rust.
+                let rows: Vec<String> = stmt
+                    .query_map([], |r| r.get(0))
+                    .map_err(StoreError::db)?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                rows
+            };
+            for raw in raws {
+                let Ok(slot) = serde_json::from_str::<HistorySlotDto>(&raw) else {
+                    continue;
+                };
+                let slot_day = slot
+                    .slot_start
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d")
+                    .to_string();
+                if slot_day != day {
+                    continue;
+                }
+                if slot.suggested_skills.is_empty() {
+                    continue;
+                }
+                upsert_skills_tx(&tx, &slot)?;
+                n += 1;
+            }
+        }
+        tx.commit().map_err(StoreError::db)?;
+        Ok(n)
+    }
+
+    /// Frontmost app of the most recent active segment (local today) —
+    /// feeds the menu-bar skill suggestion.
+    pub fn latest_frontmost_app(&self) -> Result<Option<String>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let app: Option<String> = conn
+            .query_row(
+                "SELECT app_name FROM activity_segments \
+                 WHERE day = ?1 AND is_idle = 0 AND app_name IS NOT NULL \
+                 ORDER BY started_at DESC LIMIT 1",
+                params![today],
+                |r| r.get(0),
+            )
+            .map_err(StoreError::db)?;
+        Ok(app)
+    }
+
+    /// All library skills (newest-updated first).
+    pub fn list_skills(&self) -> Result<Vec<SkillDto>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, trigger, prompt, verify, steps, apps, enabled, \
+                 use_count, last_used_at, last_suggested_at, updated_at \
+                 FROM skills ORDER BY updated_at DESC",
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map([], skill_row)
+            .map_err(StoreError::db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::db)
+    }
+
+    /// Enable/disable a skill.
+    pub fn set_skill_enabled(&self, name: &str, enabled: bool) -> Result<(), StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.execute(
+            "UPDATE skills SET enabled = ?2, updated_at = ?3 WHERE name = ?1",
+            params![name, enabled as i64, Utc::now().to_rfc3339()],
+        )
+        .map_err(StoreError::db)?;
+        Ok(())
+    }
+
+    /// Delete a skill from the library.
+    pub fn delete_skill(&self, name: &str) -> Result<(), StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.execute("DELETE FROM skills WHERE name = ?1", params![name])
+            .map_err(StoreError::db)?;
+        Ok(())
+    }
+
+    /// Record a manual use (bumps use_count for cooldown heuristics).
+    pub fn record_skill_used(&self, name: &str) -> Result<(), StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        conn.execute(
+            "UPDATE skills SET use_count = use_count + 1, last_used_at = ?2 WHERE name = ?1",
+            params![name, Utc::now().to_rfc3339()],
+        )
+        .map_err(StoreError::db)?;
+        Ok(())
+    }
+
+    /// One enabled skill whose app list contains `app`, least-recently
+    /// suggested, honoring a per-skill cooldown (default 1 day). For the
+    /// menu-bar 试试：X nudge — non-intrusive by design.
+    pub fn suggest_skill_for_app(&self, app: &str, cooldown_h: i64) -> Result<Option<SkillDto>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, trigger, prompt, verify, steps, apps, enabled, \
+                 use_count, last_used_at, last_suggested_at, updated_at \
+                 FROM skills WHERE enabled = 1 \
+                 ORDER BY COALESCE(last_suggested_at, '1970-01-01') ASC LIMIT 20",
+            )
+            .map_err(StoreError::db)?;
+        let rows = stmt
+            .query_map([], skill_row)
+            .map_err(StoreError::db)?;
+        let lower = app.to_lowercase();
+        let now = Utc::now();
+        let mut candidate: Option<SkillDto> = None;
+        for row in rows {
+            let sk = row.map_err(StoreError::db)?;
+            let hit = sk
+                .apps
+                .iter()
+                .any(|a| a.to_lowercase().contains(&lower) || lower.contains(&a.to_lowercase()));
+            if !hit {
+                continue;
+            }
+            if let Some(last) = &sk.last_suggested_at {
+                if let Ok(t) = chrono::DateTime::parse_from_rfc3339(last) {
+                    if now.signed_duration_since(t.with_timezone(&Utc)).num_hours() < cooldown_h {
+                        continue;
+                    }
+                }
+            }
+            candidate = Some(sk);
+            break;
+        }
+        drop(stmt);
+        if let Some(sk) = candidate {
+            conn.execute(
+                "UPDATE skills SET last_suggested_at = ?2 WHERE name = ?1",
+                params![sk.name, now.to_rfc3339()],
+            )
+            .map_err(StoreError::db)?;
+            return Ok(Some(sk));
+        }
+        Ok(None)
     }
 
     /// Aggregated stats for one day — feeds the dashboard's stat cards, hour
@@ -4053,6 +4234,16 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
         v = 10;
     }
 
+    if v < 11 {
+        conn.execute_batch(MIGRATE_V11).map_err(StoreError::db)?;
+        conn.execute(
+            "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
+            params!["11"],
+        )
+        .map_err(StoreError::db)?;
+        v = 11;
+    }
+
     let _ = v;
     Ok(())
 }
@@ -4227,6 +4418,57 @@ fn preview_text(s: &str, max: usize) -> String {
     } else {
         t.chars().take(max).collect::<String>() + "…"
     }
+}
+
+fn skill_row(row: &rusqlite::Row<'_>) -> Result<SkillDto, rusqlite::Error> {
+    let steps: String = row.get(4)?;
+    let apps: String = row.get(5)?;
+    Ok(SkillDto {
+        name: row.get(0)?,
+        trigger: row.get(1)?,
+        prompt: row.get(2)?,
+        verify: row.get(3)?,
+        steps: serde_json::from_str(&steps).unwrap_or_default(),
+        apps: serde_json::from_str(&apps).unwrap_or_default(),
+        enabled: row.get::<_, i64>(6)? != 0,
+        use_count: row.get(7)?,
+        last_used_at: row.get(8)?,
+        last_suggested_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+/// Promote a slot's suggested skills into the library (upsert by name).
+/// Steps/apps are stored as JSON; existing enable/use counters survive.
+fn upsert_skills_tx(conn: &Connection, slot: &HistorySlotDto) -> Result<(), StoreError> {
+    for sk in &slot.suggested_skills {
+        if sk.steps.is_empty() {
+            continue;
+        }
+        let apps: Vec<String> = slot.apps.iter().map(|a| a.app_name.clone()).collect();
+        conn.execute(
+            r#"INSERT INTO skills (name, trigger, prompt, verify, steps, apps, enabled, use_count, last_used_at, last_suggested_at, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 0, NULL, NULL, ?7)
+               ON CONFLICT(name) DO UPDATE SET
+                 trigger = excluded.trigger,
+                 prompt = excluded.prompt,
+                 verify = excluded.verify,
+                 steps = excluded.steps,
+                 apps = CASE WHEN excluded.apps != '[]' THEN excluded.apps ELSE skills.apps END,
+                 updated_at = excluded.updated_at"#,
+            params![
+                sk.name,
+                sk.trigger,
+                sk.prompt,
+                sk.verify,
+                serde_json::to_string(&sk.steps).map_err(StoreError::json)?,
+                serde_json::to_string(&apps).map_err(StoreError::json)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(StoreError::db)?;
+    }
+    Ok(())
 }
 
 fn kv_get(conn: &Connection, key: &str) -> Result<Option<String>, StoreError> {

@@ -17,10 +17,11 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
-    let sep = PredefinedMenuItem::separator(app)?;
+    let sep_a = PredefinedMenuItem::separator(app)?;
+    let sep_b = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
 
-    let menu = Menu::with_items(app, &[&show, &sep, &pause, &sep, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &sep_a, &pause, &sep_b, &quit])?;
 
     let icon = app.default_window_icon().cloned().or_else(|| {
         // Fallback: load png from resources if default missing.
@@ -32,6 +33,24 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .tooltip("Lumen Navi")
         .on_menu_event(|app, event| {
             match event.id.as_ref() {
+                "skill_suggest" => {
+                    if let Some(state) = app.try_state::<crate::state::AppState>() {
+                        // Replay the freshest library skill for the current
+                        // frontmost app (the one the menu was built from).
+                        if let Some(app_name) = state.store.latest_frontmost_app().ok().flatten() {
+                            if let Ok(Some(sk)) =
+                                state.store.suggest_skill_for_app(&app_name, 0)
+                            {
+                                let ops = crate::commands::expand_skill_steps_for_replay(&sk);
+                                if let Err(e) = crate::commands::run_tray_replay(&state, ops) {
+                                    tracing::warn!(error = %e, "tray skill replay failed");
+                                } else {
+                                    let _ = state.store.record_skill_used(&sk.name);
+                                }
+                            }
+                        }
+                    }
+                }
                 "show" => show_main(app),
                 "toggle_pause" => {
                     let _ = app.emit("tray://toggle-pause", ());
@@ -105,6 +124,14 @@ fn refresh_tray_display<R: Runtime>(app: &AppHandle<R>) {
         .ok()
         .and_then(|mut segs| segs.pop());
 
+    // Skill suggestion for the current frontmost app (menu-bar 试试：X nudge).
+    let suggestion = state
+        .store
+        .latest_frontmost_app()
+        .ok()
+        .flatten()
+        .and_then(|app| state.store.suggest_skill_for_app(&app, 24).ok().flatten());
+
     if let Some(tray) = app.tray_by_id("main") {
         // macOS menu-bar text: compact duration (e.g. "6h42m").
         #[cfg(target_os = "macos")]
@@ -116,7 +143,41 @@ fn refresh_tray_display<R: Runtime>(app: &AppHandle<R>) {
             let _ = tray.set_title(Some(&title));
         }
         let _ = tray.set_tooltip(Some(&build_tooltip(stats.as_ref(), latest.as_ref())));
+        if let Err(e) = rebuild_menu(app, &tray, suggestion.as_ref()) {
+            tracing::warn!(error = %e, "tray menu rebuild failed");
+        }
     }
+}
+
+/// Rebuild the tray menu, adding the 试试 suggestion entry when present.
+fn rebuild_menu<R: Runtime>(
+    app: &AppHandle<R>,
+    tray: &tauri::tray::TrayIcon<R>,
+    suggestion: Option<&lumen_api::SkillDto>,
+) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Show Lumen Navi", true, None::<&str>)?;
+    let pause = MenuItem::with_id(app, "toggle_pause", "Toggle Privacy Pause", true, None::<&str>)?;
+    let sep_a = PredefinedMenuItem::separator(app)?;
+    let sep_b = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let mut items: Vec<MenuItem<R>> = vec![show];
+    if let Some(sk) = suggestion {
+        let label = format!("试试：{}（回放 {} 步）", sk.name, sk.steps.len());
+        items.push(MenuItem::with_id(app, "skill_suggest", label, true, None::<&str>)?);
+    }
+    items.push(pause);
+    items.push(quit);
+    let has_sugg = suggestion.is_some() as usize;
+    let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = vec![
+        &items[0],
+        &items[has_sugg],
+        &sep_a,
+        &items[1 + has_sugg],
+        &sep_b,
+        &items[2 + has_sugg],
+    ];
+    let menu = Menu::with_items(app, &refs)?;
+    tray.set_menu(Some(menu))
 }
 
 fn fmt_tray_title(ms: i64) -> String {

@@ -815,13 +815,23 @@ pub fn replay_history_skill(
     if skill.steps.len() < 2 {
         return Err("步骤太少，无法回放".into());
     }
+    let ops = expand_skill_steps(&slot, &skill.steps, type_texts.as_deref());
+    run_replay(&state, ops)?;
+    Ok(format!("已回放 {} 步「{}」", skill.steps.len(), skill.name))
+}
+
+/// Shared step expansion: slot apps provide bundle ids; type steps take
+/// user-entered text (aligned by index, never recorded).
+pub(crate) fn expand_skill_steps(
+    slot: &lumen_api::HistorySlotDto,
+    steps: &[lumen_api::SkillStepDto],
+    type_texts: Option<&[Option<String>]>,
+) -> Vec<lumen_cua::InputStep> {
     let mut ops = Vec::new();
-    for (i, step) in skill.steps.iter().enumerate() {
-        let bundle = step_bundle(&slot, step);
-        // User-provided text for type steps, aligned by step index. Typed
-        // text is never recorded — only what the user enters at confirm time.
+    for (i, step) in steps.iter().enumerate() {
+        let bundle = step_bundle(slot, step);
         let text = if step.action == "type" {
-            type_texts.as_ref().and_then(|v| v.get(i).cloned().flatten())
+            type_texts.and_then(|v| v.get(i).cloned().flatten())
         } else {
             None
         };
@@ -843,14 +853,120 @@ pub fn replay_history_skill(
             text,
         });
     }
-    let n = ops.len();
+    ops
+}
+
+pub(crate) fn run_replay(state: &State<'_, AppState>, ops: Vec<lumen_cua::InputStep>) -> Result<(), String> {
     state
         .cua
         .ensure_running()
         .map_err(err)?
         .input_replay(ops)
-        .map_err(|e| format!("CUA 回放失败: {e}"))?;
-    Ok(format!("已回放 {n} 步「{}」", skill.name))
+        .map_err(|e| format!("CUA 回放失败: {e}"))
+}
+
+// --- Skill library (D2) ----------------------------------------------------
+
+/// Tray path: expand a library skill (no slot) straight into replay ops.
+pub(crate) fn expand_skill_steps_for_replay(sk: &lumen_api::SkillDto) -> Vec<lumen_cua::InputStep> {
+    let now = chrono::Utc::now();
+    let slot = lumen_api::HistorySlotDto {
+        slot_start: now,
+        slot_end: now,
+        title: sk.name.clone(),
+        body: String::new(),
+        apps: sk
+            .apps
+            .iter()
+            .map(|a| lumen_api::HistorySlotAppDto {
+                app_name: a.clone(),
+                bundle_id: None,
+                ms: 0,
+                pct: 0.0,
+            })
+            .collect(),
+        scenes: vec![],
+        titles: vec![],
+        urls: vec![],
+        active_ms: 0,
+        narrative_status: String::new(),
+        suggested_skills: vec![],
+        skill_checked: true,
+    };
+    expand_skill_steps(&slot, &sk.steps, None)
+}
+
+/// Tray replay entry (no State wrapper difference — same AppStates).
+pub(crate) fn run_tray_replay(
+    state: &tauri::State<'_, crate::state::AppState>,
+    ops: Vec<lumen_cua::InputStep>,
+) -> Result<(), String> {
+    run_replay(state, ops)
+}
+
+/// Library skills (newest-updated first).
+#[tauri::command]
+pub fn skills_list(state: State<'_, AppState>) -> Result<Vec<lumen_api::SkillDto>, String> {
+    state.store.list_skills().map_err(err)
+}
+
+#[tauri::command]
+pub fn skills_set_enabled(state: State<'_, AppState>, name: String, enabled: bool) -> Result<(), String> {
+    state.store.set_skill_enabled(&name, enabled).map_err(err)
+}
+
+#[tauri::command]
+pub fn skills_delete(state: State<'_, AppState>, name: String) -> Result<(), String> {
+    state.store.delete_skill(&name).map_err(err)
+}
+
+/// Manually trigger a library skill (Settings 技能卡 / tray 试试：X).
+/// type_texts collected by the frontend confirm flow, same as card replay.
+#[tauri::command]
+pub fn skill_replay(
+    state: State<'_, AppState>,
+    name: String,
+    type_texts: Option<Vec<Option<String>>>,
+) -> Result<String, String> {
+    let skill = state
+        .store
+        .list_skills()
+        .map_err(err)?
+        .into_iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("技能库中没有「{name}」"))?;
+    if skill.steps.len() < 2 {
+        return Err("步骤太少，无法回放".into());
+    }
+    // Synthesize a slot-like app list for bundle resolution.
+    let now = chrono::Utc::now();
+    let slot = lumen_api::HistorySlotDto {
+        slot_start: now,
+        slot_end: now,
+        title: skill.name.clone(),
+        body: String::new(),
+        apps: skill
+            .apps
+            .iter()
+            .map(|a| lumen_api::HistorySlotAppDto {
+                app_name: a.clone(),
+                bundle_id: None,
+                ms: 0,
+                pct: 0.0,
+            })
+            .collect(),
+        scenes: vec![],
+        titles: vec![],
+        urls: vec![],
+        active_ms: 0,
+        narrative_status: String::new(),
+        suggested_skills: vec![],
+        skill_checked: true,
+    };
+    let ops = expand_skill_steps(&slot, &skill.steps, type_texts.as_deref());
+    run_replay(&state, ops)?;
+    let _ = state.store.record_skill_used(&name);
+    Ok(format!("已回放 {} 步「{}」", skill.steps.len(), skill.name))
 }
 
 fn step_bundle(

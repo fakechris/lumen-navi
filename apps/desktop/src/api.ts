@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type {
+import type { SkillDto,
   ActivitySegment,
   SceneDay,
   HistorySlot,
@@ -182,6 +182,12 @@ export const api = {
     invoke<Array<{ id: string; label: string }>>("assistant_agents"),
   composerToggle: () => invoke<void>("composer_toggle"),
   composerHide: () => invoke<void>("composer_hide"),
+  skillsList: () => invoke<SkillDto[]>("skills_list"),
+  skillsSetEnabled: (name: string, enabled: boolean) =>
+    invoke<void>("skills_set_enabled", { name, enabled }),
+  skillsDelete: (name: string) => invoke<void>("skills_delete", { name }),
+  skillReplay: (name: string, typeTexts?: Array<string | null>) =>
+    invoke<string>("skill_replay", { name, typeTexts: typeTexts ?? null }),
   assistantCancel: (id: string) => invoke<void>("assistant_cancel", { id }),
   assistantInject: (mode: "replace" | "append", text: string) =>
     invoke<string>("assistant_inject", { mode, text }),
