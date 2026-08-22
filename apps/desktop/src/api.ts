@@ -180,6 +180,8 @@ export const api = {
     }),
   assistantAgents: () =>
     invoke<Array<{ id: string; label: string }>>("assistant_agents"),
+  composerToggle: () => invoke<void>("composer_toggle"),
+  composerHide: () => invoke<void>("composer_hide"),
   assistantCancel: (id: string) => invoke<void>("assistant_cancel", { id }),
   assistantInject: (mode: "replace" | "append", text: string) =>
     invoke<string>("assistant_inject", { mode, text }),

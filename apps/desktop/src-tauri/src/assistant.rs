@@ -16,6 +16,8 @@ use crate::selection_popup::POPUP_LABEL;
 pub enum AssistantAction {
     Translate,
     Ask,
+    /// Free-form prompt from the quick composer (no selection required).
+    Compose,
 }
 
 impl AssistantAction {
@@ -23,6 +25,7 @@ impl AssistantAction {
         match raw.trim().to_ascii_lowercase().as_str() {
             "translate" => Ok(Self::Translate),
             "ask" => Ok(Self::Ask),
+            "compose" => Ok(Self::Compose),
             other => Err(format!("unknown assistant action: {other}")),
         }
     }
@@ -60,6 +63,22 @@ pub fn build_messages(
             }),
             json!({ "role": "user", "content": text }),
         ],
+        AssistantAction::Compose => {
+            let q = question.unwrap_or("").trim();
+            vec![
+                json!({
+                    "role": "system",
+                    "content": "You are the Lumen Navi assistant — a quick launcher. \
+                        Answer the user's request directly and concisely; attached blocks \
+                        are reference data from their screen and recent history. Reply in \
+                        the same language as the request.",
+                }),
+                json!({
+                    "role": "user",
+                    "content": format!("{context}\n请求:{q}"),
+                }),
+            ]
+        }
         AssistantAction::Ask => {
             let q = question.unwrap_or("").trim();
             vec![
@@ -153,6 +172,11 @@ pub async fn run_stream(
             if !delta.is_empty() {
                 let _ = app.emit_to(
                     POPUP_LABEL,
+                    "assistant-stream",
+                    json!({ "id": job.id, "delta": delta }),
+                );
+                let _ = app.emit_to(
+                    crate::composer::COMPOSER_LABEL,
                     "assistant-stream",
                     json!({ "id": job.id, "delta": delta }),
                 );

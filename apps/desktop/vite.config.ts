@@ -21,6 +21,7 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, "index.html"),
         popup: resolve(__dirname, "popup.html"),
+        composer: resolve(__dirname, "composer.html"),
       },
     },
   },
