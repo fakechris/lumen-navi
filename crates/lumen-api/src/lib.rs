@@ -130,6 +130,9 @@ pub enum ControlRequest {
         #[serde(default)]
         limit: Option<usize>,
     },
+    /// Menu-bar skill suggestion for the current frontmost app (one shot,
+    /// cooldown-honoring). Response is SkillSuggestion.
+    SkillSuggestion,
     /// Skills (reusable CUA workflows) the user ran in a given app or time
     /// window — lets an external agent do it "the way I did before".
     SuggestSkill {
@@ -166,6 +169,10 @@ pub enum ControlResponse {
     SuggestSkill {
         /// {name, trigger, prompt, verify?, steps, slot_start, apps[]}
         skills: Vec<serde_json::Value>,
+    },
+    SkillSuggestion {
+        /// Suggested skill for the current frontmost app, if any.
+        suggestion: Option<SkillDto>,
     },
     Error {
         message: String,
@@ -546,6 +553,36 @@ pub struct HistorySlotDto {
     /// True after the slot job decided whether a chip belongs here.
     #[serde(default)]
     pub skill_checked: bool,
+}
+
+/// A library skill: a CUA-replayable workflow promoted from a 15-min card.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillDto {
+    pub name: String,
+    #[serde(default)]
+    pub trigger: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub verify: String,
+    #[serde(default)]
+    pub steps: Vec<SkillStepDto>,
+    #[serde(default)]
+    pub apps: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub use_count: i64,
+    #[serde(default)]
+    pub last_used_at: Option<String>,
+    #[serde(default)]
+    pub last_suggested_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A CUA-replayable draft: focus windows, then keyboard/mouse steps.

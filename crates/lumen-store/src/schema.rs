@@ -1,6 +1,6 @@
 //! SQLite schema for meta/navi.db
 
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 pub const MIGRATE_V1: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -256,4 +256,25 @@ CREATE TABLE IF NOT EXISTS roasts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_roasts_day ON roasts(day, created_at);
+"#;
+
+/// The skill library: CUA-replayable workflows extracted from 15-min cards,
+/// promoted to first-class entities (enable/disable, manual trigger, proactive
+/// suggestion by app). Upserted whenever a slot gains suggested_skills.
+pub const MIGRATE_V11: &str = r#"
+CREATE TABLE IF NOT EXISTS skills (
+  name TEXT PRIMARY KEY NOT NULL,
+  trigger TEXT NOT NULL DEFAULT '',
+  prompt TEXT NOT NULL DEFAULT '',
+  verify TEXT NOT NULL DEFAULT '',
+  steps TEXT NOT NULL DEFAULT '[]',
+  apps TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT,
+  last_suggested_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_skills_enabled ON skills(enabled);
 "#;

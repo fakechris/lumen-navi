@@ -876,6 +876,14 @@ async fn handle_control(
             slots.truncate(keep);
             Ok(ControlResponse::RecentContext { slots })
         }
+        ControlRequest::SkillSuggestion => {
+            let app = st.store.latest_frontmost_app()?;
+            let suggestion = match app {
+                Some(app) => st.store.suggest_skill_for_app(&app, 24)?,
+                None => None,
+            };
+            Ok(ControlResponse::SkillSuggestion { suggestion })
+        }
         ControlRequest::SuggestSkill { app, days, limit } => {
             let days = days.unwrap_or(7).clamp(1, 30);
             let keep = limit.unwrap_or(10).clamp(1, 30);

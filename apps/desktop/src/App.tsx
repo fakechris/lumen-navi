@@ -22,6 +22,7 @@ import {
 import type { IconName } from "./design";
 import type {
   AsrModelStatus,
+  SkillDto,
   AudioDevices,
   AudioRecordingTest,
   AssistantConfig,
@@ -1498,6 +1499,7 @@ export default function App() {
 
           {tab === "settings" && (
             <div className="stack">
+              <SkillLibraryCard />
               <div className="card">
                 <h3>Data</h3>
                 <p className="mono mt">{cfg?.data_dir ?? "—"}</p>
@@ -2530,4 +2532,106 @@ function escapeHtml(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/「/g, "<mark>")
     .replace(/」/g, "</mark>");
+}
+
+/** Settings → 技能库: library of CUA-replayable workflows (D2). */
+function SkillLibraryCard() {
+  const [skills, setSkills] = useState<SkillDto[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setSkills(await api.skillsList());
+    } catch {
+      setSkills([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function replay(sk: SkillDto) {
+    if (
+      !window.confirm(
+        `按 ${sk.steps.length} 步回放「${sk.name}」？\n会激活对应窗口并发送键鼠。`,
+      )
+    )
+      return;
+    const texts: Array<string | null> = sk.steps.map(() => null);
+    for (let i = 0; i < sk.steps.length; i++) {
+      if (sk.steps[i].action !== "type") continue;
+      const input = window.prompt(
+        `第 ${i + 1} 步需要键入文本（不会记录）：\n${sk.steps[i].note ?? sk.steps[i].target ?? ""}`,
+        "",
+      );
+      if (input === null) return;
+      texts[i] = input;
+    }
+    setBusy(true);
+    try {
+      window.alert(await api.skillReplay(sk.name, texts));
+    } catch (e) {
+      window.alert(String(e));
+    }
+    setBusy(false);
+    void load();
+  }
+
+  return (
+    <div className="card">
+      <h3>技能库</h3>
+      <p className="meta mt">
+        从 15 分钟卡提取的可回放工作流。启用后：触发场景命中时菜单栏会出现「试试」建议；也可手动回放。
+      </p>
+      <div className="stack mt">
+        {skills === null && <p className="meta">加载中…</p>}
+        {skills !== null && skills.length === 0 && (
+          <p className="meta">还没有技能——持续使用后，AI 会从你的键鼠轨迹里提取可复用的工作流。</p>
+        )}
+        {skills?.map((sk) => (
+          <div key={sk.name} className="list-item" style={{ padding: "10px 12px" }}>
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+              <strong style={{ fontSize: "var(--text-sm)" }}>{sk.name}</strong>
+              <span className="meta">
+                {sk.apps.slice(0, 3).join(" / ")}
+                {sk.use_count > 0 ? ` · 用过 ${sk.use_count} 次` : ""}
+              </span>
+            </div>
+            {sk.trigger && <p className="meta" style={{ margin: "4px 0 0" }}>{sk.trigger}</p>}
+            <div className="row mt" style={{ gap: 6 }}>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={busy || sk.steps.length < 2}
+                onClick={() => void replay(sk)}
+              >
+                回放 {sk.steps.length} 步
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={busy}
+                onClick={() => void api.skillsSetEnabled(sk.name, !sk.enabled).then(load)}
+              >
+                {sk.enabled ? "禁用" : "启用"}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy}
+                onClick={() => {
+                  if (window.confirm(`删除技能「${sk.name}」？`)) {
+                    void api.skillsDelete(sk.name).then(load);
+                  }
+                }}
+              >
+                删除
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }

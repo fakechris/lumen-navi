@@ -1012,6 +1012,15 @@ async fn main() -> Result<()> {
         });
     }
 
+    // One-time skill-library backfill from existing history slots.
+    if store.kv_try_claim("skills.backfill.v1").unwrap_or(false) {
+        match store.backfill_skills(60) {
+            Ok(n) if n > 0 => info!(slots = n, "skill library backfilled"),
+            Ok(_) => {}
+            Err(e) => warn!(error = %e, "skill backfill failed"),
+        }
+    }
+
     // Daily auto-roast: once the previous day is closed, generate its
     // advisor-tone 真诚建议 automatically (user never has to click). One
     // attempt per day via the kv claim flag; skipped silently when no LLM

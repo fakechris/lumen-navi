@@ -17,6 +17,7 @@ mod slot_actions;
 mod slot_evidence;
 mod sqlite;
 
+pub use lumen_api::SkillDto;
 pub use categorization::{
     classify, classify_from_itunes_genre, classify_from_metadata_texts, classify_from_text_hint,
     classify_ls_application_category, default_rules, preferred_display_name, ActivityFields,
