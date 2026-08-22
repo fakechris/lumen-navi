@@ -2616,6 +2616,24 @@ pub fn assistant_agents(state: State<'_, AppState>) -> Result<Vec<crate::agents:
     Ok(crate::agents::list_available(&cfg))
 }
 
+/// Terminal handoff: expand the agent template and run it in Terminal.app
+/// so the user sees the output and can Ctrl-C (Atat-style human-in-the-loop).
+#[tauri::command]
+pub fn agent_open_in_terminal(
+    state: State<'_, AppState>,
+    agent_id: String,
+    prompt: String,
+) -> Result<String, String> {
+    let cfg = state.load_config().map_err(err)?;
+    let template = crate::agents::template_by_id(&cfg, &agent_id)
+        .ok_or_else(|| format!("未知 agent：{agent_id}"))?;
+    if !template.enabled {
+        return Err(format!("agent {} 未启用", template.label));
+    }
+    crate::agents::open_in_terminal(&template, &prompt)?;
+    Ok(format!("已在 Terminal 中启动 {}", template.label))
+}
+
 /// Toggle the ⌥Space quick composer window.
 #[tauri::command]
 pub fn composer_toggle(app: AppHandle) -> Result<(), String> {

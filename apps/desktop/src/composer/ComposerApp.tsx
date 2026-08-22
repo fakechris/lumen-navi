@@ -138,6 +138,22 @@ export default function ComposerApp() {
         >
           {streaming ? "生成中" : "发送"}
         </button>
+        {agentId !== "http" && (
+          <button
+            className="popup-btn"
+            disabled={!prompt.trim() || streaming}
+            title="在 Terminal 中运行（可见输出，可 Ctrl-C）"
+            onClick={() => {
+              if (!prompt.trim()) return;
+              api
+                .agentOpenInTerminal(agentId, prompt.trim())
+                .then(() => close())
+                .catch((e: unknown) => setError(String(e)));
+            }}
+          >
+            ⌘ Terminal
+          </button>
+        )}
       </div>
 
       {agents.length > 1 && (
