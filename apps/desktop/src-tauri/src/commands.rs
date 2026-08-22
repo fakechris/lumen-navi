@@ -2334,10 +2334,14 @@ pub fn assistant_run(
     }
     let action = assistant::AssistantAction::parse(&action)?;
     let text = text.trim().to_string();
-    if text.is_empty() {
+    let compose = action == assistant::AssistantAction::Compose;
+    if text.is_empty() && !compose {
         return Err("empty selection text".into());
     }
     let question = question.map(|q| q.trim().to_string()).filter(|q| !q.is_empty());
+    if compose && question.is_none() {
+        return Err("compose action requires a prompt".into());
+    }
     if action == assistant::AssistantAction::Ask && question.is_none() {
         return Err("ask action requires a question".into());
     }
@@ -2348,8 +2352,8 @@ pub fn assistant_run(
     // Local CLI agent path (ProcessAgentRunner): Ask only, template must be
     // enabled; stdout streams through the same assistant-stream channel.
     if let Some(agent_id) = agent_id.as_deref().filter(|a| *a != "http" && !a.is_empty()) {
-        if action != assistant::AssistantAction::Ask {
-            return Err("本地 agent 仅支持提问（Ask）".into());
+        if action == assistant::AssistantAction::Translate {
+            return Err("本地 agent 仅支持提问/自由输入（Ask/Compose）".into());
         }
         let template = crate::agents::template_by_id(&full_cfg, agent_id)
             .ok_or_else(|| format!("未知 agent：{agent_id}"))?;
@@ -2359,10 +2363,14 @@ pub fn assistant_run(
         let origin_app = selection_popup::pending_target().map(|t| t.app_name);
         let blocks = crate::context::gather_context(&state.store, &cfg, origin_app.as_deref());
         let context = crate::context::render_blocks(&blocks);
-        let prompt = format!(
-            "选中文字：\n\"\"\"\n{text}\n\"\"\"\n\n{context}\n任务：{}",
-            question.as_deref().unwrap_or("基于选中文字给出有用的回答")
-        );
+        let prompt = if text.is_empty() {
+            format!("{context}\n任务：{}", question.as_deref().unwrap_or_default())
+        } else {
+            format!(
+                "选中文字：\n\"\"\"\n{text}\n\"\"\"\n\n{context}\n任务：{}",
+                question.as_deref().unwrap_or("基于选中文字给出有用的回答")
+            )
+        };
         let task_id = id.clone();
         let join: tauri::async_runtime::JoinHandle<()> =
             tauri::async_runtime::spawn_blocking(move || {
@@ -2392,7 +2400,7 @@ pub fn assistant_run(
     // HTTP path (HttpAgentRunner).
     // Gather <attached-*> reference context for Ask (latest screen OCR +
     // recent history cards, biased to the origin app). Best-effort.
-    let context = if action == assistant::AssistantAction::Ask {
+    let context = if action == assistant::AssistantAction::Ask || compose {
         let origin_app = selection_popup::pending_target().map(|t| t.app_name);
         let blocks = crate::context::gather_context(&state.store, &cfg, origin_app.as_deref());
         crate::context::render_blocks(&blocks)
@@ -2417,10 +2425,16 @@ pub fn assistant_run(
         match result {
             Ok(()) => {
                 let _ = handle.emit_to(POPUP_LABEL, "assistant-done", json!({ "id": task_id }));
+                let _ = handle.emit_to(crate::composer::COMPOSER_LABEL, "assistant-done", json!({ "id": task_id }));
             }
             Err(e) => {
                 let _ = handle.emit_to(
                     POPUP_LABEL,
+                    "assistant-error",
+                    json!({ "id": task_id, "message": e }),
+                );
+                let _ = handle.emit_to(
+                    crate::composer::COMPOSER_LABEL,
                     "assistant-error",
                     json!({ "id": task_id, "message": e }),
                 );
@@ -2484,6 +2498,21 @@ pub async fn assistant_inject(app: AppHandle, mode: String, text: String) -> Res
 pub fn assistant_agents(state: State<'_, AppState>) -> Result<Vec<crate::agents::AgentInfo>, String> {
     let cfg = state.load_config().map_err(err)?;
     Ok(crate::agents::list_available(&cfg))
+}
+
+/// Toggle the ⌥Space quick composer window.
+#[tauri::command]
+pub fn composer_toggle(app: AppHandle) -> Result<(), String> {
+    let h = app.clone();
+    app.run_on_main_thread(move || crate::composer::toggle(&h))
+        .map_err(|e| format!("composer toggle: {e}"))
+}
+
+/// Hide the quick composer (Esc / close button).
+#[tauri::command]
+pub fn composer_hide(app: AppHandle) -> Result<(), String> {
+    crate::composer::hide(&app);
+    Ok(())
 }
 
 #[cfg(test)]

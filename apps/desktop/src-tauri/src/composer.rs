@@ -6,7 +6,7 @@
 //! invocation time is captured as the inject target.
 
 use serde_json::json;
-use tauri::{AppHandle, LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::selection_popup::{self, PendingTarget};
 

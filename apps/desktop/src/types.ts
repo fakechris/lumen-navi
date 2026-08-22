@@ -466,4 +466,4 @@ export interface AssistantUpdate {
   clipboard_fallback?: boolean;
 }
 
-export type AssistantAction = "translate" | "ask";
+export type AssistantAction = "translate" | "ask" | "compose";

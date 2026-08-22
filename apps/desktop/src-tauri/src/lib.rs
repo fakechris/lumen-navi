@@ -5,6 +5,7 @@ mod app_icon;
 mod asr_models;
 mod assistant;
 mod commands;
+mod composer;
 mod context;
 mod cua;
 mod restart;
@@ -36,6 +37,7 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(state)
         .setup(move |app| {
             if let Err(e) = tray::setup_tray(app.handle()) {
@@ -48,6 +50,18 @@ pub fn run() {
                     .map(|c| c.assistant.popup_enabled)
                     .unwrap_or(false);
                 selection_popup::init_from_config(&app.handle(), popup_enabled);
+                {
+                    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+                    let h = app.handle().clone();
+                    if let Err(e) = app.global_shortcut().on_shortcut("Alt+Space", move |_app, _sc, event| {
+                        if event.state() == ShortcutState::Pressed {
+                            let h2 = h.clone();
+                            let _ = h.run_on_main_thread(move || composer::toggle(&h2));
+                        }
+                    }) {
+                        tracing::warn!(error = %e, "register Alt+Space failed");
+                    }
+                }
             }
             if launch_observe {
                 let handle = app.handle().clone();
@@ -466,6 +480,8 @@ pub fn run() {
             commands::assistant_cancel,
             commands::assistant_inject,
             commands::assistant_agents,
+            commands::composer_toggle,
+            commands::composer_hide,
             commands::request_accessibility_permission,
             commands::selection_popup_hide,
             commands::selection_popup_current,
