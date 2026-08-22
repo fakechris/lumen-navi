@@ -486,6 +486,7 @@ pub fn run() {
             commands::skills_set_enabled,
             commands::skills_delete,
             commands::skill_replay,
+            commands::agent_open_in_terminal,
             commands::request_accessibility_permission,
             commands::selection_popup_hide,
             commands::selection_popup_current,

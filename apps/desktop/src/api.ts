@@ -188,6 +188,8 @@ export const api = {
   skillsDelete: (name: string) => invoke<void>("skills_delete", { name }),
   skillReplay: (name: string, typeTexts?: Array<string | null>) =>
     invoke<string>("skill_replay", { name, typeTexts: typeTexts ?? null }),
+  agentOpenInTerminal: (agentId: string, prompt: string) =>
+    invoke<string>("agent_open_in_terminal", { agentId, prompt }),
   assistantCancel: (id: string) => invoke<void>("assistant_cancel", { id }),
   assistantInject: (mode: "replace" | "append", text: string) =>
     invoke<string>("assistant_inject", { mode, text }),

@@ -147,6 +147,45 @@ pub fn run_process_agent(
     Ok(())
 }
 
+/// Open the expanded agent command in the user's Terminal so a human stays
+/// in the loop (Atat-style handoff): visible output, Ctrl-C-able, no hidden
+/// child process. Runs `clear` + the command via osascript `do script`.
+pub fn open_in_terminal(t: &AgentTemplate, prompt: &str) -> Result<(), String> {
+    let argv = expand_template(t, prompt)?;
+    let shell_line = argv
+        .iter()
+        .map(|a| shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = format!(
+        "tell application \"Terminal\" to activate
+         tell application \"Terminal\" to do script \"clear; {escaped}\"",
+        escaped = shell_line.replace('\\', "\\\\").replace('\"', "\\\"")
+    );
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .map_err(|e| format!("启动 Terminal 失败：{e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let cut: String = err.chars().take(200).collect();
+        return Err(format!("Terminal handoff 失败：{cut}"));
+    }
+    Ok(())
+}
+
+/// Characters that make an argv element worth quoting for shell display.
+const SHELL_SPECIAL: &str = " \"'$`&*?[]{}();<>|!#~";
+
+/// Single-quote an argv element for shell display (safe for any content).
+fn shell_quote(a: &str) -> String {
+    if !a.is_empty() && !a.chars().any(|c| SHELL_SPECIAL.contains(c)) {
+        return a.to_string();
+    }
+    format!("'{}'", a.replace('\'', "'\\''"))
+}
+
 fn first_token(command: &str) -> Option<String> {
     command.split_whitespace().next().map(str::to_string)
 }
