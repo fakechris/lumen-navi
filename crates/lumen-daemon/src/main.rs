@@ -1815,6 +1815,10 @@ fn resolve_model_dir(
             Some(p) if lumen_models::qwen_ready(&p) => p,
             _ => lumen_models::default_qwen_dir(),
         }),
+        EngineKind::Paraformer => Some(match configured_path {
+            Some(p) if lumen_models::paraformer_offline_ready(&p) => p,
+            _ => lumen_models::default_paraformer_offline_dir_with_root(models_root),
+        }),
         EngineKind::Speech | EngineKind::OpenAiAudio => None,
     }
 }

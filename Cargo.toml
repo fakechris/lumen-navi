@@ -3,13 +3,8 @@ resolver = "2"
 members = [
   "crates/lumen-types",
   "crates/lumen-config",
-  "crates/lumen-platform",
-  "crates/lumen-platform-cpal",
-  "crates/lumen-platform-macos",
-  "crates/lumen-cua",
-  "crates/lumen-platform-windows",
-  "crates/lumen-platform-host",
-  "crates/lumen-intake",
+        "crates/lumen-cua",
+      "crates/lumen-intake",
   "crates/lumen-sources-media",
   "crates/lumen-sources-browser",
   "crates/lumen-store",
@@ -22,12 +17,7 @@ members = [
 default-members = [
   "crates/lumen-types",
   "crates/lumen-config",
-  "crates/lumen-platform",
-  "crates/lumen-platform-cpal",
-  "crates/lumen-platform-macos",
-  "crates/lumen-platform-windows",
-  "crates/lumen-platform-host",
-  "crates/lumen-intake",
+            "crates/lumen-intake",
   "crates/lumen-sources-media",
   "crates/lumen-sources-browser",
   "crates/lumen-store",
@@ -66,18 +56,18 @@ ureq = { version = "2", default-features = true, features = ["json"] }
 
 lumen-types = { path = "crates/lumen-types" }
 lumen-config = { path = "crates/lumen-config" }
-lumen-platform = { path = "crates/lumen-platform" }
-lumen-platform-cpal = { path = "crates/lumen-platform-cpal" }
-lumen-platform-macos = { path = "crates/lumen-platform-macos" }
 lumen-cua = { path = "crates/lumen-cua" }
-lumen-platform-windows = { path = "crates/lumen-platform-windows" }
-lumen-platform-host = { path = "crates/lumen-platform-host" }
 # Shared Lumen product-cluster crates (lumen-suite). `cloud` enables the
 # OpenAI-compatible HTTP engine navi has always shipped. Keep all lumen-suite
 # deps on a single rev.
-lumen-asr-engine = { git = "https://github.com/fakechris/lumen-suite.git", rev = "ef449465d18865d3d819309a64b1e723ae329817", features = ["cloud"] }
-lumen-models = { git = "https://github.com/fakechris/lumen-suite.git", rev = "ef449465d18865d3d819309a64b1e723ae329817" }
-lumen-transcript = { git = "https://github.com/fakechris/lumen-suite.git", rev = "ef449465d18865d3d819309a64b1e723ae329817" }
+lumen-asr-engine = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94", features = ["cloud"] }
+lumen-models = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
+lumen-transcript = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
+lumen-platform = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
+lumen-platform-cpal = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
+lumen-platform-macos = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
+lumen-platform-windows = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
+lumen-platform-host = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
 lumen-intake = { path = "crates/lumen-intake" }
 lumen-sources-media = { path = "crates/lumen-sources-media" }
 lumen-sources-browser = { path = "crates/lumen-sources-browser" }
