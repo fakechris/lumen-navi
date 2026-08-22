@@ -60,14 +60,14 @@ lumen-cua = { path = "crates/lumen-cua" }
 # Shared Lumen product-cluster crates (lumen-suite). `cloud` enables the
 # OpenAI-compatible HTTP engine navi has always shipped. Keep all lumen-suite
 # deps on a single rev.
-lumen-asr-engine = { git = "https://github.com/fakechris/lumen-suite.git", rev = "2ee4ba28e840bcfb3ed69bd37d5a8b628c68b645", features = ["cloud"] }
-lumen-models = { git = "https://github.com/fakechris/lumen-suite.git", rev = "2ee4ba28e840bcfb3ed69bd37d5a8b628c68b645" }
-lumen-transcript = { git = "https://github.com/fakechris/lumen-suite.git", rev = "2ee4ba28e840bcfb3ed69bd37d5a8b628c68b645" }
-lumen-platform = { git = "https://github.com/fakechris/lumen-suite.git", rev = "2ee4ba28e840bcfb3ed69bd37d5a8b628c68b645" }
-lumen-platform-cpal = { git = "https://github.com/fakechris/lumen-suite.git", rev = "2ee4ba28e840bcfb3ed69bd37d5a8b628c68b645" }
-lumen-platform-macos = { git = "https://github.com/fakechris/lumen-suite.git", rev = "2ee4ba28e840bcfb3ed69bd37d5a8b628c68b645" }
-lumen-platform-windows = { git = "https://github.com/fakechris/lumen-suite.git", rev = "2ee4ba28e840bcfb3ed69bd37d5a8b628c68b645" }
-lumen-platform-host = { git = "https://github.com/fakechris/lumen-suite.git", rev = "2ee4ba28e840bcfb3ed69bd37d5a8b628c68b645" }
+lumen-asr-engine = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94", features = ["cloud"] }
+lumen-models = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
+lumen-transcript = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
+lumen-platform = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
+lumen-platform-cpal = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
+lumen-platform-macos = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
+lumen-platform-windows = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
+lumen-platform-host = { git = "https://github.com/fakechris/lumen-suite.git", rev = "47bf81de4c7cd253931c457ca319509c143f7d94" }
 lumen-intake = { path = "crates/lumen-intake" }
 lumen-sources-media = { path = "crates/lumen-sources-media" }
 lumen-sources-browser = { path = "crates/lumen-sources-browser" }
