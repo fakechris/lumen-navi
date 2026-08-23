@@ -11,6 +11,7 @@ mod cua;
 mod restart;
 mod selection_popup;
 mod shell;
+mod shortcuts;
 mod state;
 mod tray;
 
@@ -51,15 +52,10 @@ pub fn run() {
                     .unwrap_or(false);
                 selection_popup::init_from_config(&app.handle(), popup_enabled);
                 {
-                    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-                    let h = app.handle().clone();
-                    if let Err(e) = app.global_shortcut().on_shortcut("Alt+Space", move |_app, _sc, event| {
-                        if event.state() == ShortcutState::Pressed {
-                            let h2 = h.clone();
-                            let _ = h.run_on_main_thread(move || composer::toggle(&h2));
-                        }
-                    }) {
-                        tracing::warn!(error = %e, "register Alt+Space failed");
+                    // Composer global shortcut is config-driven (Settings → 快捷键);
+                    // a conflict is recorded and shown in the UI, not fatal.
+                    if let Some(s) = app.try_state::<AppState>() {
+                        shortcuts::register_at_startup(app.handle(), &s);
                     }
                 }
             }
@@ -482,6 +478,7 @@ pub fn run() {
             commands::assistant_agents,
             commands::composer_toggle,
             commands::composer_hide,
+            commands::set_composer_shortcut,
             commands::skills_list,
             commands::skills_set_enabled,
             commands::skills_delete,

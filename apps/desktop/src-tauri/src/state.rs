@@ -34,6 +34,12 @@ pub struct AppState {
     /// In-flight assistant (selection popup) streaming requests, by id.
     pub assistant_tasks:
         Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
+    /// Composer global shortcut currently registered with the OS ("" = none).
+    /// Tracks what the shortcut plugin actually holds, which can differ from
+    /// the config value when registration failed (e.g. taken by another app).
+    pub composer_shortcut: Mutex<String>,
+    /// Last composer-shortcut registration failure, surfaced in Settings.
+    pub composer_shortcut_error: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -75,6 +81,8 @@ impl AppState {
             observe_stopping: AtomicBool::new(false),
             restart_budget: RestartBudget::default(),
             assistant_tasks: Mutex::new(HashMap::new()),
+            composer_shortcut: Mutex::new(String::new()),
+            composer_shortcut_error: Mutex::new(None),
         })
     }
 

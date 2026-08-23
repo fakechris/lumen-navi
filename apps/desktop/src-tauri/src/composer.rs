@@ -6,7 +6,7 @@
 //! invocation time is captured as the inject target.
 
 use serde_json::json;
-use tauri::{AppHandle, Emitter, LogicalPosition, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, LogicalPosition, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
 use crate::selection_popup::{self, PendingTarget};
 
@@ -16,7 +16,7 @@ const COMPOSER_H: f64 = 440.0;
 
 /// Toggle the composer window. On show, captures the currently focused app
 /// (before our window takes focus) as the injection target.
-pub fn toggle(app: &AppHandle) {
+pub fn toggle<R: Runtime>(app: &AppHandle<R>) {
     if let Some(win) = app.get_webview_window(COMPOSER_LABEL) {
         if win.is_visible().unwrap_or(false) {
             let _ = win.hide();
@@ -26,7 +26,7 @@ pub fn toggle(app: &AppHandle) {
     show(app);
 }
 
-fn show(app: &AppHandle) {
+fn show<R: Runtime>(app: &AppHandle<R>) {
     // Capture the frontmost app BEFORE creating/focusing our window.
     let target = lumen_platform_host::selection::focused_element_pid().and_then(|pid| {
         if pid == std::process::id() as i32 {
@@ -87,7 +87,7 @@ fn show(app: &AppHandle) {
     let _ = app.emit_to(COMPOSER_LABEL, "composer-shown", json!({ "target": target_name }));
 }
 
-pub fn hide(app: &AppHandle) {
+pub fn hide<R: Runtime>(app: &AppHandle<R>) {
     if let Some(win) = app.get_webview_window(COMPOSER_LABEL) {
         let _ = win.hide();
     }

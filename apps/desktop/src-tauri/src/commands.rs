@@ -89,6 +89,13 @@ pub struct ConfigSummary {
     pub system_audio: bool,
     pub input_enabled: bool,
     pub input_interactions: bool,
+    /// Configured composer global shortcut ("" = disabled).
+    pub composer_shortcut: String,
+    /// Live registration state: "" when the configured shortcut registered
+    /// fine, otherwise the accelerator actually held by the OS.
+    pub composer_shortcut_active: String,
+    /// Last registration failure (conflict with another app), if any.
+    pub composer_shortcut_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -678,6 +685,17 @@ pub fn get_config_summary(state: State<'_, AppState>) -> Result<ConfigSummary, S
         system_audio: cfg.audio.system_audio,
         input_enabled: cfg.input.enabled,
         input_interactions: cfg.input.observe_interactions,
+        composer_shortcut: cfg.shortcuts.composer.clone(),
+        composer_shortcut_active: state
+            .composer_shortcut
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default(),
+        composer_shortcut_error: state
+            .composer_shortcut_error
+            .lock()
+            .ok()
+            .and_then(|e| e.clone()),
     })
 }
 
@@ -2647,6 +2665,22 @@ pub fn composer_toggle(app: AppHandle) -> Result<(), String> {
 pub fn composer_hide(app: AppHandle) -> Result<(), String> {
     crate::composer::hide(&app);
     Ok(())
+}
+
+/// Change the quick composer global shortcut ("" disables it). Persisted to
+/// navi.toml and applied live; unlike update_sources_config this does not
+/// reload the daemon — the shortcut lives in the shell process only.
+#[tauri::command]
+pub fn set_composer_shortcut(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    shortcut: String,
+) -> Result<ConfigSummary, String> {
+    crate::shortcuts::apply(&app, &state, &shortcut)?;
+    let mut cfg = state.load_config().map_err(err)?;
+    cfg.shortcuts.composer = shortcut.trim().to_string();
+    state.save_config(&cfg).map_err(err)?;
+    get_config_summary(state)
 }
 
 #[cfg(test)]

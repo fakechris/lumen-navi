@@ -308,6 +308,12 @@ export interface ConfigSummary {
   system_audio: boolean;
   input_enabled: boolean;
   input_interactions: boolean;
+  /** Configured quick-composer global shortcut ("" = disabled). */
+  composer_shortcut: string;
+  /** Shortcut actually registered with the OS ("" = none live). */
+  composer_shortcut_active: string;
+  /** Last registration failure, e.g. combo taken by another app. */
+  composer_shortcut_error: string | null;
 }
 
 export interface SourcesUpdate {
