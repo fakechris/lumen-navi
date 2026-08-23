@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- 设置 → 快捷键: quick-chat (快捷对话) global shortcut is now configurable
+  (record-capture UI, live re-registration, conflict surfaced with the OS
+  reason; empty disables). Stored in `navi.toml` `[shortcuts].composer`,
+  default remains `Alt+Space`.
+- Tray menu item 打开快捷对话 as the keyboard-free fallback when the
+  shortcut is disabled or taken by another app.
+
+### Changed
+
+- Settings redesigned: one long page → six sections behind a secondary side
+  nav (通用 / 采集 / 语音与转写 / AI 与划词 / 快捷键 / 技能库, last section
+  remembered). Skill library no longer sits at the top of Settings and its
+  list scrolls on its own. Settings UI moved from `App.tsx` (~1100 lines)
+  into `views/SettingsView.tsx`.
+
 ## 0.2.0 - 2026-08-19
 
 First product-shaped release after v0.1.0 (2026-07-15). The desktop app now tracks time, narrates 15-minute stretches, searches OCR, and optionally talks about the day — still local-first.

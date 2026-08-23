@@ -197,7 +197,21 @@ The other permissions belong to Lumen Navi.
 1. **概览** — health counts, sources, start/stop Observe, privacy pause  
 2. **搜索** — OCR + transcript FTS (same index as control API)  
 3. **活动** — timeline with thumbnails, text preview, kind/app filters, day summary  
-4. **设置** — live source toggles (restart Observe to apply), 划词助手, data dir, launch-on-start
+4. **设置** — split into six sections behind a secondary side nav (last section
+   is remembered): **通用** (data dir, launch-on-start, onboarding), **采集**
+   (channel toggles, input monitoring, browser-extension pairing), **语音与转写**
+   (ASR engine/models, mic device + record test), **AI 与划词** (global LLM
+   config, selection popup), **快捷键** (quick-chat global shortcut recorder),
+   **技能库** (replayable workflows, list scrolls on its own).
+
+## Quick composer (快捷对话)
+
+Spotlight-style mini chat panel (`⌥Space` by default, configurable in
+设置 → 快捷键). The frontmost app at invocation becomes the inject target.
+The accelerator is stored in `navi.toml` `[shortcuts].composer` (empty string
+disables it); changing it re-registers live — if another app owns the combo,
+the old shortcut stays working and the conflict is shown in Settings. The
+tray menu item 打开快捷对话 is the keyboard-free fallback.
 
 ## Selection popup (划词助手)
 

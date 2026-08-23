@@ -182,6 +182,8 @@ export const api = {
     invoke<Array<{ id: string; label: string }>>("assistant_agents"),
   composerToggle: () => invoke<void>("composer_toggle"),
   composerHide: () => invoke<void>("composer_hide"),
+  setComposerShortcut: (shortcut: string) =>
+    invoke<ConfigSummary>("set_composer_shortcut", { shortcut }),
   skillsList: () => invoke<SkillDto[]>("skills_list"),
   skillsSetEnabled: (name: string, enabled: boolean) =>
     invoke<void>("skills_set_enabled", { name, enabled }),

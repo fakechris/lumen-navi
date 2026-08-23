@@ -635,3 +635,56 @@ input[type="password"]:focus {
   padding: 4px 8px;
   color: var(--text);
 }
+
+/* ---- Settings sections (secondary nav inside the settings tab) --- */
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: 176px minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+
+.settings-nav {
+  position: sticky;
+  top: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.settings-pane { min-width: 0; }
+
+/* Skills list scrolls on its own so a long library never stretches the page. */
+.skill-list-scroll {
+  max-height: calc(100vh - 300px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/* Shortcut recorder display */
+.shortcut-kbd {
+  display: inline-flex;
+  align-items: center;
+  min-width: 72px;
+  justify-content: center;
+  padding: 5px 10px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-input);
+}
+
+@media (max-width: 900px) {
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+  .settings-nav {
+    position: static;
+    grid-auto-flow: column;
+    grid-auto-columns: max-content;
+    overflow-x: auto;
+  }
+}

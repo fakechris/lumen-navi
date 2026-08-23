@@ -10,6 +10,9 @@ use tauri::{
 
 pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Lumen Navi", true, None::<&str>)?;
+    // Fallback entry for the quick composer: works even when the global
+    // shortcut is disabled or was taken by another app.
+    let composer = MenuItem::with_id(app, "composer", "打开快捷对话", true, None::<&str>)?;
     let pause = MenuItem::with_id(
         app,
         "toggle_pause",
@@ -21,7 +24,7 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let sep_b = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
 
-    let menu = Menu::with_items(app, &[&show, &sep_a, &pause, &sep_b, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &composer, &sep_a, &pause, &sep_b, &quit])?;
 
     let icon = app.default_window_icon().cloned().or_else(|| {
         // Fallback: load png from resources if default missing.
@@ -52,6 +55,10 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                     }
                 }
                 "show" => show_main(app),
+                "composer" => {
+                    let h = app.clone();
+                    let _ = app.run_on_main_thread(move || crate::composer::toggle(&h));
+                }
                 "toggle_pause" => {
                     let _ = app.emit("tray://toggle-pause", ());
                 }
@@ -156,26 +163,25 @@ fn rebuild_menu<R: Runtime>(
     suggestion: Option<&lumen_api::SkillDto>,
 ) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Lumen Navi", true, None::<&str>)?;
+    let composer = MenuItem::with_id(app, "composer", "打开快捷对话", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "toggle_pause", "Toggle Privacy Pause", true, None::<&str>)?;
     let sep_a = PredefinedMenuItem::separator(app)?;
     let sep_b = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let mut items: Vec<MenuItem<R>> = vec![show];
+    let mut items: Vec<MenuItem<R>> = vec![show, composer];
     if let Some(sk) = suggestion {
         let label = format!("试试：{}（回放 {} 步）", sk.name, sk.steps.len());
         items.push(MenuItem::with_id(app, "skill_suggest", label, true, None::<&str>)?);
     }
+    let pause_idx = items.len();
     items.push(pause);
+    let quit_idx = items.len();
     items.push(quit);
-    let has_sugg = suggestion.is_some() as usize;
-    let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = vec![
-        &items[0],
-        &items[has_sugg],
-        &sep_a,
-        &items[1 + has_sugg],
-        &sep_b,
-        &items[2 + has_sugg],
-    ];
+    let mut refs: Vec<&dyn tauri::menu::IsMenuItem<R>> =
+        vec![&items[0], &items[1], &sep_a, &items[pause_idx], &sep_b, &items[quit_idx]];
+    if suggestion.is_some() {
+        refs.insert(2, &items[2]);
+    }
     let menu = Menu::with_items(app, &refs)?;
     tray.set_menu(Some(menu))
 }

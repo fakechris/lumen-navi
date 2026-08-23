@@ -38,6 +38,8 @@ pub struct Config {
     pub assistant: AssistantConfig,
     #[serde(default)]
     pub agents: AgentsConfig,
+    #[serde(default)]
+    pub shortcuts: ShortcutsConfig,
 }
 
 /// Selection-popup assistant (desktop 划词弹窗) — OpenAI-compatible chat LLM.
@@ -695,6 +697,7 @@ impl Default for Config {
             agents: AgentsConfig::default(),
             ax: AxConfig::default(),
             input: InputConfig::default(),
+            shortcuts: ShortcutsConfig::default(),
         }
     }
 }
@@ -721,6 +724,24 @@ impl Default for InputConfig {
             flush_interval_s: 300, // 5 minutes
             observe_interactions: false,
             record_text: false,
+        }
+    }
+}
+
+/// Desktop-shell global shortcuts (tauri global-shortcut accelerator syntax).
+/// Daemon-independent: these live in the shell process only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShortcutsConfig {
+    /// Global accelerator for the quick composer (e.g. "Alt+Space",
+    /// "CommandOrControl+Shift+P"). Empty string disables the shortcut.
+    pub composer: String,
+}
+
+impl Default for ShortcutsConfig {
+    fn default() -> Self {
+        Self {
+            composer: "Alt+Space".into(),
         }
     }
 }
@@ -782,6 +803,28 @@ mod tests {
 
         assert_eq!(decoded.asr.engine, "whisper");
         assert_eq!(decoded.asr.model_dir, "/models/custom-whisper");
+    }
+
+    #[test]
+    fn shortcuts_default_and_roundtrip() {
+        // Default keeps the historical Alt+Space so existing installs are stable.
+        assert_eq!(Config::default().shortcuts.composer, "Alt+Space");
+
+        let mut config = Config::default();
+        config.shortcuts.composer = "CommandOrControl+Shift+P".into();
+        let encoded = toml::to_string_pretty(&config).unwrap();
+        let decoded: Config = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.shortcuts.composer, "CommandOrControl+Shift+P");
+
+        // Empty string = explicitly disabled, and must survive a roundtrip too.
+        config.shortcuts.composer = String::new();
+        let encoded = toml::to_string_pretty(&config).unwrap();
+        let decoded: Config = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.shortcuts.composer, "");
+
+        // A config file without a [shortcuts] section falls back to the default.
+        let legacy = toml::from_str::<Config>("").unwrap();
+        assert_eq!(legacy.shortcuts.composer, "Alt+Space");
     }
 
     #[test]
