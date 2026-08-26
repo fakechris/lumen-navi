@@ -308,6 +308,7 @@ mod tests {
                 "navi_pause",
                 "navi_resume",
                 "navi_recent_context",
+                "navi_suggest_skill",
                 "navi_search"
             ]
         );

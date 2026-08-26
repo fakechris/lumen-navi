@@ -2,6 +2,10 @@
 //!
 //! Screen and audio never wait on each other. OCR/ASR never block capture.
 
+#[cfg(unix)]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod control_server;
 #[cfg(unix)]
 mod mcp;
@@ -26,8 +30,8 @@ use lumen_platform_host as host;
 #[allow(unused_imports)]
 use lumen_platform_macos;
 use lumen_process::{
-    AxWorker, AxWorkerConfig, OcrWorker, OcrWorkerConfig, TranscribeWorker, TranscribeWorkerConfig,
-    JOB_KIND_TRANSCRIBE_AUDIO,
+    AxWorker, AxWorkerConfig, OcrWorker, OcrWorkerConfig, OutOfProcessOcrEngine, TranscribeWorker,
+    TranscribeWorkerConfig, JOB_KIND_TRANSCRIBE_AUDIO,
 };
 use lumen_sources_browser::BrowserIngestPolicy;
 use lumen_sources_media::{
@@ -42,7 +46,7 @@ use lumen_store::{
 use lumen_types::{event_kind, SourceEvent, SourceKind, TriggerReason};
 use serde_json::json;
 use tokio::sync::{mpsc, watch};
-use tracing::{error, info, warn, Level};
+use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use uuid::Uuid;
 
@@ -518,6 +522,15 @@ async fn main() -> Result<()> {
         }
     }
 
+    if args.get(1).map(|s| s.as_str()) == Some("ocr-helper") {
+        let fallback_engine = host::ocr(50 * 1024 * 1024);
+        if let Err(err) = lumen_process::run_ocr_helper_stdio(fallback_engine).await {
+            eprintln!("ocr-helper error: {err}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     info!(
         product = "lumen-navi",
         repo = "https://github.com/fakechris/lumen-navi",
@@ -756,7 +769,19 @@ async fn main() -> Result<()> {
     // --- OCR worker ---
     let (ocr_cancel_tx, ocr_cancel_rx) = watch::channel(false);
     let ocr_handle = if config.ocr.enabled {
-        let engine = host::ocr(config.ocr.max_image_bytes as usize);
+        let in_process_engine = host::ocr(config.ocr.max_image_bytes as usize);
+        let engine: Arc<dyn lumen_platform::OcrEngine> =
+            if let Ok(current_exe) = std::env::current_exe() {
+                Arc::new(OutOfProcessOcrEngine::new(
+                    current_exe,
+                    vec!["ocr-helper".into(), "--stdio".into()],
+                    Duration::from_millis(config.ocr.timeout_ms),
+                    config.ocr.max_image_bytes as usize,
+                    in_process_engine,
+                ))
+            } else {
+                in_process_engine
+            };
         if engine.is_supported() {
             let worker = Arc::new(OcrWorker::new(
                 Arc::clone(&store),
@@ -1112,6 +1137,35 @@ async fn main() -> Result<()> {
                     Err(e) => warn!(error = %e, "category enrichment task join failed"),
                 }
                 every.tick().await;
+            }
+        });
+    }
+
+    // Periodic database maintenance (WAL checkpoint + freelist / page telemetry).
+    {
+        let store_maint = Arc::clone(&store);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let mut every = tokio::time::interval(Duration::from_secs(10 * 60));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                every.tick().await;
+                let store = Arc::clone(&store_maint);
+                match tokio::task::spawn_blocking(move || store.maintenance()).await {
+                    Ok(Ok(rep)) => {
+                        debug!(
+                            wal_busy = rep.checkpoint_busy,
+                            wal_log = rep.checkpoint_log,
+                            wal_checkpointed = rep.checkpoint_checkpointed,
+                            page_count = rep.page_count,
+                            page_size = rep.page_size,
+                            freelist_count = rep.freelist_count,
+                            "store periodic maintenance (WAL checkpoint)"
+                        );
+                    }
+                    Ok(Err(e)) => warn!(error = %e, "store periodic maintenance failed"),
+                    Err(e) => warn!(error = %e, "store periodic maintenance task join failed"),
+                }
             }
         });
     }

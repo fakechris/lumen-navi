@@ -154,6 +154,16 @@ pub struct BrowserVisitProjection {
     pub snapshot_hashes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoreMaintenanceReport {
+    pub checkpoint_busy: i32,
+    pub checkpoint_log: i32,
+    pub checkpoint_checkpointed: i32,
+    pub page_count: i64,
+    pub page_size: i64,
+    pub freelist_count: i64,
+}
+
 /// On-disk store: `$data_dir/meta/navi.db` + `$data_dir/blobs/...`.
 pub struct SqliteStore {
     data_dir: PathBuf,
@@ -172,8 +182,18 @@ impl SqliteStore {
         let conn = Connection::open(&db_path).map_err(StoreError::db)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(StoreError::db)?;
-        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
-            .map_err(StoreError::db)?;
+        conn.execute_batch(
+            r#"
+            PRAGMA foreign_keys = ON;
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA cache_size = -2000;
+            PRAGMA temp_store = MEMORY;
+            PRAGMA wal_autocheckpoint = 1000;
+            PRAGMA mmap_size = 0;
+            "#,
+        )
+        .map_err(StoreError::db)?;
         migrate(&conn)?;
 
         let blobs = BlobStore::open(&data_dir)?;
@@ -689,6 +709,36 @@ impl SqliteStore {
         )
         .map_err(StoreError::db)?;
         Ok(())
+    }
+
+    /// Perform database maintenance: WAL checkpoint (PASSIVE) and query storage stats.
+    pub fn maintenance(&self) -> Result<StoreMaintenanceReport, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let (busy, log, ckpt): (i32, i32, i32) = conn
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .map_err(StoreError::db)?;
+        let page_count: i64 = conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .unwrap_or(0);
+        let page_size: i64 = conn
+            .query_row("PRAGMA page_size", [], |r| r.get(0))
+            .unwrap_or(4096);
+        let freelist_count: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap_or(0);
+        Ok(StoreMaintenanceReport {
+            checkpoint_busy: busy,
+            checkpoint_log: log,
+            checkpoint_checkpointed: ckpt,
+            page_count,
+            page_size,
+            freelist_count,
+        })
     }
 
     #[cfg(test)]
@@ -2037,8 +2087,9 @@ impl SqliteStore {
     }
 
     fn ms_to_rfc3339(ms: i64) -> String {
-        use chrono::TimeZone;
-        Utc.timestamp_millis(ms).to_rfc3339()
+        DateTime::from_timestamp_millis(ms)
+            .unwrap_or_default()
+            .to_rfc3339()
     }
 
     pub fn ai_append_exchange(

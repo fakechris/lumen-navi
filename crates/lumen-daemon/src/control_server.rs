@@ -977,7 +977,72 @@ async fn build_health(st: &ControlState) -> Result<HealthResponse, anyhow::Error
             rejected_batches: browser_metrics.rejected_batches,
             last_ingest_at: browser_metrics.last_ingest_at,
         }),
+        memory: get_process_memory(),
     })
+}
+
+#[cfg(target_os = "macos")]
+fn get_process_memory() -> Option<lumen_api::ProcessMemoryDto> {
+    use std::mem::MaybeUninit;
+    unsafe {
+        let mut task_info = MaybeUninit::<libc::mach_task_basic_info>::uninit();
+        let mut count = (std::mem::size_of::<libc::mach_task_basic_info>()
+            / std::mem::size_of::<libc::natural_t>())
+            as libc::mach_msg_type_number_t;
+        #[allow(deprecated)]
+        let task_port = libc::mach_task_self();
+        let kret = libc::task_info(
+            task_port,
+            libc::MACH_TASK_BASIC_INFO,
+            task_info.as_mut_ptr() as libc::task_info_t,
+            &mut count,
+        );
+        if kret == libc::KERN_SUCCESS {
+            let info = task_info.assume_init();
+            let rss_bytes = info.resident_size as u64;
+            let vsz_bytes = info.virtual_size as u64;
+            Some(lumen_api::ProcessMemoryDto {
+                rss_bytes,
+                rss_mb: (rss_bytes as f64) / (1024.0 * 1024.0),
+                vsz_bytes,
+                vsz_mb: (vsz_bytes as f64) / (1024.0 * 1024.0),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn get_process_memory() -> Option<lumen_api::ProcessMemoryDto> {
+    use std::fs::File;
+    use std::io::Read;
+    let mut s = String::new();
+    if File::open("/proc/self/statm")
+        .and_then(|mut f| f.read_to_string(&mut s))
+        .is_ok()
+    {
+        let parts: Vec<&str> = s.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
+            let vsz_pages: u64 = parts[0].parse().unwrap_or(0);
+            let rss_pages: u64 = parts[1].parse().unwrap_or(0);
+            let rss_bytes = rss_pages * page_size;
+            let vsz_bytes = vsz_pages * page_size;
+            return Some(lumen_api::ProcessMemoryDto {
+                rss_bytes,
+                rss_mb: (rss_bytes as f64) / (1024.0 * 1024.0),
+                vsz_bytes,
+                vsz_mb: (vsz_bytes as f64) / (1024.0 * 1024.0),
+            });
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn get_process_memory() -> Option<lumen_api::ProcessMemoryDto> {
+    None
 }
 
 fn search_ocr(
