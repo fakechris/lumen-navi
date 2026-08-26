@@ -156,6 +156,8 @@ pub enum ControlRequest {
         #[serde(default)]
         limit: Option<usize>,
     },
+    /// Trigger database checkpoint and storage retention pruning.
+    Maintenance,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,9 +187,25 @@ pub enum ControlResponse {
         /// Suggested skill for the current frontmost app, if any.
         suggestion: Option<SkillDto>,
     },
+    Maintenance(StoreMaintenanceReportDto),
     Error {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreMaintenanceReportDto {
+    pub checkpoint_busy: i32,
+    pub checkpoint_log: i32,
+    pub checkpoint_checkpointed: i32,
+    pub page_count: i64,
+    pub page_size: i64,
+    pub freelist_count: i64,
+    pub jobs_pruned: usize,
+    pub artifacts_pruned: usize,
+    pub blobs_deleted: usize,
+    pub bytes_reclaimed: u64,
+    pub fts_optimized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

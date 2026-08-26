@@ -2476,6 +2476,7 @@ dependencies = [
  "blake3",
  "chrono",
  "lumen-api",
+ "lumen-config",
  "lumen-intake",
  "lumen-scene",
  "lumen-types",

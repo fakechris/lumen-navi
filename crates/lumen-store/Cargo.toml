@@ -10,6 +10,7 @@ async-trait = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 lumen-api = { workspace = true }
+lumen-config = { workspace = true }
 lumen-intake = { workspace = true }
 lumen-types = { workspace = true }
 lumen-scene = { workspace = true }

@@ -1141,9 +1141,10 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Periodic database maintenance (WAL checkpoint + freelist / page telemetry).
+    // Periodic database maintenance & storage lifecycle (WAL checkpoint, jobs/blob pruning, FTS optimize).
     {
         let store_maint = Arc::clone(&store);
+        let retention = config.retention.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(60)).await;
             let mut every = tokio::time::interval(Duration::from_secs(10 * 60));
@@ -1151,7 +1152,8 @@ async fn main() -> Result<()> {
             loop {
                 every.tick().await;
                 let store = Arc::clone(&store_maint);
-                match tokio::task::spawn_blocking(move || store.maintenance()).await {
+                let ret = retention.clone();
+                match tokio::task::spawn_blocking(move || store.maintenance_with_retention(&ret)).await {
                     Ok(Ok(rep)) => {
                         debug!(
                             wal_busy = rep.checkpoint_busy,
@@ -1160,7 +1162,12 @@ async fn main() -> Result<()> {
                             page_count = rep.page_count,
                             page_size = rep.page_size,
                             freelist_count = rep.freelist_count,
-                            "store periodic maintenance (WAL checkpoint)"
+                            jobs_pruned = rep.jobs_pruned,
+                            artifacts_pruned = rep.artifacts_pruned,
+                            blobs_deleted = rep.blobs_deleted,
+                            bytes_reclaimed = rep.bytes_reclaimed,
+                            fts_optimized = rep.fts_optimized,
+                            "store periodic maintenance (WAL checkpoint & lifecycle)"
                         );
                     }
                     Ok(Err(e)) => warn!(error = %e, "store periodic maintenance failed"),

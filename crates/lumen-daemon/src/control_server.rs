@@ -261,6 +261,7 @@ pub fn router(state: ControlState) -> Router {
         )
         .route("/v1/activity/stats", get(get_activity_stats))
         .route("/v1/activity/range", get(get_activity_range))
+        .route("/v1/store/maintenance", post(post_store_maintenance))
         .route(
             "/v1/activity/rules",
             get(get_activity_rules).post(post_activity_rules),
@@ -631,6 +632,29 @@ async fn get_activity_segments(
     }
 }
 
+async fn post_store_maintenance(
+    State(st): State<ControlState>,
+) -> impl IntoResponse {
+    let store = Arc::clone(&st.store);
+    match tokio::task::spawn_blocking(move || store.maintenance()).await {
+        Ok(Ok(report)) => (StatusCode::OK, Json(report)).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ControlResponse::Error {
+                message: e.to_string(),
+            }),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ControlResponse::Error {
+                message: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 async fn get_activity_history_slots(
     State(st): State<ControlState>,
     Query(q): Query<ActivityDayQuery>,
@@ -928,6 +952,25 @@ async fn handle_control(
                 }
             }
             Ok(ControlResponse::SuggestSkill { skills: out })
+        }
+        ControlRequest::Maintenance => {
+            let store = Arc::clone(&st.store);
+            let rep = tokio::task::spawn_blocking(move || store.maintenance())
+                .await
+                .map_err(|e| anyhow::anyhow!("maintenance join error: {e}"))??;
+            Ok(ControlResponse::Maintenance(lumen_api::StoreMaintenanceReportDto {
+                checkpoint_busy: rep.checkpoint_busy,
+                checkpoint_log: rep.checkpoint_log,
+                checkpoint_checkpointed: rep.checkpoint_checkpointed,
+                page_count: rep.page_count,
+                page_size: rep.page_size,
+                freelist_count: rep.freelist_count,
+                jobs_pruned: rep.jobs_pruned,
+                artifacts_pruned: rep.artifacts_pruned,
+                blobs_deleted: rep.blobs_deleted,
+                bytes_reclaimed: rep.bytes_reclaimed,
+                fts_optimized: rep.fts_optimized,
+            }))
         }
         ControlRequest::Permissions => Ok(ControlResponse::Error {
             message: "permissions probe not exposed on HTTP yet".into(),
