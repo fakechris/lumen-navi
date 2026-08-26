@@ -165,6 +165,11 @@ fn tool_defs() -> Vec<Value> {
                 "required": ["query"]
             }),
         ),
+        tool(
+            "navi_maintenance",
+            "Trigger database maintenance and storage retention pruning; returns storage reclaimed report.",
+            json!({ "type": "object", "properties": {} }),
+        ),
     ]
 }
 
@@ -218,6 +223,7 @@ fn call_tool(params: &Value, socket: &Path) -> Result<Value, Value> {
                     .map(|n| n as usize),
             }
         }
+        "navi_maintenance" => ControlRequest::Maintenance,
         other => return Err(rpc_error(-32601, format!("unknown tool: {other}"))),
     };
     match control(socket, &req) {
@@ -309,7 +315,8 @@ mod tests {
                 "navi_resume",
                 "navi_recent_context",
                 "navi_suggest_skill",
-                "navi_search"
+                "navi_search",
+                "navi_maintenance"
             ]
         );
     }

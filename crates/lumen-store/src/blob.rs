@@ -99,6 +99,42 @@ impl BlobStore {
         Ok(total)
     }
 
+    /// Delete a single blob by relative path (e.g. `blobs/ca/ab/<hash>`).
+    /// Returns true if the file was present and removed, false if it did not exist.
+    pub fn delete_relative(&self, relative: &str) -> Result<bool, StoreError> {
+        let data_dir = self
+            .root
+            .parent()
+            .ok_or_else(|| StoreError::Other("blob root has no parent".into()))?;
+        let path = data_dir.join(relative);
+        if path.exists() {
+            fs::remove_file(&path).map_err(StoreError::io)?;
+            // Best-effort cleanup of empty parent directory
+            if let Some(parent) = path.parent() {
+                if parent != self.root {
+                    let _ = fs::remove_dir(parent);
+                }
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Delete multiple blobs by relative path. Returns count of files deleted.
+    pub fn delete_relatives<'a>(
+        &self,
+        relatives: impl IntoIterator<Item = &'a str>,
+    ) -> Result<usize, StoreError> {
+        let mut count = 0;
+        for rel in relatives {
+            if self.delete_relative(rel)? {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     /// Remove all blob files (used by wipe). Keeps directory structure.
     pub fn wipe_all(&self) -> Result<(), StoreError> {
         if self.root.exists() {
@@ -111,6 +147,14 @@ impl BlobStore {
         fs::create_dir_all(&self.tmp).map_err(StoreError::io)?;
         Ok(())
     }
+}
+
+/// Pluggable storage cipher trait for on-disk file encryption (Phase 2 seam).
+pub trait BlobCipher: Send + Sync + std::fmt::Debug {
+    /// Encrypt plaintext bytes before writing to disk.
+    fn encrypt(&self, plaintext: &[u8], content_hash: &str) -> Result<Vec<u8>, StoreError>;
+    /// Decrypt ciphertext bytes read from disk.
+    fn decrypt(&self, ciphertext: &[u8], content_hash: &str) -> Result<Vec<u8>, StoreError>;
 }
 
 fn directory_bytes(path: &Path) -> Result<u64, StoreError> {
@@ -150,5 +194,17 @@ mod tests {
         assert_eq!(blobs.total_bytes().unwrap(), 5);
         assert_eq!(blobs.additional_bytes([b"hello".as_slice()]).unwrap(), 0);
         assert_eq!(blobs.additional_bytes([b"new".as_slice(), b"new".as_slice()]).unwrap(), 3);
+    }
+
+    #[test]
+    fn delete_relative_removes_file_and_updates_bytes() {
+        let dir = tempdir().unwrap();
+        let blobs = BlobStore::open(dir.path()).unwrap();
+        let a = blobs.put_bytes("image/png", b"test content").unwrap();
+        assert_eq!(blobs.total_bytes().unwrap(), 12);
+        assert!(blobs.delete_relative(&a.path).unwrap());
+        assert_eq!(blobs.total_bytes().unwrap(), 0);
+        // Deleting non-existent path returns false
+        assert!(!blobs.delete_relative(&a.path).unwrap());
     }
 }

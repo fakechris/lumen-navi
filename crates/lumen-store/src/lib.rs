@@ -36,7 +36,7 @@ use lumen_types::SourceEvent;
 use thiserror::Error;
 use uuid::Uuid;
 
-pub use blob::BlobStore;
+pub use blob::{BlobCipher, BlobStore};
 pub use history::{
     fold_history_slots, history_slot_key, is_duration_laundry, overlay_slot_narrative,
 };
@@ -56,7 +56,8 @@ pub use slot_evidence::{
 pub use sqlite::{
     ArtifactInput, BlobLimitedAppendOutcome, BrowserVisitProjection, CursorEvent,
     EnrichmentPassReport, EventWithArtifacts, IdempotentAppendOutcome, OcrSearchHit,
-    SessionDerivedRow, SqliteStore, StoreMaintenanceReport, TimelineItem, TimelineQuery,
+    PruneArtifactsReport, SessionDerivedRow, SqliteStore, StoreMaintenanceReport, TimelineItem,
+    TimelineQuery,
 };
 // RecoveryPolicy / RecoveryReport are defined in this module.
 

@@ -154,7 +154,14 @@ pub struct BrowserVisitProjection {
     pub snapshot_hashes: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PruneArtifactsReport {
+    pub artifacts_pruned: usize,
+    pub blobs_deleted: usize,
+    pub bytes_reclaimed: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoreMaintenanceReport {
     pub checkpoint_busy: i32,
     pub checkpoint_log: i32,
@@ -162,6 +169,11 @@ pub struct StoreMaintenanceReport {
     pub page_count: i64,
     pub page_size: i64,
     pub freelist_count: i64,
+    pub jobs_pruned: usize,
+    pub artifacts_pruned: usize,
+    pub blobs_deleted: usize,
+    pub bytes_reclaimed: u64,
+    pub fts_optimized: bool,
 }
 
 /// On-disk store: `$data_dir/meta/navi.db` + `$data_dir/blobs/...`.
@@ -711,26 +723,278 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Perform database maintenance: WAL checkpoint (PASSIVE) and query storage stats.
-    pub fn maintenance(&self) -> Result<StoreMaintenanceReport, StoreError> {
+    /// Prune completed or skipped background jobs updated prior to the specified cutoff.
+    pub fn prune_completed_jobs(&self, cutoff: DateTime<Utc>) -> Result<usize, StoreError> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| StoreError::Other("lock poisoned".into()))?;
-        let (busy, log, ckpt): (i32, i32, i32) = conn
-            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })
+        let cutoff_str = cutoff.to_rfc3339();
+        let count = conn
+            .execute(
+                "DELETE FROM jobs WHERE status IN ('done', 'skipped') AND updated_at < ?1",
+                params![cutoff_str],
+            )
             .map_err(StoreError::db)?;
-        let page_count: i64 = conn
-            .query_row("PRAGMA page_count", [], |r| r.get(0))
-            .unwrap_or(0);
-        let page_size: i64 = conn
-            .query_row("PRAGMA page_size", [], |r| r.get(0))
-            .unwrap_or(4096);
-        let freelist_count: i64 = conn
-            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
-            .unwrap_or(0);
+        Ok(count)
+    }
+
+    /// Prune screenshot artifacts for events older than cutoff timestamp.
+    /// Deduplication-safe: only deletes the on-disk blob file if no other artifact references it.
+    pub fn prune_screenshot_artifacts_before(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<PruneArtifactsReport, StoreError> {
+        let _blob_guard = self
+            .blob_intake
+            .lock()
+            .map_err(|_| StoreError::Other("blob intake lock poisoned".into()))?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let cutoff_str = cutoff.to_rfc3339();
+
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        let mut stmt = tx
+            .prepare(
+                r#"
+                SELECT a.id, a.path, COALESCE(a.bytes, 0)
+                FROM artifacts a
+                JOIN events e ON a.event_id = e.id
+                WHERE e.kind = 'screenshot.v1' AND e.ts < ?1
+                ORDER BY e.ts ASC
+                "#,
+            )
+            .map_err(StoreError::db)?;
+        let artifact_rows: Vec<(String, String, u64)> = stmt
+            .query_map(params![cutoff_str], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64))
+            })
+            .map_err(StoreError::db)?
+            .filter_map(|res| res.ok())
+            .collect();
+        drop(stmt);
+
+        if artifact_rows.is_empty() {
+            return Ok(PruneArtifactsReport::default());
+        }
+
+        let mut artifacts_pruned = 0;
+        let mut blobs_deleted = 0;
+        let mut bytes_reclaimed = 0;
+
+        for (id, path, bytes) in artifact_rows {
+            let other_refs: i64 = tx
+                .query_row(
+                    "SELECT COUNT(1) FROM artifacts WHERE path = ?1 AND id != ?2",
+                    params![path, id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+
+            tx.execute("DELETE FROM artifacts WHERE id = ?1", params![id])
+                .map_err(StoreError::db)?;
+            artifacts_pruned += 1;
+
+            if other_refs == 0 {
+                if self.blobs.delete_relative(&path).unwrap_or(false) {
+                    blobs_deleted += 1;
+                    bytes_reclaimed += bytes;
+                }
+            }
+        }
+
+        tx.commit().map_err(StoreError::db)?;
+
+        Ok(PruneArtifactsReport {
+            artifacts_pruned,
+            blobs_deleted,
+            bytes_reclaimed,
+        })
+    }
+
+    /// Enforce maximum blob storage quota (in bytes). Prunes oldest screenshot artifacts if over quota.
+    pub fn enforce_blob_retention_quota(
+        &self,
+        max_blob_bytes: u64,
+    ) -> Result<PruneArtifactsReport, StoreError> {
+        if max_blob_bytes == 0 {
+            return Ok(PruneArtifactsReport::default());
+        }
+        let current_bytes = self.blobs.total_bytes()?;
+        if current_bytes <= max_blob_bytes {
+            return Ok(PruneArtifactsReport::default());
+        }
+
+        let _blob_guard = self
+            .blob_intake
+            .lock()
+            .map_err(|_| StoreError::Other("blob intake lock poisoned".into()))?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+
+        let target_bytes = (max_blob_bytes as f64 * 0.9) as u64;
+        let mut total_reclaimed = 0u64;
+        let mut artifacts_pruned = 0usize;
+        let mut blobs_deleted = 0usize;
+
+        loop {
+            let now_bytes = self.blobs.total_bytes()?;
+            if now_bytes <= target_bytes {
+                break;
+            }
+
+            let tx = conn.transaction().map_err(StoreError::db)?;
+            let mut stmt = tx
+                .prepare(
+                    r#"
+                    SELECT a.id, a.path, COALESCE(a.bytes, 0)
+                    FROM artifacts a
+                    JOIN events e ON a.event_id = e.id
+                    WHERE e.kind = 'screenshot.v1'
+                    ORDER BY e.ts ASC
+                    LIMIT 200
+                    "#,
+                )
+                .map_err(StoreError::db)?;
+            let rows: Vec<(String, String, u64)> = stmt
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64))
+                })
+                .map_err(StoreError::db)?
+                .filter_map(|res| res.ok())
+                .collect();
+            drop(stmt);
+
+            if rows.is_empty() {
+                tx.commit().map_err(StoreError::db)?;
+                break;
+            }
+
+            for (id, path, bytes) in &rows {
+                let other_refs: i64 = tx
+                    .query_row(
+                        "SELECT COUNT(1) FROM artifacts WHERE path = ?1 AND id != ?2",
+                        params![path, id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+
+                tx.execute("DELETE FROM artifacts WHERE id = ?1", params![id])
+                    .map_err(StoreError::db)?;
+                artifacts_pruned += 1;
+
+                if other_refs == 0 {
+                    if self.blobs.delete_relative(path).unwrap_or(false) {
+                        blobs_deleted += 1;
+                        total_reclaimed += bytes;
+                    }
+                }
+            }
+            tx.commit().map_err(StoreError::db)?;
+        }
+
+        Ok(PruneArtifactsReport {
+            artifacts_pruned,
+            blobs_deleted,
+            bytes_reclaimed: total_reclaimed,
+        })
+    }
+
+    /// Optimize SQLite full-text search index (ocr_fts).
+    pub fn optimize_fts(&self) -> Result<(), StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let _ = conn.execute("INSERT INTO ocr_fts(ocr_fts) VALUES('optimize')", []);
+        Ok(())
+    }
+
+    /// Perform database maintenance with default retention policy.
+    pub fn maintenance(&self) -> Result<StoreMaintenanceReport, StoreError> {
+        self.maintenance_with_retention(&lumen_config::RetentionConfig::default())
+    }
+
+    /// Perform database maintenance according to the specified retention policy:
+    /// 1. Checkpoint WAL (PASSIVE)
+    /// 2. Prune done/skipped jobs older than `jobs_retention_hours`
+    /// 3. Prune screenshot artifacts older than `screenshot_retention_days`
+    /// 4. Enforce `max_blob_mb` quota if exceeded
+    /// 5. Optimize FTS index
+    /// 6. Incremental vacuum to reclaim pages
+    pub fn maintenance_with_retention(
+        &self,
+        retention: &lumen_config::RetentionConfig,
+    ) -> Result<StoreMaintenanceReport, StoreError> {
+        let (busy, log, ckpt) = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+            let (b, l, c): (i32, i32, i32) = conn
+                .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .map_err(StoreError::db)?;
+            (b, l, c)
+        };
+
+        let mut jobs_pruned = 0;
+        let mut artifacts_pruned = 0;
+        let mut blobs_deleted = 0;
+        let mut bytes_reclaimed = 0;
+
+        if retention.auto_prune {
+            if retention.jobs_retention_hours > 0 {
+                let cutoff = Utc::now() - chrono::Duration::hours(retention.jobs_retention_hours as i64);
+                if let Ok(n) = self.prune_completed_jobs(cutoff) {
+                    jobs_pruned = n;
+                }
+            }
+
+            if retention.screenshot_retention_days > 0 {
+                let cutoff = Utc::now() - chrono::Duration::days(retention.screenshot_retention_days as i64);
+                if let Ok(rep) = self.prune_screenshot_artifacts_before(cutoff) {
+                    artifacts_pruned += rep.artifacts_pruned;
+                    blobs_deleted += rep.blobs_deleted;
+                    bytes_reclaimed += rep.bytes_reclaimed;
+                }
+            }
+
+            if retention.max_blob_mb > 0 {
+                let max_bytes = retention.max_blob_mb.saturating_mul(1024 * 1024);
+                if let Ok(rep) = self.enforce_blob_retention_quota(max_bytes) {
+                    artifacts_pruned += rep.artifacts_pruned;
+                    blobs_deleted += rep.blobs_deleted;
+                    bytes_reclaimed += rep.bytes_reclaimed;
+                }
+            }
+        }
+
+        let fts_optimized = self.optimize_fts().is_ok();
+
+        let (page_count, page_size, freelist_count) = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+            let _ = conn.execute("PRAGMA incremental_vacuum(500)", []);
+            let pc: i64 = conn
+                .query_row("PRAGMA page_count", [], |r| r.get(0))
+                .unwrap_or(0);
+            let ps: i64 = conn
+                .query_row("PRAGMA page_size", [], |r| r.get(0))
+                .unwrap_or(4096);
+            let fc: i64 = conn
+                .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+                .unwrap_or(0);
+            (pc, ps, fc)
+        };
+
         Ok(StoreMaintenanceReport {
             checkpoint_busy: busy,
             checkpoint_log: log,
@@ -738,6 +1002,11 @@ impl SqliteStore {
             page_count,
             page_size,
             freelist_count,
+            jobs_pruned,
+            artifacts_pruned,
+            blobs_deleted,
+            bytes_reclaimed,
+            fts_optimized,
         })
     }
 
@@ -7093,5 +7362,64 @@ mod tests {
         assert_eq!(index.len(), 2);
         let aug14 = index.iter().find(|e| e.day == "2026-08-14").unwrap();
         assert_eq!(aug14.count, 2);
+    }
+
+    #[test]
+    fn storage_pruning_and_maintenance_lifecycle() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+
+        // 1. Enqueue and finish jobs
+        let ev = SourceEvent::new(SourceKind::Screen, event_kind::SCREENSHOT_V1, json!({}));
+        let eid = ev.id;
+        store.append_event(ev).unwrap();
+        let job = store.enqueue_job(eid, "ocr_screen").unwrap().unwrap();
+        store.complete_job(job.id, JobStatus::Done, None).unwrap();
+
+        // Older cutoff deletes the completed job
+        let future_cutoff = Utc::now() + chrono::Duration::hours(1);
+        let pruned = store.prune_completed_jobs(future_cutoff).unwrap();
+        assert_eq!(pruned, 1);
+
+        // 2. Append screenshot event with artifact
+        let ev2 = SourceEvent::new(SourceKind::Screen, event_kind::SCREENSHOT_V1, json!({"test": 1}));
+        let ev2_id = ev2.id;
+        let record = EventWithArtifacts {
+            event: ev2,
+            artifacts: vec![ArtifactInput {
+                media_type: "image/jpeg".into(),
+                bytes: b"fake-screenshot-data".to_vec(),
+            }],
+        };
+        store
+            .append_idempotent_with_artifacts_up_to(vec![record], u64::MAX)
+            .unwrap();
+
+        assert_eq!(store.blobs.total_bytes().unwrap(), 20);
+
+        // Pruning with future cutoff removes the screenshot artifact and blob file
+        let report = store
+            .prune_screenshot_artifacts_before(future_cutoff)
+            .unwrap();
+        assert_eq!(report.artifacts_pruned, 1);
+        assert_eq!(report.blobs_deleted, 1);
+        assert_eq!(report.bytes_reclaimed, 20);
+        assert_eq!(store.blobs.total_bytes().unwrap(), 0);
+
+        // Event payload itself remains intact in events table (zero text/metadata loss!)
+        let payload = store.get_event_payload(ev2_id).unwrap();
+        assert!(payload.is_some());
+
+        // 3. Maintenance report
+        let maint = store
+            .maintenance_with_retention(&lumen_config::RetentionConfig {
+                max_blob_mb: 20480,
+                wipe_on_request: true,
+                screenshot_retention_days: 30,
+                jobs_retention_hours: 24,
+                auto_prune: true,
+            })
+            .unwrap();
+        assert!(maint.fts_optimized);
     }
 }

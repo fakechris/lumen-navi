@@ -498,6 +498,10 @@ impl CaptureConfig {
     pub fn use_jpeg(&self) -> bool {
         self.encode.eq_ignore_ascii_case("jpeg")
     }
+
+    pub fn use_webp(&self) -> bool {
+        self.encode.eq_ignore_ascii_case("webp")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -586,9 +590,28 @@ impl PolicyGate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RetentionConfig {
     pub max_blob_mb: u64,
     pub wipe_on_request: bool,
+    /// Maximum age in days for raw screenshot blobs (0 = keep indefinitely). Default: 30 days.
+    pub screenshot_retention_days: u32,
+    /// Maximum age in hours for completed/skipped job rows (0 = keep indefinitely). Default: 24 hours.
+    pub jobs_retention_hours: u32,
+    /// Whether automatic background maintenance and rolling pruning are enabled. Default: true.
+    pub auto_prune: bool,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            max_blob_mb: 20_480,
+            wipe_on_request: true,
+            screenshot_retention_days: 30,
+            jobs_retention_hours: 24,
+            auto_prune: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -684,10 +707,7 @@ impl Default for Config {
             },
             capture: CaptureConfig::default(),
             privacy: PrivacyConfig::default(),
-            retention: RetentionConfig {
-                max_blob_mb: 20_480,
-                wipe_on_request: true,
-            },
+            retention: RetentionConfig::default(),
             ocr: OcrConfig::default(),
             api: ApiConfig::default(),
             browser: BrowserConfig::default(),
