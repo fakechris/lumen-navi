@@ -333,50 +333,55 @@ fn http_get_json(url: &str) -> Result<Value, StoreError> {
     serde_json::from_reader(reader).map_err(|e| StoreError::json(format!("parse {url}: {e}")))
 }
 
+#[derive(Debug, Deserialize)]
+struct RawCaskItem {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    name: Option<Vec<String>>,
+    #[serde(default)]
+    desc: Option<String>,
+    #[serde(default)]
+    homepage: Option<String>,
+    #[serde(default)]
+    artifacts: Option<Vec<Value>>,
+}
+
 /// Download Homebrew cask catalog + 30d install analytics and build a
 /// bundle_id → cask row map. Large (~few MB); call sparingly (daily).
 pub fn fetch_brew_cask_index() -> Result<Vec<BrewCaskRow>, StoreError> {
-    let casks = http_get_json(BREW_CASK_JSON)?;
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(20))
+        .timeout_read(Duration::from_secs(180))
+        .user_agent("lumen-navi-category-enrichment/0.1")
+        .build();
+    let resp = agent
+        .get(BREW_CASK_JSON)
+        .call()
+        .map_err(|e| StoreError::Other(format!("http get {BREW_CASK_JSON}: {e}")))?;
+    let casks: Vec<RawCaskItem> = serde_json::from_reader(resp.into_reader())
+        .map_err(|e| StoreError::json(format!("parse {BREW_CASK_JSON}: {e}")))?;
+
     let analytics = http_get_json(BREW_ANALYTICS_30D).ok();
     let installs = parse_analytics_counts(analytics.as_ref());
-
-    let arr = casks
-        .as_array()
-        .ok_or_else(|| StoreError::Other("cask.json root is not an array".into()))?;
 
     let mut out: Vec<BrewCaskRow> = Vec::new();
     let mut seen: HashMap<String, i32> = HashMap::new();
 
-    for cask in arr {
-        let token = cask
-            .get("token")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if token.is_empty() {
+    for cask in casks {
+        let Some(token) = cask.token.filter(|t| !t.trim().is_empty()) else {
             continue;
-        }
+        };
         // Only GUI apps with an .app artifact matter for frontmost tracking.
-        if !cask_has_app_artifact(cask) {
+        if !cask_has_app_artifact(cask.artifacts.as_deref()) {
             continue;
         }
-        let name = cask
-            .get("name")
-            .and_then(|v| v.as_array())
-            .and_then(|a| a.first())
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let desc = cask
-            .get("desc")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let homepage = cask
-            .get("homepage")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+        let name = cask.name.and_then(|a| a.into_iter().next());
+        let desc = cask.desc;
+        let homepage = cask.homepage;
         let installs_30d = installs.get(&token).copied();
 
-        let paths = collect_zap_paths(cask);
+        let paths = collect_zap_paths(cask.artifacts.as_deref());
         let bids = extract_bundle_ids_from_zap_paths(&paths);
         if bids.is_empty() {
             continue;
@@ -448,8 +453,8 @@ fn parse_analytics_counts(analytics: Option<&Value>) -> HashMap<String, i64> {
     m
 }
 
-fn cask_has_app_artifact(cask: &Value) -> bool {
-    let Some(arts) = cask.get("artifacts").and_then(|v| v.as_array()) else {
+fn cask_has_app_artifact(artifacts: Option<&[Value]>) -> bool {
+    let Some(arts) = artifacts else {
         return false;
     };
     for a in arts {
@@ -465,9 +470,9 @@ fn cask_has_app_artifact(cask: &Value) -> bool {
     false
 }
 
-fn collect_zap_paths(cask: &Value) -> Vec<String> {
+fn collect_zap_paths(artifacts: Option<&[Value]>) -> Vec<String> {
     let mut paths = Vec::new();
-    let Some(arts) = cask.get("artifacts").and_then(|v| v.as_array()) else {
+    let Some(arts) = artifacts else {
         return paths;
     };
     for a in arts {
@@ -533,7 +538,7 @@ pub fn fetch_brew_cask(token: &str) -> Result<Option<BrewCaskOne>, StoreError> {
         .and_then(|obj| obj.as_object())
         .and_then(|m| m.values().next())
         .and_then(|c| c.as_i64().or_else(|| c.as_str()?.replace(',', "").parse().ok()));
-    let paths = collect_zap_paths(&v);
+    let paths = collect_zap_paths(v.get("artifacts").and_then(|a| a.as_array()).map(|a| a.as_slice()));
     let bids = extract_bundle_ids_from_zap_paths(&paths);
     Ok(Some(BrewCaskOne {
         token: token.to_string(),

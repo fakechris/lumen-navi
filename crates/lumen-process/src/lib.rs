@@ -4,6 +4,7 @@
 //! records without mutating originals.
 
 mod ax_worker;
+mod ocr_helper;
 mod ocr_worker;
 mod transcribe_worker;
 mod transcript_export;
@@ -13,6 +14,7 @@ use lumen_types::SourceEvent;
 use thiserror::Error;
 
 pub use ax_worker::{AxWorker, AxWorkerConfig, AxWorkerStats, DERIVED_AX_V1, JOB_KIND_AX_SCREEN};
+pub use ocr_helper::{run_ocr_helper_stdio, HelperOcrMode, OutOfProcessOcrEngine};
 pub use ocr_worker::{OcrWorker, OcrWorkerConfig, OcrWorkerStats};
 pub use transcribe_worker::{
     TranscribeWorker, TranscribeWorkerConfig, TranscribeWorkerStats, DERIVED_TRANSCRIPT_V1,

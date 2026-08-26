@@ -39,6 +39,17 @@ pub struct HealthResponse {
     /// Last overwrite-only safety-valve frame. Not evidence.
     #[serde(default)]
     pub liveness: Option<LivenessHealthDto>,
+    /// Process memory telemetry (RSS, VSZ) when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<ProcessMemoryDto>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProcessMemoryDto {
+    pub rss_bytes: u64,
+    pub rss_mb: f64,
+    pub vsz_bytes: u64,
+    pub vsz_mb: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -219,6 +230,7 @@ impl HealthResponse {
             browser: None,
             observe: None,
             liveness: None,
+            memory: None,
         }
     }
 }
