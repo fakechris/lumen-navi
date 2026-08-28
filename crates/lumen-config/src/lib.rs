@@ -473,7 +473,7 @@ impl Default for CaptureConfig {
         Self {
             screen_interval_ms: 3_000,
             screen_dedup_window_ms: 5_000,
-            screen_max_edge: 1920,
+            screen_max_edge: 1440,
             screen_ticks: 0,
             probe_scale: 6,
             visual_change_threshold: 0.05,
@@ -485,7 +485,7 @@ impl Default for CaptureConfig {
             focus_poll_ms: 500,
             displays: "all".into(),
             encode: "jpeg".into(),
-            jpeg_quality: 75,
+            jpeg_quality: 65,
         }
     }
 }
