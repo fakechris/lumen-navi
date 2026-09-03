@@ -177,6 +177,7 @@ pub struct OnboardingState {
     pub skipped: bool,
     pub step: u32,
     pub launch_observe: bool,
+    pub autostart: bool,
 }
 
 #[tauri::command]
@@ -2025,6 +2026,7 @@ pub fn get_onboarding(state: State<'_, AppState>) -> Result<OnboardingState, Str
         skipped: shell.onboarding_skipped,
         step: shell.onboarding_step,
         launch_observe: shell.launch_observe,
+        autostart: shell.autostart,
     })
 }
 
@@ -2043,14 +2045,22 @@ pub fn set_onboarding_step(
 
 #[tauri::command]
 pub fn complete_onboarding(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     launch_observe: bool,
+    autostart: Option<bool>,
 ) -> Result<OnboardingState, String> {
+    if let Some(auto) = autostart {
+        let _ = crate::autostart::set_autostart_enabled(&app, auto);
+    }
     {
         let mut shell = state.shell.lock().map_err(err)?;
         shell.onboarding_completed = true;
         shell.onboarding_skipped = false;
         shell.launch_observe = launch_observe;
+        if let Some(auto) = autostart {
+            shell.autostart = auto;
+        }
         shell.onboarding_step = 4;
     }
     state.save_shell().map_err(err)?;
@@ -2085,6 +2095,33 @@ pub fn set_launch_observe(state: State<'_, AppState>, enabled: bool) -> Result<(
     {
         let mut shell = state.shell.lock().map_err(err)?;
         shell.launch_observe = enabled;
+    }
+    state.save_shell().map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_autostart(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
+    match crate::autostart::is_autostart_enabled(&app) {
+        Ok(enabled) => Ok(enabled),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to query OS autostart; falling back to shell config");
+            let shell = state.shell.lock().map_err(err)?;
+            Ok(shell.autostart)
+        }
+    }
+}
+
+#[tauri::command]
+pub fn set_autostart(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    crate::autostart::set_autostart_enabled(&app, enabled)?;
+    {
+        let mut shell = state.shell.lock().map_err(err)?;
+        shell.autostart = enabled;
     }
     state.save_shell().map_err(err)?;
     Ok(())

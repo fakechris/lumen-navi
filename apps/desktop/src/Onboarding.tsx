@@ -72,6 +72,7 @@ export function Onboarding({
   const [perms, setPerms] = useState<Permissions | null>(null);
   const [audioProbe, setAudioProbe] = useState<AudioReadiness | null>(null);
   const [launch, setLaunch] = useState(initial.launch_observe);
+  const [autostart, setAutostart] = useState(initial.autostart ?? true);
   const [busy, setBusy] = useState(false);
   const [guide, setGuide] = useState<string | null>(null); // warn-level guidance
   const [error, setError] = useState<string | null>(null); // danger-level real errors
@@ -182,7 +183,7 @@ export function Onboarding({
     setBusy(true);
     let observeError: string | null = null;
     try {
-      await api.completeOnboarding(start || launch);
+      await api.completeOnboarding(start || launch, autostart);
       if (start || launch) {
         try {
           await api.observeStart();
@@ -717,10 +718,18 @@ export function Onboarding({
                 <label className="check">
                   <input
                     type="checkbox"
+                    checked={autostart}
+                    onChange={(e) => setAutostart(e.target.checked)}
+                  />
+                  开机自动启动 Lumen Navi（登录系统时自动运行）
+                </label>
+                <label className="check">
+                  <input
+                    type="checkbox"
                     checked={launch}
                     onChange={(e) => setLaunch(e.target.checked)}
                   />
-                  以后启动应用时运行本地服务（仅采集已开启的通道）
+                  启动应用时运行本地服务（仅采集已开启的通道）
                 </label>
                 <Notice tone="info" title="隐私随时可控">
                   概览页可以一键暂停全部采集；闭眼模式立即停录；数据目录完全透明。

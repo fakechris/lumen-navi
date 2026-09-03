@@ -140,12 +140,17 @@ export const api = {
   getOnboarding: () => invoke<OnboardingState>("get_onboarding"),
   setOnboardingStep: (step: number) =>
     invoke<OnboardingState>("set_onboarding_step", { step }),
-  completeOnboarding: (launchObserve: boolean) =>
-    invoke<OnboardingState>("complete_onboarding", { launchObserve }),
+  completeOnboarding: (launchObserve: boolean, autostart?: boolean) =>
+    invoke<OnboardingState>("complete_onboarding", {
+      launchObserve,
+      autostart: autostart ?? null,
+    }),
   skipOnboarding: () => invoke<OnboardingState>("skip_onboarding"),
   reopenOnboarding: () => invoke<OnboardingState>("reopen_onboarding"),
   setLaunchObserve: (enabled: boolean) =>
     invoke<void>("set_launch_observe", { enabled }),
+  getAutostart: () => invoke<boolean>("get_autostart"),
+  setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
   requestScreenPermission: () => invoke<boolean>("request_screen_permission"),
   refreshScreenPermission: () => invoke<boolean>("refresh_screen_permission"),
   requestMicrophonePermission: () => invoke<boolean>("request_microphone_permission"),

@@ -362,6 +362,7 @@ export interface OnboardingState {
   skipped: boolean;
   step: number;
   launch_observe: boolean;
+  autostart?: boolean;
 }
 
 export interface AsrModelCandidate {
