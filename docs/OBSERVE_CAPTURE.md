@@ -136,7 +136,18 @@ closed_eyes = false
 
 ---
 
-## 10. Non-goals (this surface)
+## 10. Memory & FFI Hygiene (Daemons)
+
+The daemon runs indefinitely on async Tokio worker threads without a Cocoa RunLoop. Because `focus_tick` executes at 500ms intervals, system framework calls can accumulate unbounded allocations if unmanaged:
+
+1. **Autorelease pool drain**: Cocoa FFI methods (`NSRunningApplication`, `NSString`, `NSURL`) yield autoreleased Objective-C objects. Any FFI entrypoint (`frontmost_app`, `running_app_meta`) is strictly wrapped in `objc2::rc::autoreleasepool` to reclaim objects immediately per sample.
+2. **CoreFoundation ownership rule**: Any `Create` or `Copy` CoreFoundation call (such as `CGSessionCopyCurrentDictionary` and `CFStringCreateWithCString`) must explicitly balance retains with `CFRelease`.
+3. **Per-tick probe deduplication**: Inside a single 500ms `focus_tick`, `poll_activity`, `poll_focus_trigger`, and `capture_tick` share a short-lived probe cache cleared at tick boundaries, avoiding redundant OS WindowServer roundtrips and object allocations.
+4. **macOS Nano Zone bypass**: macOS `libsystem_malloc`'s nano zone does not reliably return physical pages to the kernel for high-churn tiny allocations. Daemons spawned from desktop set `MallocNanoZone=0` so libc allocations flow to `MALLOC_TINY`/`MALLOC_SMALL` which support madvise page reclamation.
+
+---
+
+## 11. Non-goals (this surface)
 
 - OCR implementation details  
 - PII redaction  
@@ -146,7 +157,7 @@ closed_eyes = false
 
 ---
 
-## 11. Success criteria
+## 12. Success criteria
 
 1. Multi-monitor → distinct `display_id` frames  
 2. App switch → capture without waiting for visual miss  
