@@ -14,6 +14,8 @@ pub struct ShellConfig {
     pub onboarding_step: u32,
     /// Start Observe when the app launches (after onboarding).
     pub launch_observe: bool,
+    /// Launch the app at system startup / login.
+    pub autostart: bool,
 }
 
 impl Default for ShellConfig {
@@ -23,6 +25,7 @@ impl Default for ShellConfig {
             onboarding_skipped: false,
             onboarding_step: 0,
             launch_observe: false,
+            autostart: false,
         }
     }
 }

@@ -245,8 +245,17 @@ export function SettingsView(props: SettingsViewProps) {
   const [llmTestMessage, setLlmTestMessage] = useState<string | null>(null);
   const [modelListBusy, setModelListBusy] = useState(false);
   const [modelListMessage, setModelListMessage] = useState<string | null>(null);
+  const [autostart, setAutostart] = useState(false);
+  const [autostartBusy, setAutostartBusy] = useState(false);
   const assistantSaveRef = useRef<Promise<void>>(Promise.resolve());
   const assistantLastSaveRef = useRef<Promise<void>>(Promise.resolve());
+
+  useEffect(() => {
+    void api
+      .getAutostart()
+      .then(setAutostart)
+      .catch(() => {});
+  }, []);
 
   const refreshAudioDevices = useCallback(async () => {
     setAudioDevicesBusy(true);
@@ -366,7 +375,31 @@ export function SettingsView(props: SettingsViewProps) {
               </div>
             </div>
             <div className="card">
-              <h3>Shell</h3>
+              <h3>Shell 与启动</h3>
+              <label className="check mt">
+                <input
+                  type="checkbox"
+                  checked={autostart}
+                  disabled={autostartBusy}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setAutostartBusy(true);
+                    void api
+                      .setAutostart(checked)
+                      .then(() => {
+                        setAutostart(checked);
+                        setStatusNote(
+                          checked
+                            ? "已开启开机自启动（系统登录时自动运行 Lumen Navi）。"
+                            : "已关闭开机自启动。",
+                        );
+                      })
+                      .catch((err) => setError(String(err)))
+                      .finally(() => setAutostartBusy(false));
+                  }}
+                />
+                开机自动启动（系统登录时自动运行 Lumen Navi）
+              </label>
               <label className="check mt">
                 <input
                   type="checkbox"

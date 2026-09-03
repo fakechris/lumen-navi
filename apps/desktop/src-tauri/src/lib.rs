@@ -4,6 +4,7 @@ mod agents;
 mod app_icon;
 mod asr_models;
 mod assistant;
+mod autostart;
 mod commands;
 mod composer;
 mod context;
@@ -39,6 +40,10 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::AppleScript,
+            None,
+        ))
         .manage(state)
         .setup(move |app| {
             if let Err(e) = tray::setup_tray(app.handle()) {
@@ -57,6 +62,21 @@ pub fn run() {
                     if let Some(s) = app.try_state::<AppState>() {
                         shortcuts::register_at_startup(app.handle(), &s);
                     }
+                }
+            }
+            {
+                let shell_autostart = app
+                    .try_state::<AppState>()
+                    .and_then(|s| s.shell.lock().ok().map(|sh| sh.autostart))
+                    .unwrap_or(false);
+                if shell_autostart {
+                    let handle = app.handle().clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        if let Ok(false) = autostart::is_autostart_enabled(&handle) {
+                            tracing::info!("restoring autostart login item on startup");
+                            let _ = autostart::set_autostart_enabled(&handle, true);
+                        }
+                    });
                 }
             }
             if launch_observe {
@@ -459,6 +479,8 @@ pub fn run() {
             commands::skip_onboarding,
             commands::reopen_onboarding,
             commands::set_launch_observe,
+            commands::get_autostart,
+            commands::set_autostart,
             commands::request_screen_permission,
             commands::refresh_screen_permission,
             commands::request_microphone_permission,
