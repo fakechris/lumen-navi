@@ -1284,11 +1284,13 @@ async fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
+                        orch.clear_probe_cache();
                         orch.set_paused(observe_paused.load(Ordering::Relaxed));
                         orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
                         let _persist = session_persist.lock().await;
                         persist_activity_poll(&store_act, orch.poll_activity().await, &counters);
                         persist_session_transition(&store_act, orch.close_idle_session(), &counters);
+                        orch.clear_probe_cache();
                     }
                     _ = act_cancel.changed() => {
                         if *act_cancel.borrow() {
@@ -1444,6 +1446,7 @@ async fn main() -> Result<()> {
                     break;
                 }
                 _ = focus_tick.tick() => {
+                    orch.clear_probe_cache();
                     orch.set_paused(observe_paused.load(Ordering::Relaxed));
                     orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
                     {
@@ -1485,8 +1488,10 @@ async fn main() -> Result<()> {
                         observe_counters
                             .sync_capture_stats(st.skipped_gate, st.dropped_backpressure);
                     }
+                    orch.clear_probe_cache();
                 }
                 _ = capture_tick.tick() => {
+                    orch.clear_probe_cache();
                     orch.set_paused(observe_paused.load(Ordering::Relaxed));
                     orch.set_closed_eyes(observe_closed_eyes.load(Ordering::Relaxed));
                     if cua_ready.load(Ordering::Relaxed) {
@@ -1509,6 +1514,7 @@ async fn main() -> Result<()> {
                         observe_counters
                             .sync_capture_stats(st.skipped_gate, st.dropped_backpressure);
                     }
+                    orch.clear_probe_cache();
                 }
             }
         }
@@ -1919,7 +1925,6 @@ fn build_asr_engine(asr: &AsrConfig) -> Result<Arc<dyn AsrEngine>, String> {
         http_model: asr.http_model.clone(),
         http_timeout_ms: asr.timeout_ms,
         http_engine_label: asr.http_engine_label.clone(),
-        qwen_python: std::path::PathBuf::new(),
         qwen_timeout_ms: asr.timeout_ms,
     };
 

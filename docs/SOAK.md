@@ -54,6 +54,7 @@ Permissions: Screen Recording, Microphone, Speech Recognition.
 | OCR text | search finds recent on-screen words |
 | Transcripts | search finds spoken phrases (if Speech authorized) |
 | Disk not unbounded | `data_dir` size reasonable; no runaway logs |
+| Memory bounded | `footprint $(pgrep lumen-daemon)` stays ≤ 50 MB; no `MALLOC_NANO` growth |
 | No permanent job death flood | `logs/daemon.stderr.log` — few `dead` OCR/ASR |
 
 ## Logs

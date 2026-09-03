@@ -1952,6 +1952,12 @@ fn observe_start_inner_opts(
             .env("LUMEN_CUA_SOCKET", state.cua.socket_path())
             .env("LUMEN_CUA_TOKEN_FILE", state.cua.token_file());
     }
+    #[cfg(target_os = "macos")]
+    {
+        // Disable Apple libsystem_malloc nano zone (<=256 bytes) to prevent
+        // memory un-reclaimed fragmentation in long-running background daemons.
+        daemon_command.env("MallocNanoZone", "0");
+    }
     // CREATE_NO_WINDOW — without it Windows gives the console-subsystem daemon
     // its own black console window on every start.
     #[cfg(windows)]

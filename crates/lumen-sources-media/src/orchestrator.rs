@@ -100,6 +100,8 @@ pub struct CaptureOrchestrator {
     dhash_history: HashMap<u32, VecDeque<(u64, Instant)>>,
     /// Safety valve: last full capture per display (force one every 10s).
     last_full_capture: HashMap<u32, Instant>,
+    cached_frontmost: Option<Option<FrontmostApp>>,
+    cached_locked: Option<bool>,
     sessions: Arc<SharedSessionBinder>,
     activity: ActivityAccumulator,
 
@@ -187,6 +189,8 @@ impl CaptureOrchestrator {
             probe_gray: HashMap::new(),
             dhash_history: HashMap::new(),
             last_full_capture: HashMap::new(),
+            cached_frontmost: None,
+            cached_locked: None,
             sessions,
             activity,
             stats_full: AtomicU64::new(0),
@@ -241,9 +245,35 @@ impl CaptureOrchestrator {
         Arc::clone(&self.sessions)
     }
 
+    /// Invalidate the per-tick probe cache so subsequent queries re-read the OS.
+    pub fn clear_probe_cache(&mut self) {
+        self.cached_frontmost = None;
+        self.cached_locked = None;
+    }
+
+    /// Sample frontmost app with tick-level caching.
+    pub async fn sample_frontmost(&mut self) -> Option<FrontmostApp> {
+        if let Some(ref cached) = self.cached_frontmost {
+            return cached.clone();
+        }
+        let fresh = self.frontmost.frontmost().await.ok().flatten();
+        self.cached_frontmost = Some(fresh.clone());
+        fresh
+    }
+
+    /// Sample lock state with tick-level caching.
+    pub async fn sample_locked(&mut self) -> bool {
+        if let Some(cached) = self.cached_locked {
+            return cached;
+        }
+        let fresh = self.lock.is_locked().await.unwrap_or(false);
+        self.cached_locked = Some(fresh);
+        fresh
+    }
+
     /// Poll frontmost app; returns a focus/title trigger if changed.
     pub async fn poll_focus_trigger(&mut self) -> Option<TriggerReason> {
-        let cur = self.frontmost.frontmost().await.ok().flatten()?;
+        let cur = self.sample_frontmost().await?;
         let reason = match &self.last_focus {
             None => {
                 self.last_focus = Some(cur);
@@ -283,7 +313,8 @@ impl CaptureOrchestrator {
             return ActivityPoll::default();
         }
 
-        let is_locked = self.lock.is_locked().await.unwrap_or(false);
+        self.clear_probe_cache();
+        let is_locked = self.sample_locked().await;
         if is_locked {
             let closed = self.sessions.force_close();
             let idle_seconds = self.idle.idle_seconds().await.unwrap_or(0.0).max(0.0);
@@ -304,7 +335,7 @@ impl CaptureOrchestrator {
             };
         }
 
-        let frontmost = self.frontmost.frontmost().await.ok().flatten();
+        let frontmost = self.sample_frontmost().await;
         if self
             .privacy
             .blocks_bundle(frontmost.as_ref().and_then(|f| f.bundle_id.as_deref()))
@@ -362,15 +393,8 @@ impl CaptureOrchestrator {
         &mut self,
         reason: TriggerReason,
     ) -> Result<Option<CaptureOutcome>, String> {
-        let locked = self.lock.is_locked().await.unwrap_or(false);
-        let front = match self.frontmost.frontmost().await {
-            Ok(front) => front,
-            Err(_) => {
-                self.stats_skip_gate.fetch_add(1, Ordering::Relaxed);
-                debug!("gate: frontmost_unavailable");
-                return Ok(None);
-            }
-        };
+        let locked = self.sample_locked().await;
+        let front = self.sample_frontmost().await;
         let bundle = front.as_ref().and_then(|f| f.bundle_id.clone());
         let gate = PolicyGate::evaluate(
             self.paused.load(Ordering::Relaxed),

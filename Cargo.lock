@@ -2190,7 +2190,7 @@ dependencies = [
 [[package]]
 name = "lumen-asr-engine"
 version = "0.1.0"
-source = "git+https://github.com/fakechris/lumen-suite.git?rev=64f970d530c2c88d61b02925ed28b6f660f81e14#64f970d530c2c88d61b02925ed28b6f660f81e14"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=2bd616a790de59b8a8eafd58f249ce144443644b#2bd616a790de59b8a8eafd58f249ce144443644b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2295,11 +2295,12 @@ dependencies = [
 [[package]]
 name = "lumen-models"
 version = "0.1.0"
-source = "git+https://github.com/fakechris/lumen-suite.git?rev=64f970d530c2c88d61b02925ed28b6f660f81e14#64f970d530c2c88d61b02925ed28b6f660f81e14"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=2bd616a790de59b8a8eafd58f249ce144443644b#2bd616a790de59b8a8eafd58f249ce144443644b"
 dependencies = [
  "fs2",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
 ]
 
@@ -2338,7 +2339,7 @@ dependencies = [
 [[package]]
 name = "lumen-platform"
 version = "0.1.0"
-source = "git+https://github.com/fakechris/lumen-suite.git?rev=64f970d530c2c88d61b02925ed28b6f660f81e14#64f970d530c2c88d61b02925ed28b6f660f81e14"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=2bd616a790de59b8a8eafd58f249ce144443644b#2bd616a790de59b8a8eafd58f249ce144443644b"
 dependencies = [
  "async-trait",
  "serde",
@@ -2348,7 +2349,7 @@ dependencies = [
 [[package]]
 name = "lumen-platform-cpal"
 version = "0.1.0"
-source = "git+https://github.com/fakechris/lumen-suite.git?rev=64f970d530c2c88d61b02925ed28b6f660f81e14#64f970d530c2c88d61b02925ed28b6f660f81e14"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=2bd616a790de59b8a8eafd58f249ce144443644b#2bd616a790de59b8a8eafd58f249ce144443644b"
 dependencies = [
  "cpal",
  "lumen-platform",
@@ -2358,7 +2359,7 @@ dependencies = [
 [[package]]
 name = "lumen-platform-host"
 version = "0.1.0"
-source = "git+https://github.com/fakechris/lumen-suite.git?rev=64f970d530c2c88d61b02925ed28b6f660f81e14#64f970d530c2c88d61b02925ed28b6f660f81e14"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=2bd616a790de59b8a8eafd58f249ce144443644b#2bd616a790de59b8a8eafd58f249ce144443644b"
 dependencies = [
  "lumen-platform",
  "lumen-platform-cpal",
@@ -2369,7 +2370,7 @@ dependencies = [
 [[package]]
 name = "lumen-platform-macos"
 version = "0.1.0"
-source = "git+https://github.com/fakechris/lumen-suite.git?rev=64f970d530c2c88d61b02925ed28b6f660f81e14#64f970d530c2c88d61b02925ed28b6f660f81e14"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=2bd616a790de59b8a8eafd58f249ce144443644b#2bd616a790de59b8a8eafd58f249ce144443644b"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2396,7 +2397,7 @@ dependencies = [
 [[package]]
 name = "lumen-platform-windows"
 version = "0.1.0"
-source = "git+https://github.com/fakechris/lumen-suite.git?rev=64f970d530c2c88d61b02925ed28b6f660f81e14#64f970d530c2c88d61b02925ed28b6f660f81e14"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=2bd616a790de59b8a8eafd58f249ce144443644b#2bd616a790de59b8a8eafd58f249ce144443644b"
 dependencies = [
  "async-trait",
  "image",
@@ -2494,7 +2495,7 @@ dependencies = [
 [[package]]
 name = "lumen-transcript"
 version = "0.1.0"
-source = "git+https://github.com/fakechris/lumen-suite.git?rev=64f970d530c2c88d61b02925ed28b6f660f81e14#64f970d530c2c88d61b02925ed28b6f660f81e14"
+source = "git+https://github.com/fakechris/lumen-suite.git?rev=2bd616a790de59b8a8eafd58f249ce144443644b#2bd616a790de59b8a8eafd58f249ce144443644b"
 dependencies = [
  "serde",
  "serde_json",
