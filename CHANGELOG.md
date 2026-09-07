@@ -32,6 +32,11 @@
   list scrolls on its own. Settings UI moved from `App.tsx` (~1100 lines)
   into `views/SettingsView.tsx`.
 
+### Fixed
+
+- Dock icon badge displaying red "0" on macOS after health recovery: pass
+  `undefined` instead of `0` to `setBadgeCount` to remove the badge.
+
 ## 0.2.0 - 2026-08-19
 
 First product-shaped release after v0.1.0 (2026-07-15). The desktop app now tracks time, narrates 15-minute stretches, searches OCR, and optionally talks about the day — still local-first.
