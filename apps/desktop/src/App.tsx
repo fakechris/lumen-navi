@@ -739,6 +739,10 @@ export default function App() {
   useEffect(() => {
     let unlistenAlert: (() => void) | undefined;
     let unlistenRecover: (() => void) | undefined;
+    // Clear any stale badge on mount.
+    getCurrentWindow()
+      .setBadgeCount(undefined)
+      .catch(() => {});
     void listen<{ reason: string }>("health://alert", (event) => {
       setHealthAlert(event.payload);
       // Set dock badge so the user notices even if the window is hidden.
@@ -751,7 +755,7 @@ export default function App() {
     void listen("health://recovered", () => {
       setHealthAlert(null);
       getCurrentWindow()
-        .setBadgeCount(0)
+        .setBadgeCount(undefined)
         .catch(() => {});
     }).then((fn) => {
       unlistenRecover = fn;
