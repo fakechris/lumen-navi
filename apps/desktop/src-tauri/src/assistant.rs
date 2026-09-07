@@ -110,7 +110,13 @@ pub async fn run_stream(
         return Err("assistant base_url / model not configured".into());
     }
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let messages = build_messages(job.action, &cfg, &job.text, job.question.as_deref(), &job.context);
+    let messages = build_messages(
+        job.action,
+        &cfg,
+        &job.text,
+        job.question.as_deref(),
+        &job.context,
+    );
     let body = json!({
         "model": cfg.model,
         "messages": messages,
@@ -221,7 +227,10 @@ mod tests {
 
     #[test]
     fn parse_action() {
-        assert_eq!(AssistantAction::parse("Translate").unwrap(), AssistantAction::Translate);
+        assert_eq!(
+            AssistantAction::parse("Translate").unwrap(),
+            AssistantAction::Translate
+        );
         assert!(AssistantAction::parse("nope").is_err());
     }
 }

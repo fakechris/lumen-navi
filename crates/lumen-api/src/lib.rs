@@ -635,7 +635,7 @@ pub struct SuggestedSkillDto {
     pub steps: Vec<SkillStepDto>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SkillStepDto {
     /// `focus` | `click` | `shortcut` | `submit` | `type` | `context_menu` | `drag`
     pub action: String,
@@ -657,6 +657,12 @@ pub struct SkillStepDto {
     pub rel_y: Option<f64>,
     #[serde(default)]
     pub note: Option<String>,
+    #[serde(default)]
+    pub window_id: Option<u64>,
+    #[serde(default)]
+    pub element_token: Option<String>,
+    #[serde(default)]
+    pub urls: Option<Vec<String>>,
 }
 
 fn default_skill_kind() -> String {

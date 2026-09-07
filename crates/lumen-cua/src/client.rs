@@ -258,6 +258,24 @@ impl CuaClient {
         }
     }
 
+    /// Act only. One cua-driver tool against the embedded daemon.
+    pub fn act_driver_call(
+        &self,
+        tool: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, CuaError> {
+        match self
+            .call(Command::ActDriverCall {
+                tool: tool.into(),
+                arguments,
+            })?
+            .0
+        {
+            ResponseResult::DriverCall { value } => Ok(value),
+            other => Err(unexpected(other)),
+        }
+    }
+
     pub fn shutdown(&self) -> Result<(), CuaError> {
         let current = self.call_with_protocol(Command::Shutdown, PROTOCOL_VERSION);
         match current {

@@ -6,7 +6,9 @@
 //! invocation time is captured as the inject target.
 
 use serde_json::json;
-use tauri::{AppHandle, Emitter, LogicalPosition, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, Manager, Runtime, WebviewUrl, WebviewWindowBuilder,
+};
 
 use crate::selection_popup::{self, PendingTarget};
 
@@ -32,8 +34,13 @@ fn show<R: Runtime>(app: &AppHandle<R>) {
         if pid == std::process::id() as i32 {
             return None;
         }
-        lumen_platform_host::selection::app_identity_for_pid(pid)
-            .map(|(app_name, bundle_id)| PendingTarget { pid, app_name, bundle_id })
+        lumen_platform_host::selection::app_identity_for_pid(pid).map(|(app_name, bundle_id)| {
+            PendingTarget {
+                pid,
+                app_name,
+                bundle_id,
+            }
+        })
     });
 
     let win = match app.get_webview_window(COMPOSER_LABEL) {
@@ -84,7 +91,11 @@ fn show<R: Runtime>(app: &AppHandle<R>) {
     }
     let _ = win.set_focus();
     let target_name = target.as_ref().map(|t| t.app_name.clone());
-    let _ = app.emit_to(COMPOSER_LABEL, "composer-shown", json!({ "target": target_name }));
+    let _ = app.emit_to(
+        COMPOSER_LABEL,
+        "composer-shown",
+        json!({ "target": target_name }),
+    );
 }
 
 pub fn hide<R: Runtime>(app: &AppHandle<R>) {

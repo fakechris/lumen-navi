@@ -50,8 +50,7 @@ fn register_blocking<R: Runtime>(app: &AppHandle<R>, accelerator: &str) -> Resul
             .on_shortcut(acc.as_str(), move |_app, _sc, event| {
                 if event.state() == ShortcutState::Pressed {
                     let h2 = h_for_handler.clone();
-                    let _ = h_for_handler
-                        .run_on_main_thread(move || crate::composer::toggle(&h2));
+                    let _ = h_for_handler.run_on_main_thread(move || crate::composer::toggle(&h2));
                 }
             })
             .map_err(|e| e.to_string());
@@ -66,7 +65,8 @@ fn unregister_blocking<R: Runtime>(app: &AppHandle<R>, accelerator: &str) -> Res
     let acc = accelerator.to_string();
     let h = app.clone();
     let _ = app.run_on_main_thread(move || {
-        let res = h.global_shortcut()
+        let res = h
+            .global_shortcut()
             .unregister(acc.as_str())
             .map_err(|e| e.to_string());
         let _ = tx.send(res);

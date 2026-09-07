@@ -10,6 +10,11 @@
 - Act v2: optional MIT cua-driver nested in `Lumen Cua.app/Contents/Helpers`
   and spawned as a Cua child (`CUA_DRIVER_EMBEDDED=1`). Observe never
   starts it. Missing binary is a soft skip. Fetch is SHA-256 pinned.
+- Act engine path: skill replay and `InputReplay` go through cua-driver
+  with background-only policy. `launch_app`, window-local clicks,
+  `page`, and the session cursor overlay are available. Noop no longer
+  steals focus. Settings can copy/write a `computer-use` MCP snippet
+  into Codex or Claude Code.
 - Settings → 技能库: Act engine status and a one-shot 「启动 Act 引擎」.
 
 - 设置 → 快捷键: quick-chat (快捷对话) global shortcut is now configurable

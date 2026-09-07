@@ -41,9 +41,7 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                         // Replay the freshest library skill for the current
                         // frontmost app (the one the menu was built from).
                         if let Some(app_name) = state.store.latest_frontmost_app().ok().flatten() {
-                            if let Ok(Some(sk)) =
-                                state.store.suggest_skill_for_app(&app_name, 0)
-                            {
+                            if let Ok(Some(sk)) = state.store.suggest_skill_for_app(&app_name, 0) {
                                 let ops = crate::commands::expand_skill_steps_for_replay(&sk);
                                 if let Err(e) = crate::commands::run_tray_replay(&state, ops) {
                                     tracing::warn!(error = %e, "tray skill replay failed");
@@ -164,21 +162,39 @@ fn rebuild_menu<R: Runtime>(
 ) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show Lumen Navi", true, None::<&str>)?;
     let composer = MenuItem::with_id(app, "composer", "打开快捷对话", true, None::<&str>)?;
-    let pause = MenuItem::with_id(app, "toggle_pause", "Toggle Privacy Pause", true, None::<&str>)?;
+    let pause = MenuItem::with_id(
+        app,
+        "toggle_pause",
+        "Toggle Privacy Pause",
+        true,
+        None::<&str>,
+    )?;
     let sep_a = PredefinedMenuItem::separator(app)?;
     let sep_b = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let mut items: Vec<MenuItem<R>> = vec![show, composer];
     if let Some(sk) = suggestion {
         let label = format!("试试：{}（回放 {} 步）", sk.name, sk.steps.len());
-        items.push(MenuItem::with_id(app, "skill_suggest", label, true, None::<&str>)?);
+        items.push(MenuItem::with_id(
+            app,
+            "skill_suggest",
+            label,
+            true,
+            None::<&str>,
+        )?);
     }
     let pause_idx = items.len();
     items.push(pause);
     let quit_idx = items.len();
     items.push(quit);
-    let mut refs: Vec<&dyn tauri::menu::IsMenuItem<R>> =
-        vec![&items[0], &items[1], &sep_a, &items[pause_idx], &sep_b, &items[quit_idx]];
+    let mut refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = vec![
+        &items[0],
+        &items[1],
+        &sep_a,
+        &items[pause_idx],
+        &sep_b,
+        &items[quit_idx],
+    ];
     if suggestion.is_some() {
         refs.insert(2, &items[2]);
     }

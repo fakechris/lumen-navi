@@ -83,8 +83,19 @@ pub fn cask_token_candidates(bundle_id: &str, app_name: Option<&str>) -> Vec<Str
         // Skip pure noise labels.
         if matches!(
             t.as_str(),
-            "com" | "org" | "net" | "io" | "app" | "mac" | "osx" | "desktop" | "helper" | "server"
-                | "client" | "agent" | "launcher"
+            "com"
+                | "org"
+                | "net"
+                | "io"
+                | "app"
+                | "mac"
+                | "osx"
+                | "desktop"
+                | "helper"
+                | "server"
+                | "client"
+                | "agent"
+                | "launcher"
         ) {
             return;
         }
@@ -519,10 +530,7 @@ pub fn fetch_brew_cask(token: &str) -> Result<Option<BrewCaskOne>, StoreError> {
         .into_string()
         .map_err(|e| StoreError::Other(format!("brew cask body: {e}")))?;
     let v: Value = serde_json::from_str(&body).map_err(StoreError::json)?;
-    let desc = v
-        .get("desc")
-        .and_then(|x| x.as_str())
-        .map(str::to_string);
+    let desc = v.get("desc").and_then(|x| x.as_str()).map(str::to_string);
     let name = v
         .get("name")
         .and_then(|x| x.as_array())
@@ -537,8 +545,15 @@ pub fn fetch_brew_cask(token: &str) -> Result<Option<BrewCaskOne>, StoreError> {
         .pointer("/analytics/install/30d")
         .and_then(|obj| obj.as_object())
         .and_then(|m| m.values().next())
-        .and_then(|c| c.as_i64().or_else(|| c.as_str()?.replace(',', "").parse().ok()));
-    let paths = collect_zap_paths(v.get("artifacts").and_then(|a| a.as_array()).map(|a| a.as_slice()));
+        .and_then(|c| {
+            c.as_i64()
+                .or_else(|| c.as_str()?.replace(',', "").parse().ok())
+        });
+    let paths = collect_zap_paths(
+        v.get("artifacts")
+            .and_then(|a| a.as_array())
+            .map(|a| a.as_slice()),
+    );
     let bids = extract_bundle_ids_from_zap_paths(&paths);
     Ok(Some(BrewCaskOne {
         token: token.to_string(),
@@ -645,7 +660,10 @@ pub fn resolve_bundle_category(
         let Some(one) = fetch_brew_cask(&token)? else {
             continue;
         };
-        let matches_bundle = one.bundle_ids.iter().any(|b| b.eq_ignore_ascii_case(bundle_id));
+        let matches_bundle = one
+            .bundle_ids
+            .iter()
+            .any(|b| b.eq_ignore_ascii_case(bundle_id));
         // Accept weak token-only match only when zap listed nothing.
         let accept = matches_bundle || one.bundle_ids.is_empty();
         if !accept {
@@ -765,7 +783,11 @@ mod tests {
             "~/Library/Preferences/com.todesktop.230313mzl4w4u92.plist".into(),
         ];
         let bids = extract_bundle_ids_from_zap_paths(&paths);
-        assert!(bids.iter().all(|(b, _)| b != "todesktop.com.ToDesktop-Installer"));
-        assert!(bids.iter().any(|(b, _)| b == "com.todesktop.230313mzl4w4u92"));
+        assert!(bids
+            .iter()
+            .all(|(b, _)| b != "todesktop.com.ToDesktop-Installer"));
+        assert!(bids
+            .iter()
+            .any(|(b, _)| b == "com.todesktop.230313mzl4w4u92"));
     }
 }

@@ -200,13 +200,7 @@ pub fn set_asr_engine_preference(
     engine: String,
 ) -> Result<AsrModelStatus, String> {
     let eng = engine.trim().to_ascii_lowercase();
-    let allowed = [
-        "sensevoice",
-        "whisper",
-        "speech",
-        "openai_audio",
-        "qwen",
-    ];
+    let allowed = ["sensevoice", "whisper", "speech", "openai_audio", "qwen"];
     if !allowed.iter().any(|a| *a == eng.as_str()) {
         return Err(format!(
             "unsupported engine '{eng}' (want sensevoice|whisper|speech|openai_audio|qwen)"

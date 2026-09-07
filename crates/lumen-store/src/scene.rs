@@ -45,16 +45,18 @@ pub fn fold_scene_day(day: &str, segments: &[ActivitySegmentDto]) -> SceneDayDto
 
     let mut by_label: HashMap<String, SceneRollupDto> = HashMap::new();
     for ep in &episodes {
-        let entry = by_label.entry(ep.label.clone()).or_insert_with(|| SceneRollupDto {
-            kind: ep.kind.clone(),
-            app_name: ep.app_name.clone(),
-            bundle_id: ep.bundle_id.clone(),
-            shell: ep.shell.clone(),
-            leaf: ep.leaf.clone(),
-            label: ep.label.clone(),
-            ms: 0,
-            episode_count: 0,
-        });
+        let entry = by_label
+            .entry(ep.label.clone())
+            .or_insert_with(|| SceneRollupDto {
+                kind: ep.kind.clone(),
+                app_name: ep.app_name.clone(),
+                bundle_id: ep.bundle_id.clone(),
+                shell: ep.shell.clone(),
+                leaf: ep.leaf.clone(),
+                label: ep.label.clone(),
+                ms: 0,
+                episode_count: 0,
+            });
         entry.ms += ep.duration_ms;
         entry.episode_count += 1;
     }
@@ -170,7 +172,14 @@ mod tests {
 
     #[test]
     fn skips_idle() {
-        let mut idle = seg("Safari", "com.apple.Safari", "Kimi", Some("https://kimi.com"), 0, 30);
+        let mut idle = seg(
+            "Safari",
+            "com.apple.Safari",
+            "Kimi",
+            Some("https://kimi.com"),
+            0,
+            30,
+        );
         idle.is_idle = true;
         let day = fold_scene_day("2026-08-12", &[idle]);
         assert!(day.episodes.is_empty());

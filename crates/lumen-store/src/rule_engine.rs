@@ -12,9 +12,7 @@ use std::sync::{Arc, RwLock};
 
 use serde::Deserialize;
 
-use crate::categorization::{
-    CategoryRule, Classification, MatchField, ProductivityLevel,
-};
+use crate::categorization::{CategoryRule, Classification, MatchField, ProductivityLevel};
 use crate::StoreError;
 
 const EMBEDDED_MAPPING: &str = include_str!("../rules/category_mapping.v1.json");
@@ -339,7 +337,9 @@ pub fn set_active_catalog(set: Arc<CatalogRuleSet>) {
 
 /// Ensure `$data_dir/rules/` has editable copies of embedded defaults, then
 /// load overrides from disk (file wins over embedded when present & valid).
-pub fn install_and_load_rules(data_dir: &Path) -> Result<(Arc<MappingRuleSet>, Arc<CatalogRuleSet>), StoreError> {
+pub fn install_and_load_rules(
+    data_dir: &Path,
+) -> Result<(Arc<MappingRuleSet>, Arc<CatalogRuleSet>), StoreError> {
     let rules_dir = data_dir.join("rules");
     std::fs::create_dir_all(&rules_dir).map_err(StoreError::io)?;
 
@@ -469,10 +469,7 @@ mod tests {
             "category": "Writing",
             "level": "productive"
         });
-        file["text_rules"]
-            .as_array_mut()
-            .unwrap()
-            .insert(0, custom);
+        file["text_rules"].as_array_mut().unwrap().insert(0, custom);
         std::fs::write(&path, serde_json::to_string_pretty(&file).unwrap()).unwrap();
         reload_rules_from_dir(data).unwrap();
         let c = active_mapping()
@@ -485,10 +482,12 @@ mod tests {
     fn text_rule_none_excludes() {
         let m = MappingRuleSet::embedded();
         // "file browser" should not become Browsing
-        assert!(m.classify_text("A nice file browser utility").is_none()
-            || m.classify_text("A nice file browser utility")
-                .map(|c| c.category.as_deref() != Some("Browsing"))
-                .unwrap_or(true));
+        assert!(
+            m.classify_text("A nice file browser utility").is_none()
+                || m.classify_text("A nice file browser utility")
+                    .map(|c| c.category.as_deref() != Some("Browsing"))
+                    .unwrap_or(true)
+        );
     }
 
     #[test]
@@ -500,9 +499,7 @@ mod tests {
             Some("Utilities".into())
         );
         // Must NOT treat marketing "remote work support" as remote-desktop tool.
-        let loose = m.classify_text(
-            "Notes and tasks for remote work support across your team",
-        );
+        let loose = m.classify_text("Notes and tasks for remote work support across your team");
         assert!(
             loose
                 .as_ref()

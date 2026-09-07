@@ -47,8 +47,7 @@ pub fn load_shell(data_dir: &Path) -> Result<ShellConfig> {
         save_shell(data_dir, &cfg)?;
         return Ok(cfg);
     }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     Ok(toml::from_str(&raw)?)
 }
 

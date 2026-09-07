@@ -1692,6 +1692,62 @@ function SkillLibraryCard() {
           </Button>
         </div>
       )}
+      {driver?.present && (
+        <div className="stack mt">
+          <p className="meta">
+            编码 agent 用 MCP 名 <code>computer-use</code>
+            。默认后台点击，不抢焦点、不挪真光标。先启动引擎，再写入 Codex / Claude 配置。
+          </p>
+          {driver.mcp_snippet && (
+            <pre className="meta" style={{ whiteSpace: "pre-wrap", fontSize: "11px" }}>
+              {driver.mcp_snippet}
+            </pre>
+          )}
+          <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={busy || !driver.mcp_snippet}
+              onClick={() => {
+                if (!driver.mcp_snippet) return;
+                void navigator.clipboard.writeText(driver.mcp_snippet);
+              }}
+            >
+              复制 MCP 片段
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                void api
+                  .actInstallMcp("codex")
+                  .then((msg) => window.alert(msg))
+                  .catch((e) => window.alert(String(e)))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              写入 Codex
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                void api
+                  .actInstallMcp("claude")
+                  .then((msg) => window.alert(msg))
+                  .catch((e) => window.alert(String(e)))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              写入 Claude Code
+            </Button>
+          </div>
+        </div>
+      )}
       <div className="stack mt skill-list-scroll">
         {skills === null && <p className="meta">加载中…</p>}
         {skills !== null && skills.length === 0 && (

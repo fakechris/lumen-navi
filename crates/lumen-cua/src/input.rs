@@ -140,7 +140,7 @@ fn run_click(step: &InputStep, pid: Option<i32>) -> Result<ActionResult> {
         .as_ref()
         .and_then(|s| window_capture::dhash(&s.bytes));
 
-    let mut gates = wait_and_evaluate(step, pid, Some((x, y)))?;
+    let gates = wait_and_evaluate(step, pid, Some((x, y)))?;
     if let Some(reason) = gates.blocking_reason() {
         return Ok(ActionResult::refused(reason, Some(gates)));
     }
@@ -151,50 +151,22 @@ fn run_click(step: &InputStep, pid: Option<i32>) -> Result<ActionResult> {
     let after = window_capture::capture_window(window_id, 320, true, 50).ok();
     let after_hash = after.as_ref().and_then(|s| window_capture::dhash(&s.bytes));
     let effect = hash_effect(before_hash, after_hash);
-
-    // CGEventPostToPid is void: create-success is not delivery. Escalate only
-    // when the window hash looks like a noop / could not be verified.
-    if escalate_background_noop(effect, step.allow_foreground) {
-        return escalate_click(step, x, y, gates);
-    }
-    if !posted {
-        return Ok(ActionResult {
-            effect: ActionEffect::SuspectedNoop,
-            route: ActionRoute::SyntheticEvents,
-            delivery: DeliveryMode::Background,
-            reason: Some("post_to_pid_failed".into()),
-            gates: Some(gates),
-        });
-    }
+    let reason = if !posted {
+        Some("post_to_pid_failed".into())
+    } else if effect == ActionEffect::SuspectedNoop {
+        Some("background_noop".into())
+    } else {
+        None
+    };
     Ok(ActionResult {
-        effect,
+        effect: if !posted {
+            ActionEffect::SuspectedNoop
+        } else {
+            effect
+        },
         route: ActionRoute::SyntheticEvents,
         delivery: DeliveryMode::Background,
-        reason: None,
-        gates: Some(gates),
-    })
-}
-
-fn escalate_click(
-    step: &InputStep,
-    x: f64,
-    y: f64,
-    mut gates: crate::protocol::GateReport,
-) -> Result<ActionResult> {
-    let Some(_lock) = FocusGuard::try_acquire() else {
-        return Ok(ActionResult::refused("focus_lock_held", Some(gates)));
-    };
-    if let Some(bundle) = step.bundle_id.as_deref() {
-        let _ = activate_bundle(bundle);
-        thread::sleep(Duration::from_millis(120));
-    }
-    gates.frontmost = GateVerdict::Pass;
-    click_at(x, y)?;
-    Ok(ActionResult {
-        effect: ActionEffect::Unverifiable,
-        route: ActionRoute::GlobalInput,
-        delivery: DeliveryMode::Foreground,
-        reason: None,
+        reason,
         gates: Some(gates),
     })
 }
@@ -234,45 +206,15 @@ fn run_key(step: &InputStep, pid: Option<i32>) -> Result<ActionResult> {
     } else {
         ActionEffect::SuspectedNoop
     };
-    if escalate_background_noop(effect, step.allow_foreground) {
-        return escalate_key(step, keys, gates);
-    }
-    if !posted {
-        return Ok(ActionResult {
-            effect: ActionEffect::SuspectedNoop,
-            route: ActionRoute::SyntheticEvents,
-            delivery: DeliveryMode::Background,
-            reason: Some("post_to_pid_failed".into()),
-            gates: Some(gates),
-        });
-    }
     Ok(ActionResult {
         effect,
         route: ActionRoute::SyntheticEvents,
         delivery: DeliveryMode::Background,
-        reason: None,
-        gates: Some(gates),
-    })
-}
-
-fn escalate_key(
-    step: &InputStep,
-    keys: &str,
-    gates: crate::protocol::GateReport,
-) -> Result<ActionResult> {
-    let Some(_lock) = FocusGuard::try_acquire() else {
-        return Ok(ActionResult::refused("focus_lock_held", Some(gates)));
-    };
-    if let Some(bundle) = step.bundle_id.as_deref() {
-        let _ = activate_bundle(bundle);
-        thread::sleep(Duration::from_millis(80));
-    }
-    key_combo(keys)?;
-    Ok(ActionResult {
-        effect: ActionEffect::Unverifiable,
-        route: ActionRoute::GlobalInput,
-        delivery: DeliveryMode::Foreground,
-        reason: None,
+        reason: if posted {
+            None
+        } else {
+            Some("post_to_pid_failed".into())
+        },
         gates: Some(gates),
     })
 }
@@ -314,29 +256,11 @@ fn run_type(step: &InputStep, pid: Option<i32>) -> Result<ActionResult> {
                 });
             }
             Err(err) => {
-                if !step.allow_foreground {
-                    return Ok(ActionResult {
-                        effect: ActionEffect::SuspectedNoop,
-                        route: ActionRoute::Accessibility,
-                        delivery: DeliveryMode::Background,
-                        reason: Some(err),
-                        gates: Some(gates),
-                    });
-                }
-                let Some(_lock) = FocusGuard::try_acquire() else {
-                    return Ok(ActionResult::refused("focus_lock_held", Some(gates)));
-                };
-                if let Some(bundle) = step.bundle_id.as_deref() {
-                    let _ = activate_bundle(bundle);
-                    thread::sleep(Duration::from_millis(120));
-                }
-                lumen_platform_macos::inject::type_into_focused(text)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
                 return Ok(ActionResult {
-                    effect: ActionEffect::Unverifiable,
-                    route: ActionRoute::GlobalInput,
-                    delivery: DeliveryMode::Foreground,
-                    reason: Some("pasteboard".into()),
+                    effect: ActionEffect::SuspectedNoop,
+                    route: ActionRoute::Accessibility,
+                    delivery: DeliveryMode::Background,
+                    reason: Some(err),
                     gates: Some(gates),
                 });
             }
@@ -444,6 +368,7 @@ fn hash_effect(before: Option<u64>, after: Option<u64>) -> ActionEffect {
 
 /// PostToPid create-success is not delivery. Steal focus only when the
 /// window hash is unchanged or missing, and the step opted into foreground.
+#[cfg_attr(not(test), allow(dead_code))]
 fn escalate_background_noop(effect: ActionEffect, allow_foreground: bool) -> bool {
     allow_foreground
         && matches!(
@@ -559,6 +484,7 @@ fn click_to_pid(pid: i32, x: f64, y: f64) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 fn click_at(x: f64, y: f64) -> Result<()> {
     unsafe {
         let pt = CGPoint { x, y };
@@ -606,6 +532,7 @@ fn post_mouse_to_pid(pid: i32, x: f64, y: f64) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 fn key_combo(spec: &str) -> Result<()> {
     let (code, flags) = parse_combo(spec)?;
     unsafe {
@@ -736,6 +663,7 @@ extern "C" {
         key_down: bool,
     ) -> *mut std::ffi::c_void;
     fn CGEventSetFlags(event: *mut std::ffi::c_void, flags: u64);
+    #[allow(dead_code)]
     fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
     fn CGEventPostToPid(pid: i32, event: *mut std::ffi::c_void);
     fn CFRelease(cf: *mut std::ffi::c_void);

@@ -314,6 +314,7 @@ fn sanitize_step(step: &SkillStepDto) -> Option<SkillStepDto> {
         rel_x: step.rel_x.filter(|v| (0.0..=1.0).contains(v)),
         rel_y: step.rel_y.filter(|v| (0.0..=1.0).contains(v)),
         note,
+        ..Default::default()
     })
 }
 
@@ -931,6 +932,7 @@ mod tests {
             rel_x: None,
             rel_y: None,
             note: None,
+            ..Default::default()
         }
     }
 

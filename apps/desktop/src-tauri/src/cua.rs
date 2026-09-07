@@ -301,7 +301,6 @@ impl CuaController {
             .map_err(|error| format!("verify Lumen Cua screen capture: {error}"))?;
         Ok(frame.width > 0 && frame.height > 0 && !frame.png_or_jpeg_bytes.is_empty())
     }
-
 }
 
 fn permission_setup_is_ready(status: &CuaStatus) -> bool {
@@ -937,7 +936,9 @@ mod tests {
         let full = temp.path().join("full.json");
         std::fs::write(&full, b"{\"ok\":true}").unwrap();
         assert!(permission_result_has_payload(&full));
-        assert!(!permission_result_has_payload(&temp.path().join("missing.json")));
+        assert!(!permission_result_has_payload(
+            &temp.path().join("missing.json")
+        ));
     }
 
     #[test]

@@ -6,11 +6,11 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use lumen_api::{SkillDto, 
+use lumen_api::{
     ActivitySegmentDto, AiMessageDto, AiThreadDto, AppTotal, CategoryTotal, DayRoastSummaryDto,
     DayRollupDto, DayStatsDto, HistorySlotDto, RangeStatsDto, RoastAppTotal, RoastDomainTotal,
     RoastHour, RoastIndexDto, RoastInputCounts, RoastRecordDto, RoastSceneTotal, RoastTitleTotal,
-    SceneDayDto,
+    SceneDayDto, SkillDto,
 };
 use lumen_types::{
     event_kind, ActivitySession, ArtifactRef, SessionStatus, SourceEvent, SourceKind,
@@ -24,12 +24,12 @@ use crate::categorization::{
 };
 use crate::enrichment::{self, BrewCaskRow};
 use crate::schema::{
-    MIGRATE_V1, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, MIGRATE_V5, MIGRATE_V6, MIGRATE_V7,
-    MIGRATE_V10, MIGRATE_V11, MIGRATE_V8, MIGRATE_V9, SCHEMA_VERSION,
+    MIGRATE_V1, MIGRATE_V10, MIGRATE_V11, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, MIGRATE_V5,
+    MIGRATE_V6, MIGRATE_V7, MIGRATE_V8, MIGRATE_V9, SCHEMA_VERSION,
 };
-use crate::{EventStore, JobRecord, JobStatus, RecoveryPolicy, RecoveryReport, StoreError};
 #[cfg(test)]
 use crate::ReclaimKind;
+use crate::{EventStore, JobRecord, JobStatus, RecoveryPolicy, RecoveryReport, StoreError};
 
 /// Summary of one background enrichment pass.
 #[derive(Debug, Clone, Default)]
@@ -390,10 +390,12 @@ impl SqliteStore {
             }
         }
         tx.commit().map_err(StoreError::db)?;
-        Ok(BlobLimitedAppendOutcome::Appended(IdempotentAppendOutcome {
-            accepted,
-            duplicates,
-        }))
+        Ok(BlobLimitedAppendOutcome::Appended(
+            IdempotentAppendOutcome {
+                accepted,
+                duplicates,
+            },
+        ))
     }
 
     /// Read one source in insertion order without exposing SQLite rowids as
@@ -573,7 +575,10 @@ impl SqliteStore {
             updated_at: now,
             available_at: Some(now),
         };
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         // Skip if derived already exists for ocr-like idempotency at enqueue time
         // (caller may also check; store enforces open-job uniqueness).
         let res = conn.execute(
@@ -608,7 +613,10 @@ impl SqliteStore {
         kind: &str,
         stale_for: chrono::Duration,
     ) -> Result<usize, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         reclaim_stale_running_on(&conn, kind, Utc::now(), stale_for)
     }
 
@@ -680,12 +688,8 @@ impl SqliteStore {
 
         let mut jobs_reclaimed = 0usize;
         for reclaim in &policy.reclaim_kinds {
-            jobs_reclaimed += reclaim_stale_running_on(
-                &tx,
-                &reclaim.kind,
-                now,
-                reclaim.stale_running,
-            )?;
+            jobs_reclaimed +=
+                reclaim_stale_running_on(&tx, &reclaim.kind, now, reclaim.stale_running)?;
         }
 
         tx.commit().map_err(StoreError::db)?;
@@ -950,14 +954,16 @@ impl SqliteStore {
 
         if retention.auto_prune {
             if retention.jobs_retention_hours > 0 {
-                let cutoff = Utc::now() - chrono::Duration::hours(retention.jobs_retention_hours as i64);
+                let cutoff =
+                    Utc::now() - chrono::Duration::hours(retention.jobs_retention_hours as i64);
                 if let Ok(n) = self.prune_completed_jobs(cutoff) {
                     jobs_pruned = n;
                 }
             }
 
             if retention.screenshot_retention_days > 0 {
-                let cutoff = Utc::now() - chrono::Duration::days(retention.screenshot_retention_days as i64);
+                let cutoff =
+                    Utc::now() - chrono::Duration::days(retention.screenshot_retention_days as i64);
                 if let Ok(rep) = self.prune_screenshot_artifacts_before(cutoff) {
                     artifacts_pruned += rep.artifacts_pruned;
                     blobs_deleted += rep.blobs_deleted;
@@ -1021,7 +1027,11 @@ impl SqliteStore {
     }
 
     /// Claim pending jobs that are due (`available_at` null or <= now).
-    pub fn claim_pending_jobs(&self, kind: &str, limit: usize) -> Result<Vec<JobRecord>, StoreError> {
+    pub fn claim_pending_jobs(
+        &self,
+        kind: &str,
+        limit: usize,
+    ) -> Result<Vec<JobRecord>, StoreError> {
         let mut conn = self
             .conn
             .lock()
@@ -1098,7 +1108,10 @@ impl SqliteStore {
         error: Option<&str>,
         available_at: Option<DateTime<Utc>>,
     ) -> Result<(), StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let now = Utc::now();
         conn.execute(
             r#"UPDATE jobs SET status = ?1, last_error = ?2, updated_at = ?3, available_at = ?4
@@ -1181,7 +1194,10 @@ impl SqliteStore {
             return Ok(vec![]);
         }
         let limit = limit.clamp(1, 200);
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
 
         let fts_ok = conn
             .query_row(
@@ -1220,24 +1236,21 @@ impl SqliteStore {
                         let mut ok = true;
                         for r in rows {
                             match r {
-                                Ok((eid, sid, ets, conf, text, snip)) => {
-                                    match parse_uuid(eid) {
-                                        Ok(event_id) => out.push(OcrSearchHit {
-                                            event_id,
-                                            session_id: sid
-                                                .and_then(|s| Uuid::parse_str(&s).ok()),
-                                            event_ts: ets.and_then(|s| {
-                                                DateTime::parse_from_rfc3339(&s)
-                                                    .ok()
-                                                    .map(|d| d.with_timezone(&Utc))
-                                            }),
-                                            confidence: conf,
-                                            snippet: snip,
-                                            text_preview: preview_text(&text, 240),
+                                Ok((eid, sid, ets, conf, text, snip)) => match parse_uuid(eid) {
+                                    Ok(event_id) => out.push(OcrSearchHit {
+                                        event_id,
+                                        session_id: sid.and_then(|s| Uuid::parse_str(&s).ok()),
+                                        event_ts: ets.and_then(|s| {
+                                            DateTime::parse_from_rfc3339(&s)
+                                                .ok()
+                                                .map(|d| d.with_timezone(&Utc))
                                         }),
-                                        Err(_) => ok = false,
-                                    }
-                                }
+                                        confidence: conf,
+                                        snippet: snip,
+                                        text_preview: preview_text(&text, 240),
+                                    }),
+                                    Err(_) => ok = false,
+                                },
                                 Err(_) => ok = false,
                             }
                         }
@@ -1306,7 +1319,9 @@ impl SqliteStore {
                 )
                 .map_err(StoreError::db)?;
             let rows = stmt
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
                 .map_err(StoreError::db)?;
             let mut out = Vec::new();
             for r in rows {
@@ -1316,7 +1331,8 @@ impl SqliteStore {
         };
 
         let tx = conn.transaction().map_err(StoreError::db)?;
-        tx.execute_batch("DELETE FROM ocr_docs;").map_err(StoreError::db)?;
+        tx.execute_batch("DELETE FROM ocr_docs;")
+            .map_err(StoreError::db)?;
         // Contentless/external FTS rebuild (ignore if FTS unavailable).
         let _ = tx.execute_batch("INSERT INTO ocr_fts(ocr_fts) VALUES('delete-all');");
         let mut n = 0usize;
@@ -1330,7 +1346,10 @@ impl SqliteStore {
     }
 
     pub fn ocr_doc_count(&self) -> Result<usize, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let n: i64 = conn
             .query_row("SELECT COUNT(1) FROM ocr_docs", [], |r| r.get(0))
             .map_err(StoreError::db)?;
@@ -1344,7 +1363,10 @@ impl SqliteStore {
         limit: usize,
         max_chars: usize,
     ) -> Result<Vec<String>, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let mut stmt = conn
             .prepare(
                 "SELECT text FROM ocr_docs WHERE event_ts IS NOT NULL \
@@ -1375,7 +1397,10 @@ impl SqliteStore {
         from_day: &str,
         to_day: &str,
     ) -> Result<(usize, usize, usize), StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let events: i64 = conn
             .query_row(
                 "SELECT COUNT(1) FROM events WHERE date(ts,'localtime') BETWEEN ?1 AND ?2",
@@ -1404,7 +1429,10 @@ impl SqliteStore {
     }
 
     pub fn has_derived(&self, event_id: Uuid, kind: &str) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let n: i64 = conn
             .query_row(
                 r#"SELECT COUNT(1) FROM derived WHERE event_id = ?1 AND kind = ?2"#,
@@ -1433,14 +1461,17 @@ impl SqliteStore {
     }
 
     pub fn job_counts_by_status(&self, kind: &str) -> Result<Vec<(String, i64)>, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let mut stmt = conn
-            .prepare(
-                r#"SELECT status, COUNT(1) FROM jobs WHERE kind = ?1 GROUP BY status"#,
-            )
+            .prepare(r#"SELECT status, COUNT(1) FROM jobs WHERE kind = ?1 GROUP BY status"#)
             .map_err(StoreError::db)?;
         let rows = stmt
-            .query_map(params![kind], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .query_map(params![kind], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
             .map_err(StoreError::db)?;
         let mut out = Vec::new();
         for r in rows {
@@ -1449,8 +1480,14 @@ impl SqliteStore {
         Ok(out)
     }
 
-    pub fn list_derived_for_event(&self, event_id: Uuid) -> Result<Vec<(Uuid, String, String)>, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+    pub fn list_derived_for_event(
+        &self,
+        event_id: Uuid,
+    ) -> Result<Vec<(Uuid, String, String)>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let mut stmt = conn
             .prepare(
                 r#"SELECT id, kind, body FROM derived WHERE event_id = ?1 ORDER BY created_at ASC"#,
@@ -1485,7 +1522,10 @@ impl SqliteStore {
         event_kind: &str,
         derived_kind: &str,
     ) -> Result<Vec<SessionDerivedRow>, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let mut stmt = conn
             .prepare(
                 r#"SELECT e.id, e.ts, e.payload, d.body
@@ -1524,7 +1564,10 @@ impl SqliteStore {
     /// Enriched timeline for product UI (newest first).
     pub fn list_timeline(&self, q: TimelineQuery) -> Result<Vec<TimelineItem>, StoreError> {
         let limit = q.limit.clamp(1, 500);
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let mut sql = String::from(
             r#"SELECT e.id, e.source, e.kind, e.ts, e.session_id, e.payload,
                       a.media_type, a.path, a.bytes,
@@ -1668,7 +1711,9 @@ impl SqliteStore {
                 let app = item.app_name.as_deref().unwrap_or("").to_lowercase();
                 let title = item.window_title.as_deref().unwrap_or("").to_lowercase();
                 let text = item.text_preview.as_deref().unwrap_or("").to_lowercase();
-                app.contains(&app_filter) || title.contains(&app_filter) || text.contains(&app_filter)
+                app.contains(&app_filter)
+                    || title.contains(&app_filter)
+                    || text.contains(&app_filter)
             })
             .collect();
         // Already newest-first from SQL; re-sort after filter keep order
@@ -1719,7 +1764,10 @@ impl SqliteStore {
         // was off all day). The projection is the time-tracking source of
         // truth, the count is a coarse fallback.
         let top_apps: Vec<String> = {
-            let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| StoreError::Other("lock poisoned".into()))?;
             let mut stmt = conn
                 .prepare(
                     r#"SELECT app_name, SUM(duration_ms) AS ms, COUNT(1) AS segs
@@ -1818,7 +1866,9 @@ impl SqliteStore {
             .unwrap_or_default();
         let mut pts: Vec<(i64, bool)> = Vec::with_capacity(rows.len());
         for (ts, payload) in &rows {
-            let Ok(t) = DateTime::parse_from_rfc3339(ts) else { continue };
+            let Ok(t) = DateTime::parse_from_rfc3339(ts) else {
+                continue;
+            };
             let active = serde_json::from_str::<serde_json::Value>(payload)
                 .ok()
                 .and_then(|v| {
@@ -1832,7 +1882,11 @@ impl SqliteStore {
             return Vec::new();
         }
         // Median inter-event gap ≈ flush interval (clamped to sane bounds).
-        let mut gaps: Vec<i64> = pts.windows(2).map(|w| w[1].0 - w[0].0).filter(|g| *g > 0).collect();
+        let mut gaps: Vec<i64> = pts
+            .windows(2)
+            .map(|w| w[1].0 - w[0].0)
+            .filter(|g| *g > 0)
+            .collect();
         let flush_ms = if gaps.is_empty() {
             30_000
         } else {
@@ -1916,7 +1970,10 @@ impl SqliteStore {
     pub fn day_roast_summary(&self, day: &str) -> Result<DayRoastSummaryDto, StoreError> {
         let stats = self.activity_day_stats(day, GroupBy::App)?;
         let scenes = self.list_scene_day(day)?;
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
 
         let total = stats.total_active_ms.max(1) as f64;
 
@@ -1952,8 +2009,7 @@ impl SqliteStore {
             let mut out = Vec::new();
             for r in rows {
                 let (raw, ms) = r.map_err(StoreError::db)?;
-                let domain = crate::categorization::registrable_domain(&raw)
-                    .unwrap_or(raw);
+                let domain = crate::categorization::registrable_domain(&raw).unwrap_or(raw);
                 out.push(RoastDomainTotal { domain, ms });
             }
             // Merge same-domain rows (registrable_domain may collapse several).
@@ -2027,14 +2083,19 @@ impl SqliteStore {
                 (merged, Some("interactions"))
             } else {
                 let ranges = Self::input_active_ranges(&conn, day);
-                let attr = if ranges.is_empty() { None } else { Some("input.stats") };
+                let attr = if ranges.is_empty() {
+                    None
+                } else {
+                    Some("input.stats")
+                };
                 (ranges, attr)
             };
         let has_input = attribution.is_some();
         // With point-precise interactions a switch is user-driven only when
         // one happened right at the boundary; with coarse 5-min counters we
         // have to widen the window.
-        let (switch_before_ms, switch_after_ms): (i64, i64) = if attribution == Some("interactions") {
+        let (switch_before_ms, switch_after_ms): (i64, i64) = if attribution == Some("interactions")
+        {
             (3_000, 1_500)
         } else {
             (45_000, 15_000)
@@ -2131,7 +2192,10 @@ impl SqliteStore {
             all.into_iter()
                 .take(8)
                 .map(|((app, title), v)| {
-                    let acts = title_acts.get(&(app.clone(), title.clone())).copied().unwrap_or([0, 0, 0]);
+                    let acts = title_acts
+                        .get(&(app.clone(), title.clone()))
+                        .copied()
+                        .unwrap_or([0, 0, 0]);
                     RoastTitleTotal {
                         app,
                         title,
@@ -2187,19 +2251,37 @@ impl SqliteStore {
                 any = true;
                 macro_rules! add {
                     ($field:ident) => {
-                        total.$field += v.get(stringify!($field))
+                        total.$field += v
+                            .get(stringify!($field))
                             .and_then(serde_json::Value::as_u64)
                             .unwrap_or(0);
                     };
                 }
-                add!(key_delete); add!(key_tab); add!(key_esc); add!(key_enter);
-                add!(key_arrow); add!(key_space);
-                add!(combo_copy); add!(combo_paste); add!(combo_cut); add!(combo_undo);
-                add!(combo_selectall); add!(combo_find); add!(combo_close);
-                add!(combo_new); add!(combo_save);
-                add!(mouse_left); add!(mouse_right); add!(mouse_other); add!(mouse_double);
+                add!(key_delete);
+                add!(key_tab);
+                add!(key_esc);
+                add!(key_enter);
+                add!(key_arrow);
+                add!(key_space);
+                add!(combo_copy);
+                add!(combo_paste);
+                add!(combo_cut);
+                add!(combo_undo);
+                add!(combo_selectall);
+                add!(combo_find);
+                add!(combo_close);
+                add!(combo_new);
+                add!(combo_save);
+                add!(mouse_left);
+                add!(mouse_right);
+                add!(mouse_other);
+                add!(mouse_double);
             }
-            if any { Some(total) } else { None }
+            if any {
+                Some(total)
+            } else {
+                None
+            }
         };
         drop(conn);
 
@@ -2423,8 +2505,11 @@ impl SqliteStore {
             .conn
             .lock()
             .map_err(|_| StoreError::Other("lock poisoned".into()))?;
-        conn.execute("DELETE FROM ai_messages WHERE thread_id = ?1", params![thread_id])
-            .map_err(StoreError::db)?;
+        conn.execute(
+            "DELETE FROM ai_messages WHERE thread_id = ?1",
+            params![thread_id],
+        )
+        .map_err(StoreError::db)?;
         conn.execute("DELETE FROM ai_threads WHERE id = ?1", params![thread_id])
             .map_err(StoreError::db)?;
         Ok(())
@@ -2529,7 +2614,10 @@ impl SqliteStore {
 
     /// start time. Returns the dashboard's timeline data.
     pub fn list_activity_segments(&self, day: &str) -> Result<Vec<ActivitySegmentDto>, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let mut stmt = conn
             .prepare(
                 r#"SELECT seg_id, day, app_name, bundle_id, window_title, url,
@@ -2545,11 +2633,13 @@ impl SqliteStore {
                 let started: String = row.get(6)?;
                 let started_at = chrono::DateTime::parse_from_rfc3339(&started)
                     .map(|d| d.with_timezone(&Utc))
-                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-                        6,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    ))?;
+                    .map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            6,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })?;
                 let ended: Option<String> = row.get(7)?;
                 let ended_at = ended
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
@@ -2569,7 +2659,9 @@ impl SqliteStore {
                     category: row.get(11)?,
                     productivity_level: row.get(12)?,
                     event_count: row.get(13)?,
-                    source: row.get::<_, Option<String>>(14)?.unwrap_or_else(|| "auto".into()),
+                    source: row
+                        .get::<_, Option<String>>(14)?
+                        .unwrap_or_else(|| "auto".into()),
                     scene_label: None,
                 })
             })
@@ -2850,9 +2942,7 @@ impl SqliteStore {
         }
         Ok(slots
             .into_iter()
-            .filter(|s| {
-                s.slot_end <= now && s.narrative_status == "ready" && !s.skill_checked
-            })
+            .filter(|s| s.slot_end <= now && s.narrative_status == "ready" && !s.skill_checked)
             .take(limit.max(1))
             .collect())
     }
@@ -2975,9 +3065,7 @@ impl SqliteStore {
                  FROM skills ORDER BY updated_at DESC",
             )
             .map_err(StoreError::db)?;
-        let rows = stmt
-            .query_map([], skill_row)
-            .map_err(StoreError::db)?;
+        let rows = stmt.query_map([], skill_row).map_err(StoreError::db)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::db)
     }
 
@@ -3023,7 +3111,11 @@ impl SqliteStore {
     /// One enabled skill whose app list contains `app`, least-recently
     /// suggested, honoring a per-skill cooldown (default 1 day). For the
     /// menu-bar 试试：X nudge — non-intrusive by design.
-    pub fn suggest_skill_for_app(&self, app: &str, cooldown_h: i64) -> Result<Option<SkillDto>, StoreError> {
+    pub fn suggest_skill_for_app(
+        &self,
+        app: &str,
+        cooldown_h: i64,
+    ) -> Result<Option<SkillDto>, StoreError> {
         let conn = self
             .conn
             .lock()
@@ -3036,9 +3128,7 @@ impl SqliteStore {
                  ORDER BY COALESCE(last_suggested_at, '1970-01-01') ASC LIMIT 20",
             )
             .map_err(StoreError::db)?;
-        let rows = stmt
-            .query_map([], skill_row)
-            .map_err(StoreError::db)?;
+        let rows = stmt.query_map([], skill_row).map_err(StoreError::db)?;
         let lower = app.to_lowercase();
         let now = Utc::now();
         let mut candidate: Option<SkillDto> = None;
@@ -3080,7 +3170,10 @@ impl SqliteStore {
         day: &str,
         group_by: GroupBy,
     ) -> Result<DayStatsDto, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
 
         // Active/idle totals + context switches (count of active segments).
         let (total_active_ms, total_idle_ms, context_switches): (i64, i64, i64) = conn
@@ -3108,7 +3201,12 @@ impl SqliteStore {
                    FROM activity_segments
                    WHERE day = ?1 AND is_idle = 0"#,
                 params![day],
-                |row| Ok((row.get::<_, f64>(0)?, row.get::<_, Option<f64>>(1)?.unwrap_or(0.0))),
+                |row| {
+                    Ok((
+                        row.get::<_, f64>(0)?,
+                        row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                    ))
+                },
             )
             .map_err(StoreError::db)?;
         let pulse_score = if classified_ms > 0.0 {
@@ -3270,7 +3368,10 @@ impl SqliteStore {
         to_day: &str,
         group_by: GroupBy,
     ) -> Result<RangeStatsDto, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
 
         // Range totals + pulse.
         let (total_active_ms, total_idle_ms): (i64, i64) = conn
@@ -3296,7 +3397,12 @@ impl SqliteStore {
                    FROM activity_segments
                    WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0"#,
                 params![from_day, to_day],
-                |row| Ok((row.get::<_, f64>(0)?, row.get::<_, Option<f64>>(1)?.unwrap_or(0.0))),
+                |row| {
+                    Ok((
+                        row.get::<_, f64>(0)?,
+                        row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                    ))
+                },
             )
             .map_err(StoreError::db)?;
         let pulse_score = if classified_ms > 0.0 {
@@ -3358,10 +3464,11 @@ impl SqliteStore {
         use std::collections::BTreeMap;
         let mut cats_by_day: BTreeMap<String, Vec<CategoryTotal>> = BTreeMap::new();
         for (day, category, level, ms) in cat_rows {
-            cats_by_day
-                .entry(day)
-                .or_default()
-                .push(CategoryTotal { category, productivity_level: level, ms });
+            cats_by_day.entry(day).or_default().push(CategoryTotal {
+                category,
+                productivity_level: level,
+                ms,
+            });
         }
         for v in cats_by_day.values_mut() {
             v.sort_by(|a, b| b.ms.cmp(&a.ms));
@@ -3384,7 +3491,11 @@ impl SqliteStore {
                         };
                         (w + weight * ct.ms as f64, c + ct.ms as f64)
                     });
-                if c > 0.0 { Some(100.0 * w / c) } else { None }
+                if c > 0.0 {
+                    Some(100.0 * w / c)
+                } else {
+                    None
+                }
             };
             days.push(DayRollupDto {
                 day,
@@ -3509,53 +3620,59 @@ impl SqliteStore {
             .format("%Y-%m-%d")
             .to_string();
         let duration_ms = (ended_at - started_at).num_milliseconds().max(0) as i64;
-        let seg_id = blake3::hash(
-            format!("manual|{day}|{ts_str}|{app_name}").as_bytes(),
-        )
-        .to_hex()
-        .to_string();
+        let seg_id = blake3::hash(format!("manual|{day}|{ts_str}|{app_name}").as_bytes())
+            .to_hex()
+            .to_string();
         let now = Utc::now().to_rfc3339();
 
         // Classify unless the caller pinned a category explicitly.
-        let (eff_cat, eff_level): (Option<String>, Option<String>) = match (category, productivity_level) {
-            (Some(c), l) => (Some(c.to_string()), l.map(str::to_string)),
-            (None, _) => {
-                let user_rules = {
-                    let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
-                    let raw: Option<String> = conn
-                        .query_row(
-                            "SELECT value FROM kv WHERE key = 'activity.category_rules'",
-                            [],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(StoreError::db)?;
-                    drop(conn);
-                    match raw {
-                        Some(json) => serde_json::from_str::<Vec<CategoryRule>>(&json)
-                            .unwrap_or_default(),
-                        None => Vec::new(),
-                    }
-                };
-                let c = crate::categorization::classify(
-                    &ActivityFields {
-                        bundle_id: None,
-                        app_name: Some(app_name),
-                        window_title,
-                        url: None,
-                        ls_category_type: None,
-                    },
-                    &user_rules,
-                    None,
-                );
-                (
-                    c.category,
-                    c.level.map(productivity_level_str).map(str::to_string),
-                )
-            }
-        };
+        let (eff_cat, eff_level): (Option<String>, Option<String>) =
+            match (category, productivity_level) {
+                (Some(c), l) => (Some(c.to_string()), l.map(str::to_string)),
+                (None, _) => {
+                    let user_rules = {
+                        let conn = self
+                            .conn
+                            .lock()
+                            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+                        let raw: Option<String> = conn
+                            .query_row(
+                                "SELECT value FROM kv WHERE key = 'activity.category_rules'",
+                                [],
+                                |row| row.get(0),
+                            )
+                            .optional()
+                            .map_err(StoreError::db)?;
+                        drop(conn);
+                        match raw {
+                            Some(json) => {
+                                serde_json::from_str::<Vec<CategoryRule>>(&json).unwrap_or_default()
+                            }
+                            None => Vec::new(),
+                        }
+                    };
+                    let c = crate::categorization::classify(
+                        &ActivityFields {
+                            bundle_id: None,
+                            app_name: Some(app_name),
+                            window_title,
+                            url: None,
+                            ls_category_type: None,
+                        },
+                        &user_rules,
+                        None,
+                    );
+                    (
+                        c.category,
+                        c.level.map(productivity_level_str).map(str::to_string),
+                    )
+                }
+            };
 
-        let mut conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let tx = conn.transaction().map_err(StoreError::db)?;
         tx.execute(
             r#"INSERT OR IGNORE INTO activity_segments
@@ -3584,7 +3701,10 @@ impl SqliteStore {
     /// Delete a manual segment by seg_id (only manual entries are deletable;
     /// auto-tracked segments are regenerated from events and not user-removable).
     pub fn delete_manual_segment(&self, seg_id: &str) -> Result<(), StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let n = conn
             .execute(
                 "DELETE FROM activity_segments WHERE seg_id = ?1 AND source = 'manual'",
@@ -3601,7 +3721,10 @@ impl SqliteStore {
 
     /// Get the current user-defined category rules (from the `kv` table).
     pub fn list_category_rules(&self) -> Result<Vec<CategoryRule>, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let raw: Option<String> = conn
             .query_row(
                 "SELECT value FROM kv WHERE key = 'activity.category_rules'",
@@ -3626,7 +3749,10 @@ impl SqliteStore {
         let json = serde_json::to_string(&rules)
             .map_err(|e| StoreError::Other(format!("serialize category rules: {e}")))?;
 
-        let mut conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let tx = conn.transaction().map_err(StoreError::db)?;
 
         // Upsert the rule list.
@@ -4036,8 +4162,14 @@ impl SqliteStore {
     }
 
     /// Load first artifact bytes for an event (relative path under data_dir).
-    pub fn load_first_artifact_bytes(&self, event_id: Uuid) -> Result<Option<(String, Vec<u8>)>, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+    pub fn load_first_artifact_bytes(
+        &self,
+        event_id: Uuid,
+    ) -> Result<Option<(String, Vec<u8>)>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let row = conn
             .query_row(
                 r#"SELECT media_type, path FROM artifacts WHERE event_id = ?1 ORDER BY ordinal ASC LIMIT 1"#,
@@ -4056,8 +4188,14 @@ impl SqliteStore {
 
     /// Load an event's payload JSON by event id. Used by the AX worker to
     /// extract the `pid` field from a screenshot event.
-    pub fn get_event_payload(&self, event_id: Uuid) -> Result<Option<serde_json::Value>, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+    pub fn get_event_payload(
+        &self,
+        event_id: Uuid,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let payload_str: Option<String> = conn
             .query_row(
                 r#"SELECT payload FROM events WHERE id = ?1"#,
@@ -4068,9 +4206,8 @@ impl SqliteStore {
             .map_err(StoreError::db)?;
         match payload_str {
             Some(s) => {
-                let v: serde_json::Value = serde_json::from_str(&s).map_err(|e| {
-                    StoreError::Other(format!("parse event payload: {e}"))
-                })?;
+                let v: serde_json::Value = serde_json::from_str(&s)
+                    .map_err(|e| StoreError::Other(format!("parse event payload: {e}")))?;
                 Ok(Some(v))
             }
             None => Ok(None),
@@ -4078,7 +4215,10 @@ impl SqliteStore {
     }
 
     pub fn list_jobs(&self, limit: usize) -> Result<Vec<JobRecord>, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let mut stmt = conn
             .prepare(
                 r#"SELECT id, event_id, kind, status, attempts, last_error, updated_at, available_at
@@ -4142,7 +4282,10 @@ impl SqliteStore {
     }
 
     fn list_recent_sync(&self, limit: usize) -> Result<Vec<SourceEvent>, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let mut stmt = conn
             .prepare(
                 r#"SELECT id, source, kind, ts, session_id, payload
@@ -4175,7 +4318,10 @@ impl SqliteStore {
     }
 
     fn get_sync(&self, id: Uuid) -> Result<Option<SourceEvent>, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let row = conn
             .query_row(
                 r#"SELECT id, source, kind, ts, session_id, payload FROM events WHERE id = ?1"#,
@@ -4231,7 +4377,10 @@ impl SqliteStore {
     }
 
     fn len_sync(&self) -> Result<usize, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
             .map_err(StoreError::db)?;
@@ -4246,7 +4395,10 @@ impl SqliteStore {
 
     /// Count persisted events of a specific kind.
     pub fn event_count_by_kind(&self, kind: &str) -> Result<usize, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM events WHERE kind = ?1",
@@ -4437,7 +4589,9 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
                 )
                 .map_err(StoreError::db)?;
             let rows = stmt
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
                 .map_err(StoreError::db)?;
             let mut out = Vec::new();
             for r in rows {
@@ -4580,7 +4734,12 @@ fn upsert_ocr_doc_tx(
             .query_row(
                 r#"SELECT session_id, ts FROM events WHERE id = ?1"#,
                 params![event_id.to_string()],
-                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                    ))
+                },
             )
             .optional()
             .map_err(StoreError::db)?;
@@ -4623,7 +4782,12 @@ fn upsert_ocr_doc_conn(
             .query_row(
                 r#"SELECT session_id, ts FROM events WHERE id = ?1"#,
                 params![event_id.to_string()],
-                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                    ))
+                },
             )
             .optional()
             .map_err(StoreError::db)?;
@@ -4707,10 +4871,7 @@ fn is_cjk(ch: char) -> bool {
 
 /// Escape LIKE wildcards; return None if nothing searchable remains.
 fn like_pattern(raw: &str) -> Option<String> {
-    let trimmed: String = raw
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
+    let trimmed: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
     if trimmed.is_empty() {
         return None;
     }
@@ -4850,19 +5011,20 @@ fn insert_event_with_mode(
         r#"INSERT INTO events (id, source, kind, ts, session_id, payload, created_at)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#
     };
-    let inserted = tx.execute(
-        statement,
-        params![
-            event.id.to_string(),
-            source,
-            event.kind,
-            event.ts.to_rfc3339(),
-            session,
-            payload,
-            created,
-        ],
-    )
-    .map_err(StoreError::db)?;
+    let inserted = tx
+        .execute(
+            statement,
+            params![
+                event.id.to_string(),
+                source,
+                event.kind,
+                event.ts.to_rfc3339(),
+                session,
+                payload,
+                created,
+            ],
+        )
+        .map_err(StoreError::db)?;
     if inserted == 0 {
         return Ok(false);
     }
@@ -4966,7 +5128,14 @@ fn top_sites<P: rusqlite::Params>(
     // representative label that's far more readable than the bare domain.
     let mut acc: BTreeMap<
         String,
-        (i64, i64, Option<String>, Option<String>, i64, Option<String>),
+        (
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+            i64,
+            Option<String>,
+        ),
     > = BTreeMap::new();
     let rows = stmt
         .query_map(params, |row| {
@@ -4982,9 +5151,7 @@ fn top_sites<P: rusqlite::Params>(
     for r in rows {
         let (url, ms, category, level, title) = r.map_err(StoreError::db)?;
         if let Some(domain) = registrable_domain(&url) {
-            let e = acc
-                .entry(domain)
-                .or_insert((0, 0, None, None, 0, None));
+            let e = acc.entry(domain).or_insert((0, 0, None, None, 0, None));
             e.0 += ms;
             e.1 += 1;
             match (&e.2, &category) {
@@ -5006,15 +5173,17 @@ fn top_sites<P: rusqlite::Params>(
     }
     let mut out: Vec<AppTotal> = acc
         .into_iter()
-        .map(|(domain, (ms, segs, category, level, _best_ms, title))| AppTotal {
-            app_name: domain,
-            bundle_id: None,
-            ms,
-            category,
-            productivity_level: level,
-            segment_count: segs,
-            title,
-        })
+        .map(
+            |(domain, (ms, segs, category, level, _best_ms, title))| AppTotal {
+                app_name: domain,
+                bundle_id: None,
+                ms,
+                category,
+                productivity_level: level,
+                segment_count: segs,
+                title,
+            },
+        )
         .collect();
     // Sort by duration desc, take top N.
     out.sort_by(|a, b| b.ms.cmp(&a.ms));
@@ -5076,7 +5245,10 @@ fn project_activity_event(
     let ts_str = ts.to_rfc3339();
     // Local-day bucket (the day the user experienced, not UTC). chrono Local
     // gives us the system timezone; convert the UTC event ts to it.
-    let day = ts.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string();
+    let day = ts
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
 
     // Carry-forward bundle when the probe briefly returns name without bid
     // (seen in production: Comet 1/417 events, Ghostty historical null rows).
@@ -5151,9 +5323,7 @@ fn project_activity_event(
         ORDER BY ended_at DESC LIMIT 1"#;
     let existing: Option<(String, String)> = tx
         .query_row(
-            &format!(
-                "SELECT seg_id, started_at FROM activity_segments WHERE {identity_match}"
-            ),
+            &format!("SELECT seg_id, started_at FROM activity_segments WHERE {identity_match}"),
             params![
                 app_name,
                 bundle_id,
@@ -5189,16 +5359,24 @@ fn project_activity_event(
         // Identity change (or first sample): finalize the previously open
         // segment so time from its last heartbeat → this event is attributed
         // to the *previous* app/title, not dropped as a 0ms stub.
-        close_open_activity_segment(tx, &ts_str, now.as_str(), app_name, bundle_id, window_title, url, is_idle, is_locked)?;
+        close_open_activity_segment(
+            tx,
+            &ts_str,
+            now.as_str(),
+            app_name,
+            bundle_id,
+            window_title,
+            url,
+            is_idle,
+            is_locked,
+        )?;
 
         // New segment. Deterministic id so replays are idempotent. Includes
         // `url` so a browser tab change produces a distinct segment.
         let identity = format!(
             "{day}|{app_name:?}|{bundle_id:?}|{window_title:?}|{url:?}|{is_idle}|{is_locked}|{ts_str}"
         );
-        let seg_id = blake3::hash(identity.as_bytes())
-            .to_hex()
-            .to_string();
+        let seg_id = blake3::hash(identity.as_bytes()).to_hex().to_string();
         let level_str = classification.level.map(productivity_level_str);
         tx.execute(
             r#"INSERT OR IGNORE INTO activity_segments
@@ -5478,7 +5656,8 @@ fn project_browser_event(
         .find_map(|artifact| artifact.content_hash.as_deref())
         .or_else(|| data.get("canonical").and_then(serde_json::Value::as_str))
         .or_else(|| event.payload.get("url").and_then(serde_json::Value::as_str));
-    let content_id = identity_source.map(|value| blake3::hash(value.as_bytes()).to_hex().to_string());
+    let content_id =
+        identity_source.map(|value| blake3::hash(value.as_bytes()).to_hex().to_string());
     let existing: Option<(Option<String>, String)> = tx
         .query_row(
             "SELECT content_id, snapshot_hashes FROM browser_visits WHERE visit_id = ?1",
@@ -5593,10 +5772,7 @@ fn upsert_session_tx(
     upsert_session_on(tx, session)
 }
 
-fn upsert_session_on(
-    conn: &Connection,
-    session: &ActivitySession,
-) -> Result<(), StoreError> {
+fn upsert_session_on(conn: &Connection, session: &ActivitySession) -> Result<(), StoreError> {
     conn.execute(
         r#"INSERT INTO activity_sessions
            (id, started_at, ended_at, primary_app, primary_bundle, trigger, snapshot_count, status)
@@ -5667,9 +5843,7 @@ fn load_artifacts(conn: &Connection, event_id: Uuid) -> Result<Vec<ArtifactRef>,
                 })?,
                 media_type: row.get(1)?,
                 path: row.get(2)?,
-                bytes: row
-                    .get::<_, Option<i64>>(3)?
-                    .map(|b| b as u64),
+                bytes: row.get::<_, Option<i64>>(3)?.map(|b| b as u64),
                 content_hash: row.get(4)?,
             })
         })
@@ -5761,11 +5935,7 @@ mod tests {
                     event_kind::AUDIO_CHUNK_V1,
                     json!({"text": "two"}),
                 ),
-                SourceEvent::new(
-                    SourceKind::Screen,
-                    event_kind::SCREENSHOT_V1,
-                    json!({}),
-                ),
+                SourceEvent::new(SourceKind::Screen, event_kind::SCREENSHOT_V1, json!({})),
             ])
             .await
             .unwrap();
@@ -5827,7 +5997,10 @@ mod tests {
                 .unwrap(),
             b"Synthetic article body"
         );
-        assert_eq!(store.blobs().total_bytes().unwrap(), b"Synthetic article body".len() as u64);
+        assert_eq!(
+            store.blobs().total_bytes().unwrap(),
+            b"Synthetic article body".len() as u64
+        );
     }
 
     #[test]
@@ -6008,7 +6181,10 @@ mod tests {
         assert!(visit.last_visible_at.is_some());
         assert_eq!(visit.revisit_index, Some(0));
         assert_eq!(visit.opener_tab_id, Some(7));
-        assert_eq!(visit.referrer.as_deref(), Some("https://example.test/index"));
+        assert_eq!(
+            visit.referrer.as_deref(),
+            Some("https://example.test/index")
+        );
         assert_eq!(visit.transition.as_deref(), Some("typed"));
         assert_eq!(visit.snapshot_hashes.len(), 1);
         assert_eq!(visit.close_reason.as_deref(), Some("pagehide"));
@@ -6104,12 +6280,19 @@ mod tests {
         let eid = ev.id;
         store.append_event(ev).unwrap();
         store.enqueue_job(eid, "ax_screen").unwrap();
-        let n = store.skip_pending_jobs("ax_screen", "ax_unavailable").unwrap();
+        let n = store
+            .skip_pending_jobs("ax_screen", "ax_unavailable")
+            .unwrap();
         assert_eq!(n, 1);
         let jobs = store.list_jobs(10).unwrap();
         assert_eq!(jobs[0].status, JobStatus::Skipped);
         assert_eq!(jobs[0].last_error.as_deref(), Some("ax_unavailable"));
-        assert_eq!(store.skip_pending_jobs("ax_screen", "ax_unavailable").unwrap(), 0);
+        assert_eq!(
+            store
+                .skip_pending_jobs("ax_screen", "ax_unavailable")
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -6316,8 +6499,12 @@ mod tests {
         );
         let eid = event.id;
         store.append(vec![event]).await.unwrap();
-        let a = store.insert_derived(eid, "ocr.v1", r#"{"text":"a"}"#).unwrap();
-        let b = store.insert_derived(eid, "ocr.v1", r#"{"text":"b"}"#).unwrap();
+        let a = store
+            .insert_derived(eid, "ocr.v1", r#"{"text":"a"}"#)
+            .unwrap();
+        let b = store
+            .insert_derived(eid, "ocr.v1", r#"{"text":"b"}"#)
+            .unwrap();
         assert_eq!(a, b);
         let list = store.list_derived_for_event(eid).unwrap();
         assert_eq!(list.len(), 1);
@@ -6328,11 +6515,7 @@ mod tests {
     async fn ocr_search_indexes_on_insert_derived() {
         let dir = tempdir().unwrap();
         let store = SqliteStore::open(dir.path()).unwrap();
-        let event = SourceEvent::new(
-            SourceKind::Screen,
-            event_kind::SCREENSHOT_V1,
-            json!({}),
-        );
+        let event = SourceEvent::new(SourceKind::Screen, event_kind::SCREENSHOT_V1, json!({}));
         let eid = event.id;
         store.append(vec![event]).await.unwrap();
         store
@@ -6487,7 +6670,10 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(1) FROM activity_segments", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 3, "three distinct segments: safari, mail, safari-idle");
+        assert_eq!(
+            count, 3,
+            "three distinct segments: safari, mail, safari-idle"
+        );
 
         // Safari active segment: closed on switch at t=12 → 12000ms.
         let safari_ms: i64 = conn
@@ -6725,13 +6911,9 @@ mod tests {
         // gmail ran t=20 → t=30, so 10s. Total time is preserved across the split.
         assert_eq!(rows[0].0.as_deref(), Some("https://github.com/foo/bar"));
         assert_eq!(rows[0].1, 20_000, "github segment should cover 0→20s");
-        assert_eq!(
-            rows[1].0.as_deref(),
-            Some("https://mail.google.com/inbox")
-        );
+        assert_eq!(rows[1].0.as_deref(), Some("https://mail.google.com/inbox"));
         assert_eq!(rows[1].1, 10_000, "gmail segment should cover 20→30s");
     }
-
 
     /// A single-sample app that never gets a follow-up event stays at 0ms.
     /// `activity_day_stats` must not list it in top_apps — the 0ms row is real
@@ -6763,22 +6945,28 @@ mod tests {
         };
 
         // Safari gets two samples 10s apart -> 10000ms (closed on switch).
-        store.append_event(mk(0, "Safari", "com.apple.Safari")).unwrap();
-        store.append_event(mk(10, "Safari", "com.apple.Safari")).unwrap();
+        store
+            .append_event(mk(0, "Safari", "com.apple.Safari"))
+            .unwrap();
+        store
+            .append_event(mk(10, "Safari", "com.apple.Safari"))
+            .unwrap();
         // Comet gets exactly one sample, then focus leaves to Activity Monitor.
         // Comet's segment stays at 0ms because no second Comet heartbeat ever
         // closes it.
-        store.append_event(mk(20, "Comet", "ai.perplexity.comet")).unwrap();
-        store.append_event(mk(30, "Activity Monitor", "com.apple.ActivityMonitor")).unwrap();
+        store
+            .append_event(mk(20, "Comet", "ai.perplexity.comet"))
+            .unwrap();
+        store
+            .append_event(mk(30, "Activity Monitor", "com.apple.ActivityMonitor"))
+            .unwrap();
 
         // The day is bucketed in local time from ts; derive it the same way.
         let day = base
             .with_timezone(&chrono::Local)
             .format("%Y-%m-%d")
             .to_string();
-        let stats = store
-            .activity_day_stats(&day, GroupBy::App)
-            .unwrap();
+        let stats = store.activity_day_stats(&day, GroupBy::App).unwrap();
 
         let names: Vec<&str> = stats.top_apps.iter().map(|a| a.app_name.as_str()).collect();
         assert!(
@@ -6829,9 +7017,18 @@ mod tests {
         // Batch-insert in non-monotonic order via the bulk append path so the
         // sort-by-ts inside append_idempotent_with_artifacts_up_to is exercised.
         let records = vec![
-            EventWithArtifacts { event: mk(0), artifacts: vec![] },
-            EventWithArtifacts { event: mk(10), artifacts: vec![] },
-            EventWithArtifacts { event: mk(5), artifacts: vec![] },
+            EventWithArtifacts {
+                event: mk(0),
+                artifacts: vec![],
+            },
+            EventWithArtifacts {
+                event: mk(10),
+                artifacts: vec![],
+            },
+            EventWithArtifacts {
+                event: mk(5),
+                artifacts: vec![],
+            },
         ];
         let outcome = store
             .append_idempotent_with_artifacts_up_to(records, u64::MAX)
@@ -7124,10 +7321,7 @@ mod tests {
                 kind: "ocr_screen".into(),
                 stale_running: chrono::Duration::minutes(5),
             }],
-            skip_kinds: vec![(
-                "transcribe_audio".into(),
-                "asr_disabled_on_boot".into(),
-            )],
+            skip_kinds: vec![("transcribe_audio".into(), "asr_disabled_on_boot".into())],
         };
         let report = store.recover_after_unclean_shutdown(&policy).unwrap();
         assert_eq!(report.jobs_skipped, 1);
@@ -7222,8 +7416,22 @@ mod tests {
             // (user clicks once at 10:00:30, then walks away) and a second
             // episode 11:00-11:02 that starts exactly on a user submit.
             let segs = [
-                ("s1", "2026-08-16T10:00:00+00:00", "2026-08-16T10:10:00+00:00", 600_000, "Installer", "claude session jsonl"),
-                ("s2", "2026-08-16T11:00:00+00:00", "2026-08-16T11:02:00+00:00", 120_000, "Ghostty", "herdr"),
+                (
+                    "s1",
+                    "2026-08-16T10:00:00+00:00",
+                    "2026-08-16T10:10:00+00:00",
+                    600_000,
+                    "Installer",
+                    "claude session jsonl",
+                ),
+                (
+                    "s2",
+                    "2026-08-16T11:00:00+00:00",
+                    "2026-08-16T11:02:00+00:00",
+                    120_000,
+                    "Ghostty",
+                    "herdr",
+                ),
             ];
             for (id, st, en, ms, app, title) in segs {
                 conn.execute(
@@ -7238,14 +7446,31 @@ mod tests {
             // Interaction events: a click during episode 1, a submit exactly at
             // the start of episode 2. Payloads carry app/title context.
             for (kind, ts, app, title, extra) in [
-                ("mouse.click.v1", "2026-08-16T10:00:30+00:00", "Installer", "claude session jsonl", "{}"),
-                ("keyboard.submit.v1", "2026-08-16T11:00:00.500+00:00", "Ghostty", "herdr", "{}"),
+                (
+                    "mouse.click.v1",
+                    "2026-08-16T10:00:30+00:00",
+                    "Installer",
+                    "claude session jsonl",
+                    "{}",
+                ),
+                (
+                    "keyboard.submit.v1",
+                    "2026-08-16T11:00:00.500+00:00",
+                    "Ghostty",
+                    "herdr",
+                    "{}",
+                ),
             ] {
                 conn.execute(
                     "INSERT INTO events (id, source, kind, ts, payload, created_at)
                      VALUES (?1, 'screen', ?2, ?3, ?4, ?3)",
-                    params![Uuid::new_v4().to_string(), kind, ts,
-                             serde_json::json!({"app_name": app, "window_title": title, "extra": extra}).to_string()],
+                    params![
+                        Uuid::new_v4().to_string(),
+                        kind,
+                        ts,
+                        serde_json::json!({"app_name": app, "window_title": title, "extra": extra})
+                            .to_string()
+                    ],
                 )
                 .unwrap();
             }
@@ -7258,7 +7483,11 @@ mod tests {
 
         // Title dwell is the full 10 min, but user activity only the 45s tail
         // after the click — the "sat foreground while user was away" case.
-        let t = s.notable_titles.iter().find(|t| t.title.contains("claude session")).unwrap();
+        let t = s
+            .notable_titles
+            .iter()
+            .find(|t| t.title.contains("claude session"))
+            .unwrap();
         assert_eq!(t.dwell_ms, 600_000);
         assert_eq!(t.user_active_ms, 45_000);
         assert_eq!(t.clicks, 1);
@@ -7294,8 +7523,10 @@ mod tests {
                 "INSERT INTO events (id, source, kind, ts, payload, created_at)
                  VALUES (?1, 'screen', 'input.stats.v1', '2026-08-16T10:00:00+00:00', ?2,
                          '2026-08-16T10:00:00+00:00')",
-                params![Uuid::new_v4().to_string(),
-                         serde_json::json!({"mouse_left": 4}).to_string()],
+                params![
+                    Uuid::new_v4().to_string(),
+                    serde_json::json!({"mouse_left": 4}).to_string()
+                ],
             )
             .unwrap();
         }
@@ -7349,9 +7580,15 @@ mod tests {
         assert_eq!(store.ai_list_messages(&t.id).unwrap().len(), 2);
 
         // Roast archive: save → per-day list (newest first) → index.
-        let r1 = store.roast_save("2026-08-14", "glm-4.7", "第一条", None).unwrap();
-        let r2 = store.roast_save("2026-08-14", "glm-4.7", "第二条", Some("想过了")).unwrap();
-        store.roast_save("2026-08-13", "glm-4.7", "昨天", None).unwrap();
+        let r1 = store
+            .roast_save("2026-08-14", "glm-4.7", "第一条", None)
+            .unwrap();
+        let r2 = store
+            .roast_save("2026-08-14", "glm-4.7", "第二条", Some("想过了"))
+            .unwrap();
+        store
+            .roast_save("2026-08-13", "glm-4.7", "昨天", None)
+            .unwrap();
 
         let day_list = store.roast_list_for_day("2026-08-14").unwrap();
         assert_eq!(day_list.len(), 2);
@@ -7382,7 +7619,11 @@ mod tests {
         assert_eq!(pruned, 1);
 
         // 2. Append screenshot event with artifact
-        let ev2 = SourceEvent::new(SourceKind::Screen, event_kind::SCREENSHOT_V1, json!({"test": 1}));
+        let ev2 = SourceEvent::new(
+            SourceKind::Screen,
+            event_kind::SCREENSHOT_V1,
+            json!({"test": 1}),
+        );
         let ev2_id = ev2.id;
         let record = EventWithArtifacts {
             event: ev2,

@@ -29,7 +29,9 @@ pub fn prompt_data(summary: &DayRoastSummaryDto) -> serde_json::Value {
             Some(((part as f64 / whole as f64) * 1000.0).round() / 10.0)
         }
     };
-    let covered = summary.total_active_ms.saturating_add(summary.total_idle_ms);
+    let covered = summary
+        .total_active_ms
+        .saturating_add(summary.total_idle_ms);
     let partial_day = covered > 0 && covered < 4 * 60 * 60 * 1000;
     serde_json::json!({
         "日期": summary.day,
