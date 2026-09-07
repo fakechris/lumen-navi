@@ -507,6 +507,8 @@ pub fn run() {
             commands::skill_replay,
             commands::act_driver_status,
             commands::act_driver_ensure,
+            commands::act_driver_call,
+            commands::act_install_mcp,
             commands::agent_open_in_terminal,
             commands::request_accessibility_permission,
             commands::selection_popup_hide,

@@ -48,6 +48,7 @@ scripts/macos/prepare-cua-app.sh "$(rustc -vV | sed -n 's/^host: //p')"
 #    Contents/Helpers/cua-driver       # optional MIT Act engine (CUA_DRIVER_FETCH=1)
 #    Contents/Resources/AppIcon.icns   # CUA cursor mark from apps/cua/icon/
 # Navi installs the helper to /Applications/Lumen Cua.app on first use (own TCC identity).
+# Settings → 技能库: start the Act engine, copy/write MCP `computer-use` into Codex or Claude Code.
 
 # 3. Install frontend deps
 cd apps/desktop && npm install

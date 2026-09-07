@@ -186,7 +186,11 @@ fn on_mouse_up(app: &AppHandle, up: selection::MouseUp) {
                             tracing::info!(chars = text.len(), pid = ?sel.pid, "selection → show popup");
                             let target = sel.pid.and_then(|pid| {
                                 selection::app_identity_for_pid(pid).map(|(app_name, bundle_id)| {
-                                    PendingTarget { pid, app_name, bundle_id }
+                                    PendingTarget {
+                                        pid,
+                                        app_name,
+                                        bundle_id,
+                                    }
                                 })
                             });
                             let h2 = handle.clone();
@@ -218,12 +222,10 @@ async fn clipboard_fallback_or_hide(handle: &AppHandle, epoch: u64) {
             .ok()
             .flatten();
         if pid != Some(std::process::id() as i32) {
-            let grabbed = tauri::async_runtime::spawn_blocking(
-                selection::clipboard_grab_selection,
-            )
-            .await
-            .ok()
-            .flatten();
+            let grabbed = tauri::async_runtime::spawn_blocking(selection::clipboard_grab_selection)
+                .await
+                .ok()
+                .flatten();
             if QUERY_EPOCH.load(Ordering::SeqCst) != epoch {
                 return;
             }
@@ -234,7 +236,11 @@ async fn clipboard_fallback_or_hide(handle: &AppHandle, epoch: u64) {
                         tracing::info!(chars = text.len(), "selection (⌘C) → show popup");
                         let target = pid.and_then(|pid| {
                             selection::app_identity_for_pid(pid).map(|(app_name, bundle_id)| {
-                                PendingTarget { pid, app_name, bundle_id }
+                                PendingTarget {
+                                    pid,
+                                    app_name,
+                                    bundle_id,
+                                }
                             })
                         });
                         let h2 = handle.clone();

@@ -96,7 +96,11 @@ pub(crate) fn registrable_domain(url: &str) -> Option<String> {
     let no_scheme = url.split("://").nth(1).unwrap_or(url);
     let authority = no_scheme.split('/').next()?;
     let authority = authority.split('?').next()?;
-    let host = authority.rsplit(':').nth(1).unwrap_or(authority).to_ascii_lowercase();
+    let host = authority
+        .rsplit(':')
+        .nth(1)
+        .unwrap_or(authority)
+        .to_ascii_lowercase();
     if host.is_empty() {
         return None;
     }
@@ -281,8 +285,7 @@ pub fn preferred_display_name(candidates: &[&str]) -> String {
         if s.chars().any(|c| c.is_uppercase()) {
             score += 1;
         }
-        if s.to_ascii_lowercase().ends_with("desktop")
-            || s.to_ascii_lowercase().ends_with("helper")
+        if s.to_ascii_lowercase().ends_with("desktop") || s.to_ascii_lowercase().ends_with("helper")
         {
             score -= 3;
         }
@@ -303,7 +306,6 @@ pub fn preferred_display_name(candidates: &[&str]) -> String {
 pub fn default_rules() -> Vec<CategoryRule> {
     crate::rule_engine::active_catalog().rules.clone()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -406,8 +408,14 @@ mod tests {
             Some("192.168.1.5".into())
         );
         // localhost / single-label host — no registrable domain to extract.
-        assert_eq!(registrable_domain("http://localhost:3000/"), Some("localhost".into()));
-        assert_eq!(registrable_domain("http://intranet/page"), Some("intranet".into()));
+        assert_eq!(
+            registrable_domain("http://localhost:3000/"),
+            Some("localhost".into())
+        );
+        assert_eq!(
+            registrable_domain("http://intranet/page"),
+            Some("intranet".into())
+        );
         // Port stripped from a normal domain.
         assert_eq!(
             registrable_domain("https://example.com:8443/p"),
@@ -495,10 +503,8 @@ mod tests {
         // Real Homebrew descs — genre language, not vendor special-cases.
         let c = classify_from_text_hint("Teamwork app by Alibaba Group").unwrap();
         assert_eq!(c.category.as_deref(), Some("Communication"));
-        let c2 = classify_from_text_hint(
-            "NetEase UU remote desktop access and control tool",
-        )
-        .unwrap();
+        let c2 =
+            classify_from_text_hint("NetEase UU remote desktop access and control tool").unwrap();
         assert_eq!(c2.category.as_deref(), Some("Utilities"));
     }
 

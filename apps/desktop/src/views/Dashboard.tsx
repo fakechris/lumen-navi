@@ -1225,14 +1225,11 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
                   }
                   if (
                     !window.confirm(
-                      `按 ${sk.steps?.length ?? 0} 步回放「${sk.name}」？\n默认不抢焦点；失败会告诉你原因。`,
+                      `按 ${sk.steps?.length ?? 0} 步回放「${sk.name}」？\n后台执行，不抢焦点、不挪真光标。失败会告诉你原因。`,
                     )
                   ) {
                     return;
                   }
-                  const allowForeground = window.confirm(
-                    "后台投递失败时，是否允许短暂把目标窗口提到前台？",
-                  );
                   // Typed text is never recorded — ask the user for each
                   // type step explicitly before replaying.
                   const typeIdx: number[] = [];
@@ -1252,7 +1249,7 @@ function HistorySlotList({ slots }: { slots: HistorySlot[] }) {
                     texts[i] = input;
                   }
                   void api
-                    .replayHistorySkill(slot.slot_start, texts, allowForeground)
+                    .replayHistorySkill(slot.slot_start, texts, false)
                     .then((msg) => window.alert(msg))
                     .catch((err: unknown) =>
                       window.alert(String(err ?? "回放失败")),

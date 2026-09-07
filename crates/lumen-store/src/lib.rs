@@ -5,11 +5,11 @@
 
 mod blob;
 mod categorization;
-pub mod roast;
 mod enrichment;
 mod history;
 mod liveness;
 mod pixel_hash;
+pub mod roast;
 mod rule_engine;
 mod scene;
 mod schema;
@@ -17,13 +17,13 @@ mod slot_actions;
 mod slot_evidence;
 mod sqlite;
 
-pub use lumen_api::SkillDto;
 pub use categorization::{
     classify, classify_from_itunes_genre, classify_from_metadata_texts, classify_from_text_hint,
     classify_ls_application_category, default_rules, preferred_display_name, ActivityFields,
     CategoryRule, Classification, GroupBy, MatchField, ProductivityLevel,
 };
 pub use enrichment::{cask_token_candidates, guess_cask_token, EnrichmentHit};
+pub use lumen_api::SkillDto;
 pub use rule_engine::{
     install_and_load_rules, reload_rules_from_dir, rules_dir, CatalogRuleSet, MappingRuleSet,
 };

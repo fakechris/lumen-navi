@@ -422,6 +422,7 @@ pub fn steps_from_actions(trace: &SlotActionTrace) -> Vec<lumen_api::SkillStepDt
             rel_x: a.rel_x,
             rel_y: a.rel_y,
             note: None,
+            ..Default::default()
         })
         .collect()
 }

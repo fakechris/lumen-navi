@@ -65,6 +65,12 @@ pub(crate) enum Command {
     ActDriverStatus,
     /// Act only. Spawn embedded cua-driver as a child of Lumen Cua if needed.
     ActDriverEnsure,
+    /// Act only. One-shot tool call against the embedded cua-driver daemon.
+    ActDriverCall {
+        tool: String,
+        #[serde(default)]
+        arguments: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,9 +98,29 @@ pub struct InputStep {
     #[serde(default)]
     pub dry: bool,
     /// Allow a gated, temporary activate if background delivery cannot land.
-    /// Default false: never steal focus.
+    /// Default false: never steal focus. Driver replay ignores this and
+    /// never activates.
     #[serde(default)]
     pub allow_foreground: bool,
+    #[serde(default)]
+    pub window_id: Option<u64>,
+    #[serde(default)]
+    pub element_token: Option<String>,
+    /// Window-local screenshot pixels (driver click). Prefer over nx/ny.
+    #[serde(default)]
+    pub x: Option<f64>,
+    #[serde(default)]
+    pub y: Option<f64>,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub pid: Option<i32>,
+    #[serde(default)]
+    pub urls: Option<Vec<String>>,
+    #[serde(default)]
+    pub css_selector: Option<String>,
+    #[serde(default)]
+    pub javascript: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,6 +306,14 @@ pub struct ActDriverInfo {
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// MCP server key agents should use (`computer-use`).
+    #[serde(default)]
+    pub mcp_server_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_path: Option<String>,
+    /// Ready-to-paste Codex `config.toml` fragment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_snippet: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +370,9 @@ pub(crate) enum ResponseResult {
     },
     ActDriver {
         info: ActDriverInfo,
+    },
+    DriverCall {
+        value: serde_json::Value,
     },
 }
 
@@ -491,6 +528,8 @@ mod tests {
         assert!(!step.dry);
         assert!(!step.allow_foreground);
         assert_eq!(step.action, "click");
+        assert!(step.window_id.is_none());
+        assert!(step.element_token.is_none());
     }
 
     #[test]
@@ -513,5 +552,25 @@ mod tests {
         });
         let parsed = serde_json::from_value::<RequestEnvelope>(request).unwrap();
         assert!(matches!(parsed.command, Command::ActDriverStatus));
+    }
+
+    #[test]
+    fn act_driver_call_command_round_trips() {
+        let request = serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "request_id": "t",
+            "token": "0".repeat(64),
+            "command": "act_driver_call",
+            "tool": "launch_app",
+            "arguments": { "bundle_id": "com.apple.calculator" }
+        });
+        let parsed = serde_json::from_value::<RequestEnvelope>(request).unwrap();
+        match parsed.command {
+            Command::ActDriverCall { tool, arguments } => {
+                assert_eq!(tool, "launch_app");
+                assert_eq!(arguments["bundle_id"], "com.apple.calculator");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

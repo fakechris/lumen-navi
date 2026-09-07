@@ -46,13 +46,16 @@ Patterns borrowed:
   `unverifiable` / `refused`). Four gates (frontmost, occlusion, presence,
   focus lock) plus cross-Space refuse. Window screenshots and L0 `ProbeApp`
   are Act-only — Observe screen sources never call them.
-- **A1b:** MIT **cua-driver** is nested at
+- **A1b/A1c:** MIT **cua-driver** is nested at
   `Lumen Cua.app/Contents/Helpers/cua-driver` and spawned as a child
   (`CUA_DRIVER_EMBEDDED=1`, `serve --embedded --socket …/driver.sock`).
-  TCC stays on `com.lumenopen.cua`. Navi never spawns cua-driver; it only
-  calls `ActDriverStatus` / `ActDriverEnsure`. Coding agents should use the
-  returned `mcp_command` + `mcp_args` (stdio proxy onto that socket). HID
-  replay chips stay on `InputReplay`. Missing binary is a soft skip.
+  TCC stays on `com.lumenopen.cua`. Host policy files lock input tools to
+  `delivery_mode: background` (no `bring_to_front`, no address-bar `⌘L`).
+  `InputReplay` prefers the driver: `launch_app` instead of activate,
+  `click` by `element_token` or window-local screenshot pixels, `page` for
+  DOM, session cursor overlay. Noop never raises the target. Coding agents
+  attach as MCP server `computer-use` (stdio proxy onto the private socket).
+  Missing binary falls back to HID `PostToPid` without stealing focus.
 - **Not intake.** Observe (screenshots/audio) is Navi-owned.  
 - **License line:** **cua-driver only** — never `cua-agent[omni]` (AGPL contagion). OCR stays Navi-owned.
 

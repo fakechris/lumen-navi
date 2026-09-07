@@ -327,7 +327,9 @@ pub async fn record_audio_test(
     };
     if !permission.can_record_mic() {
         return Ok(AudioRecordingTestDto {
-            error: Some("麦克风权限尚未允许。请在系统设置中允许 Lumen Navi 访问麦克风后重试。".into()),
+            error: Some(
+                "麦克风权限尚未允许。请在系统设置中允许 Lumen Navi 访问麦克风后重试。".into(),
+            ),
             ..base
         });
     }
@@ -424,10 +426,9 @@ fn capture_audio_test(
                 }
                 samples.extend(chunk.samples);
                 chunks = chunks.saturating_add(1);
-                let captured_requested_duration =
-                    !samples.is_empty() && sample_rate > 0
-                        && samples.len() as u64 * 1_000
-                            >= u64::from(sample_rate) * duration_ms;
+                let captured_requested_duration = !samples.is_empty()
+                    && sample_rate > 0
+                    && samples.len() as u64 * 1_000 >= u64::from(sample_rate) * duration_ms;
                 if chunks >= 2 || captured_requested_duration {
                     break;
                 }
@@ -437,7 +438,9 @@ fn capture_audio_test(
     }
     stream.stop();
     if samples.is_empty() || sample_rate == 0 {
-        return Err("录音流已启动，但在测试时长内没有收到 PCM 音频帧。请检查输入设备和系统权限。".into());
+        return Err(
+            "录音流已启动，但在测试时长内没有收到 PCM 音频帧。请检查输入设备和系统权限。".into(),
+        );
     }
     let (rms, peak) = pcm_rms_peak(&samples);
     Ok((
@@ -506,8 +509,12 @@ fn fetch_health_via_unix_socket(socket_path: &Path) -> Option<HealthResponse> {
     use std::time::Duration;
 
     let mut stream = UnixStream::connect(socket_path).ok()?;
-    stream.set_read_timeout(Some(Duration::from_millis(750))).ok()?;
-    stream.set_write_timeout(Some(Duration::from_millis(750))).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(750)))
+        .ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(750)))
+        .ok()?;
     let request = b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     stream.write_all(request).ok()?;
     // Read the whole response (Connection: close → server closes after body).
@@ -548,22 +555,22 @@ pub async fn get_permissions(state: State<'_, AppState>) -> Result<PermissionsDt
                     tracing::warn!(%error, "Lumen Cua permission status unavailable");
                 });
             match cua_status {
-            Ok(status) => {
-                let direct_capture_status = serde_json::to_value(status.direct_capture_status)
-                    .ok()
-                    .and_then(|value| value.as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "unknown".into());
-                let direct_capture_error = status
-                    .direct_capture_error
-                    .map(|error| format!("{}: {}", error.code, error.message));
-                (
-                    format!("{:?}", status.screen_recording),
-                    status.screen_recording_capturable,
-                    direct_capture_status,
-                    direct_capture_error,
-                )
-            }
-            Err(()) => ("Unavailable".into(), None, "unavailable".into(), None),
+                Ok(status) => {
+                    let direct_capture_status = serde_json::to_value(status.direct_capture_status)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "unknown".into());
+                    let direct_capture_error = status
+                        .direct_capture_error
+                        .map(|error| format!("{}: {}", error.code, error.message));
+                    (
+                        format!("{:?}", status.screen_recording),
+                        status.screen_recording_capturable,
+                        direct_capture_status,
+                        direct_capture_error,
+                    )
+                }
+                Err(()) => ("Unavailable".into(), None, "unavailable".into(), None),
             }
         } else {
             (
@@ -789,12 +796,18 @@ pub fn list_timeline(
 }
 
 #[tauri::command]
-pub fn activity_segments(state: State<'_, AppState>, day: String) -> Result<Vec<lumen_api::ActivitySegmentDto>, String> {
+pub fn activity_segments(
+    state: State<'_, AppState>,
+    day: String,
+) -> Result<Vec<lumen_api::ActivitySegmentDto>, String> {
     state.store.list_activity_segments(&day).map_err(err)
 }
 
 #[tauri::command]
-pub fn activity_scenes(state: State<'_, AppState>, day: String) -> Result<lumen_api::SceneDayDto, String> {
+pub fn activity_scenes(
+    state: State<'_, AppState>,
+    day: String,
+) -> Result<lumen_api::SceneDayDto, String> {
     state.store.list_scene_day(&day).map_err(err)
 }
 
@@ -819,10 +832,7 @@ pub fn replay_history_skill(
         .or_else(|_| chrono::DateTime::parse_from_rfc3339(&slot_start.replace('Z', "+00:00")))
         .map_err(|e| format!("bad slot_start: {e}"))?
         .with_timezone(&chrono::Utc);
-    let day = start
-        .with_timezone(&Local)
-        .format("%Y-%m-%d")
-        .to_string();
+    let day = start.with_timezone(&Local).format("%Y-%m-%d").to_string();
     let slots = state.store.list_history_slots(&day).map_err(err)?;
     let slot = slots
         .into_iter()
@@ -843,7 +853,11 @@ pub fn replay_history_skill(
         allow_foreground.unwrap_or(false),
     );
     let effects = run_replay(&state, ops)?;
-    Ok(format_replay_message(skill.steps.len(), &skill.name, &effects))
+    Ok(format_replay_message(
+        skill.steps.len(),
+        &skill.name,
+        &effects,
+    ))
 }
 
 /// Shared step expansion: slot apps provide bundle ids; type steps take
@@ -852,7 +866,7 @@ pub(crate) fn expand_skill_steps(
     slot: &lumen_api::HistorySlotDto,
     steps: &[lumen_api::SkillStepDto],
     type_texts: Option<&[Option<String>]>,
-    allow_foreground: bool,
+    _allow_foreground: bool,
 ) -> Vec<lumen_cua::InputStep> {
     let mut ops = Vec::new();
     for (i, step) in steps.iter().enumerate() {
@@ -879,7 +893,16 @@ pub(crate) fn expand_skill_steps(
             wait_ms: Some(200),
             text,
             dry: false,
-            allow_foreground,
+            allow_foreground: false,
+            window_id: step.window_id,
+            element_token: step.element_token.clone(),
+            x: None,
+            y: None,
+            session: None,
+            pid: None,
+            urls: step.urls.clone(),
+            css_selector: None,
+            javascript: None,
         });
     }
     ops
@@ -960,7 +983,11 @@ pub fn skills_list(state: State<'_, AppState>) -> Result<Vec<lumen_api::SkillDto
 }
 
 #[tauri::command]
-pub fn skills_set_enabled(state: State<'_, AppState>, name: String, enabled: bool) -> Result<(), String> {
+pub fn skills_set_enabled(
+    state: State<'_, AppState>,
+    name: String,
+    enabled: bool,
+) -> Result<(), String> {
     state.store.set_skill_enabled(&name, enabled).map_err(err)
 }
 
@@ -1015,13 +1042,15 @@ pub fn skill_replay(
     let ops = expand_skill_steps(&slot, &skill.steps, type_texts.as_deref(), false);
     let effects = run_replay(&state, ops)?;
     let _ = state.store.record_skill_used(&name);
-    Ok(format_replay_message(skill.steps.len(), &skill.name, &effects))
+    Ok(format_replay_message(
+        skill.steps.len(),
+        &skill.name,
+        &effects,
+    ))
 }
 
 #[tauri::command]
-pub fn act_driver_status(
-    state: State<'_, AppState>,
-) -> Result<lumen_cua::ActDriverInfo, String> {
+pub fn act_driver_status(state: State<'_, AppState>) -> Result<lumen_cua::ActDriverInfo, String> {
     state
         .cua
         .ensure_running()
@@ -1031,9 +1060,7 @@ pub fn act_driver_status(
 }
 
 #[tauri::command]
-pub fn act_driver_ensure(
-    state: State<'_, AppState>,
-) -> Result<lumen_cua::ActDriverInfo, String> {
+pub fn act_driver_ensure(state: State<'_, AppState>) -> Result<lumen_cua::ActDriverInfo, String> {
     state
         .cua
         .ensure_running()
@@ -1042,10 +1069,93 @@ pub fn act_driver_ensure(
         .map_err(err)
 }
 
-fn step_bundle(
-    slot: &lumen_api::HistorySlotDto,
-    step: &lumen_api::SkillStepDto,
-) -> Option<String> {
+#[tauri::command]
+pub fn act_driver_call(
+    state: State<'_, AppState>,
+    tool: String,
+    arguments: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    state
+        .cua
+        .ensure_running()
+        .map_err(err)?
+        .act_driver_call(tool, arguments)
+        .map_err(err)
+}
+
+/// Merge the embedded cua-driver MCP into a local agent config.
+/// `target` is `codex` (~/.codex/config.toml) or `claude` (~/.claude.json).
+#[tauri::command]
+pub fn act_install_mcp(state: State<'_, AppState>, target: String) -> Result<String, String> {
+    let info = act_driver_ensure(state)?;
+    let command = info
+        .mcp_command
+        .as_deref()
+        .ok_or_else(|| "cua-driver 未捆绑，无法写入 MCP".to_string())?;
+    let args = &info.mcp_args;
+    match target.as_str() {
+        "codex" => install_codex_mcp(command, args),
+        "claude" => install_claude_mcp(command, args),
+        other => Err(format!("未知 MCP 目标 {other}（codex 或 claude）")),
+    }
+}
+
+fn install_codex_mcp(command: &str, args: &[String]) -> Result<String, String> {
+    let home = std::env::var_os("HOME").ok_or_else(|| "HOME unset".to_string())?;
+    let path = std::path::PathBuf::from(home).join(".codex/config.toml");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(err)?;
+    }
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut root: toml::Value =
+        toml::from_str(&raw).unwrap_or(toml::Value::Table(Default::default()));
+    let table = root
+        .as_table_mut()
+        .ok_or_else(|| "Codex config.toml 不是表".to_string())?;
+    let servers = table
+        .entry("mcp_servers")
+        .or_insert_with(|| toml::Value::Table(Default::default()));
+    let servers = servers
+        .as_table_mut()
+        .ok_or_else(|| "mcp_servers 不是表".to_string())?;
+    let mut entry = toml::map::Map::new();
+    entry.insert("command".into(), toml::Value::String(command.into()));
+    entry.insert(
+        "args".into(),
+        toml::Value::Array(args.iter().cloned().map(toml::Value::String).collect()),
+    );
+    servers.insert("computer-use".into(), toml::Value::Table(entry));
+    std::fs::write(&path, toml::to_string_pretty(&root).map_err(err)?).map_err(err)?;
+    Ok(format!("已写入 {}", path.display()))
+}
+
+fn install_claude_mcp(command: &str, args: &[String]) -> Result<String, String> {
+    let home = std::env::var_os("HOME").ok_or_else(|| "HOME unset".to_string())?;
+    let path = std::path::PathBuf::from(home).join(".claude.json");
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".into());
+    let mut root: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| ".claude.json 不是对象".to_string())?;
+    let servers = obj
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    let servers = servers
+        .as_object_mut()
+        .ok_or_else(|| "mcpServers 不是对象".to_string())?;
+    servers.insert(
+        "computer-use".into(),
+        serde_json::json!({
+            "command": command,
+            "args": args,
+        }),
+    );
+    std::fs::write(&path, serde_json::to_string_pretty(&root).map_err(err)?).map_err(err)?;
+    Ok(format!("已写入 {}", path.display()))
+}
+
+fn step_bundle(slot: &lumen_api::HistorySlotDto, step: &lumen_api::SkillStepDto) -> Option<String> {
     slot.apps
         .iter()
         .find(|a| a.app_name == step.app)
@@ -1142,7 +1252,11 @@ fn catalog_provider(id: &str) -> Option<CatalogProvider> {
 fn resolve_llm_endpoint(cfg: &lumen_config::AssistantConfig) -> Result<LlmEndpoint, String> {
     let key = {
         let k = cfg.effective_api_key().trim().to_string();
-        if k.is_empty() { None } else { Some(k) }
+        if k.is_empty() {
+            None
+        } else {
+            Some(k)
+        }
     };
 
     let preset = if cfg.provider_id == "custom" || cfg.provider_id.is_empty() {
@@ -1156,9 +1270,18 @@ fn resolve_llm_endpoint(cfg: &lumen_config::AssistantConfig) -> Result<LlmEndpoi
             // Custom: base_url must be set; treat as OpenAI-compat.
             let b = cfg.base_url.trim().trim_end_matches('/').to_string();
             if b.is_empty() {
-                return Err("LLM 未配置 — 请在 设置 → LLM 配置 选择 provider 或填写 base_url".into());
+                return Err(
+                    "LLM 未配置 — 请在 设置 → LLM 配置 选择 provider 或填写 base_url".into(),
+                );
             }
-            (b, "/chat/completions".to_string(), LlmStyle::OpenAiCompat, None, None, None)
+            (
+                b,
+                "/chat/completions".to_string(),
+                LlmStyle::OpenAiCompat,
+                None,
+                None,
+                None,
+            )
         }
         Some(p) => {
             let ep = if cfg.region == "global" {
@@ -1177,10 +1300,23 @@ fn resolve_llm_endpoint(cfg: &lumen_config::AssistantConfig) -> Result<LlmEndpoi
                     b
                 }
             };
-            let chat = p.chat_path.clone()
+            let chat = p
+                .chat_path
+                .clone()
                 .unwrap_or_else(|| "/chat/completions".into());
-            let style = if p.api_style == "anthropic" { LlmStyle::Anthropic } else { LlmStyle::OpenAiCompat };
-            (base, chat, style, p.auth.clone(), p.auth.clone().map(|a| a.value_template), p.extra_headers.clone())
+            let style = if p.api_style == "anthropic" {
+                LlmStyle::Anthropic
+            } else {
+                LlmStyle::OpenAiCompat
+            };
+            (
+                base,
+                chat,
+                style,
+                p.auth.clone(),
+                p.auth.clone().map(|a| a.value_template),
+                p.extra_headers.clone(),
+            )
         }
     };
 
@@ -1196,7 +1332,10 @@ fn resolve_llm_endpoint(cfg: &lumen_config::AssistantConfig) -> Result<LlmEndpoi
             }
         }
     } else if preset.as_ref().map(|p| p.needs_key).unwrap_or(false) {
-        return Err(format!("401: {} 需要 API key，请在 设置 → LLM 配置 中配置", cfg.provider_id));
+        return Err(format!(
+            "401: {} 需要 API key，请在 设置 → LLM 配置 中配置",
+            cfg.provider_id
+        ));
     }
     if let Some(extra) = extra {
         for (k, v) in extra {
@@ -1205,7 +1344,12 @@ fn resolve_llm_endpoint(cfg: &lumen_config::AssistantConfig) -> Result<LlmEndpoi
     }
 
     let url = format!("{base}{chat_path}");
-    Ok(LlmEndpoint { url, base, headers, style })
+    Ok(LlmEndpoint {
+        url,
+        base,
+        headers,
+        style,
+    })
 }
 
 /// A completion result: the visible answer plus the model's chain-of-thought
@@ -1261,7 +1405,11 @@ fn split_inline_think(content: &str) -> (String, Option<String>) {
         None
     } else {
         let joined = thoughts.join("\n\n");
-        if joined.is_empty() { None } else { Some(joined) }
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
     };
     (clean.trim().to_string(), reasoning)
 }
@@ -1294,13 +1442,15 @@ async fn llm_chat_complete(
         LlmStyle::Anthropic => {
             // Anthropic Messages API: system prompt is a top-level field,
             // messages must alternate user/assistant, max_tokens required.
-            let system = messages.iter()
+            let system = messages
+                .iter()
                 .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
                 .and_then(|m| m.get("content"))
                 .and_then(|c| c.as_str())
                 .unwrap_or("")
                 .to_string();
-            let chat: Vec<&serde_json::Value> = messages.iter()
+            let chat: Vec<&serde_json::Value> = messages
+                .iter()
                 .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
                 .collect();
             serde_json::json!({
@@ -1368,7 +1518,11 @@ async fn llm_chat_complete(
             }
             (
                 if text.is_empty() { None } else { Some(text) },
-                if thinking.trim().is_empty() { None } else { Some(thinking) },
+                if thinking.trim().is_empty() {
+                    None
+                } else {
+                    Some(thinking)
+                },
             )
         }
     };
@@ -1520,10 +1674,7 @@ pub fn ai_thread_messages(
 }
 
 #[tauri::command]
-pub fn ai_thread_delete(
-    state: State<'_, AppState>,
-    thread_id: String,
-) -> Result<(), String> {
+pub fn ai_thread_delete(state: State<'_, AppState>, thread_id: String) -> Result<(), String> {
     state.store.ai_delete_thread(&thread_id).map_err(err)
 }
 
@@ -1587,7 +1738,9 @@ pub async fn llm_list_models(state: State<'_, AppState>) -> Result<Vec<String>, 
     let resp = req.send().await.map_err(|e| format!("请求失败: {e}"))?;
     if !resp.status().is_success() {
         let status = resp.status();
-        return Err(format!("返回 {status}（该 provider 可能不支持 model 列表）"));
+        return Err(format!(
+            "返回 {status}（该 provider 可能不支持 model 列表）"
+        ));
     }
     let json: serde_json::Value = resp.json().await.map_err(|e| format!("解析: {e}"))?;
     // OpenAI-compat: /data[].id ; Anthropic: /data[].id too (v1/models).
@@ -1634,10 +1787,8 @@ pub fn overview_range(
     from: String,
     to: String,
 ) -> Result<OverviewRangeDto, String> {
-    let (stored_events, ocr_docs, audio_events) = state
-        .store
-        .overview_range_counts(&from, &to)
-        .map_err(err)?;
+    let (stored_events, ocr_docs, audio_events) =
+        state.store.overview_range_counts(&from, &to).map_err(err)?;
     Ok(OverviewRangeDto {
         stored_events,
         ocr_docs,
@@ -1670,14 +1821,17 @@ pub fn activity_add_manual_segment(
     let end = chrono::DateTime::parse_from_rfc3339(&ended_at)
         .map_err(|e| format!("ended_at: {e}"))?
         .with_timezone(&chrono::Utc);
-    state.store.add_manual_segment(
-        start,
-        end,
-        &app_name,
-        window_title.as_deref(),
-        category.as_deref(),
-        productivity_level.as_deref(),
-    ).map_err(err)
+    state
+        .store
+        .add_manual_segment(
+            start,
+            end,
+            &app_name,
+            window_title.as_deref(),
+            category.as_deref(),
+            productivity_level.as_deref(),
+        )
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -1686,7 +1840,9 @@ pub fn activity_delete_segment(state: State<'_, AppState>, seg_id: String) -> Re
 }
 
 #[tauri::command]
-pub fn activity_list_category_rules(state: State<'_, AppState>) -> Result<Vec<lumen_store::CategoryRule>, String> {
+pub fn activity_list_category_rules(
+    state: State<'_, AppState>,
+) -> Result<Vec<lumen_store::CategoryRule>, String> {
     state.store.list_category_rules().map_err(err)
 }
 
@@ -1695,7 +1851,10 @@ pub fn activity_save_category_rules(
     state: State<'_, AppState>,
     rules: Vec<lumen_store::CategoryRule>,
 ) -> Result<(), String> {
-    state.store.save_category_rules_and_reapply(rules).map_err(err)
+    state
+        .store
+        .save_category_rules_and_reapply(rules)
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -1963,7 +2122,10 @@ fn observe_start_inner_opts(
             socket = %daemon_socket.display(),
             "observe daemon already serving (orphan from prior app run); adopting, not spawning"
         );
-        return Ok(ObserveStatus { running: true, pid: None });
+        return Ok(ObserveStatus {
+            running: true,
+            pid: None,
+        });
     }
     let cfg = state.load_config().map_err(err)?;
     state.save_config(&cfg).map_err(err)?;
@@ -2052,7 +2214,9 @@ pub fn observe_stop(state: State<'_, AppState>) -> Result<ObserveStatus, String>
 fn observe_stop_inner(state: &AppState) -> Result<ObserveStatus, String> {
     // Mark intentional stop so the supervisor doesn't treat the upcoming
     // child exit as a crash and auto-restart it.
-    state.observe_stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+    state
+        .observe_stopping
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let mut guard = state.observe_child.lock().map_err(err)?;
     if let Some(mut child) = guard.take() {
         let _ = child.kill();
@@ -2246,7 +2410,6 @@ fn privacy_settings_url(kind: &str) -> Result<&'static str, String> {
     }
 }
 
-
 /// Executable name of the bundled Observe daemon for this platform.
 const DAEMON_BIN: &str = if cfg!(windows) {
     "lumen-daemon.exe"
@@ -2296,7 +2459,10 @@ mod command_tests {
         };
         let data = lumen_store::roast::prompt_data(&summary);
         let s = data.to_string();
-        assert!(!s.contains("_ms"), "prompt JSON must not leak raw ms fields: {s}");
+        assert!(
+            !s.contains("_ms"),
+            "prompt JSON must not leak raw ms fields: {s}"
+        );
         assert!(s.contains("15分钟57秒"));
         assert!(s.contains("2小时47分钟"));
         assert!(s.contains("监控开启后的窗口"));
@@ -2570,7 +2736,9 @@ pub fn assistant_run(
     if text.is_empty() && !compose {
         return Err("empty selection text".into());
     }
-    let question = question.map(|q| q.trim().to_string()).filter(|q| !q.is_empty());
+    let question = question
+        .map(|q| q.trim().to_string())
+        .filter(|q| !q.is_empty());
     if compose && question.is_none() {
         return Err("compose action requires a prompt".into());
     }
@@ -2583,20 +2751,29 @@ pub fn assistant_run(
 
     // Local CLI agent path (ProcessAgentRunner): Ask only, template must be
     // enabled; stdout streams through the same assistant-stream channel.
-    if let Some(agent_id) = agent_id.as_deref().filter(|a| *a != "http" && !a.is_empty()) {
+    if let Some(agent_id) = agent_id
+        .as_deref()
+        .filter(|a| *a != "http" && !a.is_empty())
+    {
         if action == assistant::AssistantAction::Translate {
             return Err("本地 agent 仅支持提问/自由输入（Ask/Compose）".into());
         }
         let template = crate::agents::template_by_id(&full_cfg, agent_id)
             .ok_or_else(|| format!("未知 agent：{agent_id}"))?;
         if !template.enabled {
-            return Err(format!("agent {} 未启用（在 navi.toml [agents] 打开）", template.label));
+            return Err(format!(
+                "agent {} 未启用（在 navi.toml [agents] 打开）",
+                template.label
+            ));
         }
         let origin_app = selection_popup::pending_target().map(|t| t.app_name);
         let blocks = crate::context::gather_context(&state.store, &cfg, origin_app.as_deref());
         let context = crate::context::render_blocks(&blocks);
         let prompt = if text.is_empty() {
-            format!("{context}\n任务：{}", question.as_deref().unwrap_or_default())
+            format!(
+                "{context}\n任务：{}",
+                question.as_deref().unwrap_or_default()
+            )
         } else {
             format!(
                 "选中文字：\n\"\"\"\n{text}\n\"\"\"\n\n{context}\n任务：{}",
@@ -2657,7 +2834,11 @@ pub fn assistant_run(
         match result {
             Ok(()) => {
                 let _ = handle.emit_to(POPUP_LABEL, "assistant-done", json!({ "id": task_id }));
-                let _ = handle.emit_to(crate::composer::COMPOSER_LABEL, "assistant-done", json!({ "id": task_id }));
+                let _ = handle.emit_to(
+                    crate::composer::COMPOSER_LABEL,
+                    "assistant-done",
+                    json!({ "id": task_id }),
+                );
             }
             Err(e) => {
                 let _ = handle.emit_to(
@@ -2706,7 +2887,11 @@ pub fn selection_popup_current() -> Result<Option<String>, String> {
 /// (划词 popup「写入原文」). Explicit user action — the frontend only shows the
 /// button after `assistant-done`. `mode` is "replace" or "append".
 #[tauri::command]
-pub async fn assistant_inject(app: AppHandle, mode: String, text: String) -> Result<String, String> {
+pub async fn assistant_inject(
+    app: AppHandle,
+    mode: String,
+    text: String,
+) -> Result<String, String> {
     let m = lumen_platform_host::selection::InjectMode::parse(&mode)
         .ok_or_else(|| format!("未知注入模式 {mode}（replace|append）"))?;
     let target = selection_popup::pending_target()
@@ -2727,7 +2912,9 @@ pub async fn assistant_inject(app: AppHandle, mode: String, text: String) -> Res
 /// Agents selectable in the popup: the HTTP model plus enabled local CLI
 /// templates whose binary is found.
 #[tauri::command]
-pub fn assistant_agents(state: State<'_, AppState>) -> Result<Vec<crate::agents::AgentInfo>, String> {
+pub fn assistant_agents(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::agents::AgentInfo>, String> {
     let cfg = state.load_config().map_err(err)?;
     Ok(crate::agents::list_available(&cfg))
 }
@@ -2787,18 +2974,16 @@ mod llm_think_tests {
 
     #[test]
     fn splits_think_block_from_answer() {
-        let (content, reasoning) = split_inline_think(
-            "<think>plan the greeting</think>Hello there! 👋",
-        );
+        let (content, reasoning) =
+            split_inline_think("<think>plan the greeting</think>Hello there! 👋");
         assert_eq!(content, "Hello there! 👋");
         assert_eq!(reasoning.as_deref(), Some("plan the greeting"));
     }
 
     #[test]
     fn splits_thinking_variant_and_multiple_blocks() {
-        let (content, reasoning) = split_inline_think(
-            "<THINKING>first</THINKING>mid<thinking>second</thinking>end",
-        );
+        let (content, reasoning) =
+            split_inline_think("<THINKING>first</THINKING>mid<thinking>second</thinking>end");
         assert_eq!(content, "midend");
         assert_eq!(reasoning.as_deref(), Some("first\n\nsecond"));
     }

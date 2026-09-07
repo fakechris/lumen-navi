@@ -77,6 +77,9 @@ export interface ActDriverInfo {
   embedded: boolean;
   version?: string | null;
   error?: string | null;
+  mcp_server_name?: string;
+  policy_path?: string | null;
+  mcp_snippet?: string | null;
 }
 
 export interface SkillStep {
@@ -89,6 +92,9 @@ export interface SkillStep {
   rel_x?: number | null;
   rel_y?: number | null;
   note?: string | null;
+  window_id?: number | null;
+  element_token?: string | null;
+  urls?: string[] | null;
 }
 
 export interface ActivitySegment {

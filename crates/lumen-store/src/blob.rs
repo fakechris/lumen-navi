@@ -31,7 +31,11 @@ impl BlobStore {
 
     /// Write bytes under content-addressed path. Returns relative path from data_dir parent
     /// style: `blobs/ca/ab/<fullhash>` relative to data_dir.
-    pub fn put_bytes(&self, media_type: impl Into<String>, bytes: &[u8]) -> Result<ArtifactRef, StoreError> {
+    pub fn put_bytes(
+        &self,
+        media_type: impl Into<String>,
+        bytes: &[u8],
+    ) -> Result<ArtifactRef, StoreError> {
         let hash = blake3::hash(bytes);
         let hex = hash.to_hex().to_string();
         let relative = relative_blob_path(&hex);
@@ -193,7 +197,12 @@ mod tests {
         assert_eq!(blobs.read_relative(&a.path).unwrap(), b"hello");
         assert_eq!(blobs.total_bytes().unwrap(), 5);
         assert_eq!(blobs.additional_bytes([b"hello".as_slice()]).unwrap(), 0);
-        assert_eq!(blobs.additional_bytes([b"new".as_slice(), b"new".as_slice()]).unwrap(), 3);
+        assert_eq!(
+            blobs
+                .additional_bytes([b"new".as_slice(), b"new".as_slice()])
+                .unwrap(),
+            3
+        );
     }
 
     #[test]

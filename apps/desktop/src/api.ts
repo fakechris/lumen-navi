@@ -203,6 +203,10 @@ export const api = {
     invoke<string>("skill_replay", { name, typeTexts: typeTexts ?? null }),
   actDriverStatus: () => invoke<ActDriverInfo>("act_driver_status"),
   actDriverEnsure: () => invoke<ActDriverInfo>("act_driver_ensure"),
+  actDriverCall: (tool: string, arguments_: unknown) =>
+    invoke<unknown>("act_driver_call", { tool, arguments: arguments_ }),
+  actInstallMcp: (target: "codex" | "claude") =>
+    invoke<string>("act_install_mcp", { target }),
   agentOpenInTerminal: (agentId: string, prompt: string) =>
     invoke<string>("agent_open_in_terminal", { agentId, prompt }),
   assistantCancel: (id: string) => invoke<void>("assistant_cancel", { id }),

@@ -117,6 +117,7 @@ Product contract and setup: [`BROWSER_CAPTURE.md`](BROWSER_CAPTURE.md).
 - [x] Lumen Cua protocol v4: `Idle` / `ProbeApp` / `CaptureWindow` / `InputReplay` → `ActionResult`
 - [x] Zero-focus default (`CGEventPostToPid`); four gates; stop-lines (terminal submit, payment copy, `cmd+q`)
 - [x] **A1b:** embed MIT **cua-driver** inside `Lumen Cua.app` (`serve --embedded`, TCC on `com.lumenopen.cua`). Navi never spawns it. Lazy start via `ActDriverEnsure`. Never `cua-agent[omni]`.
+- [x] **A1c:** cua-driver is the Act engine. Host policy locks `delivery_mode=background`. `InputReplay` / skill chips call driver tools (`launch_app`, `element_token` or window-local pixels, `page`, session cursor). Noop never activates. MCP server name `computer-use`; Settings can write Codex / Claude Code configs.
 - Never block intake  
 - First Act-flavored surface shipped: **selection popup (划词助手)** — text-in → action-out
   (translate/ask via OpenAI-compatible HTTP today). Its action seam

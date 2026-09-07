@@ -301,9 +301,16 @@ async fn execute(command: Command, paths: &crate::CuaPaths) -> Result<(ResponseR
             Ok((ResponseResult::AxSnapshot { meta }, text_bytes))
         }
         Command::InputReplay { steps } => {
-            let effects = tokio::task::spawn_blocking(move || crate::input::replay(&steps))
-                .await
-                .map_err(|e| anyhow::anyhow!("input replay join: {e}"))??;
+            let paths = paths.clone();
+            let effects = tokio::task::spawn_blocking(move || {
+                if crate::act_driver::resolve_binary(&paths).is_some() {
+                    crate::act_driver_replay::replay_via_driver(&paths, &steps)
+                } else {
+                    crate::input::replay(&steps)
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("input replay join: {e}"))??;
             Ok((ResponseResult::Replay { effects }, Vec::new()))
         }
         Command::Idle => Ok((
@@ -349,6 +356,16 @@ async fn execute(command: Command, paths: &crate::CuaPaths) -> Result<(ResponseR
                 .await
                 .map_err(|e| anyhow::anyhow!("act driver ensure join: {e}"))??;
             Ok((ResponseResult::ActDriver { info }, Vec::new()))
+        }
+        Command::ActDriverCall { tool, arguments } => {
+            let paths = paths.clone();
+            let value = tokio::task::spawn_blocking(move || {
+                crate::act_driver::ensure(&paths)?;
+                crate::act_driver::call(&paths, &tool, arguments)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("act driver call join: {e}"))??;
+            Ok((ResponseResult::DriverCall { value }, Vec::new()))
         }
     }
 }

@@ -18,3 +18,11 @@ The helper then signs the nested binary with the same identity and flags as
 `lumen-cua` (no Hardened Runtime unless the host has matching entitlements)
 and spawns `cua-driver serve --embedded` as a child, so TCC stays on
 `com.lumenopen.cua`.
+
+On ensure, Lumen Cua writes `driver-policy.yaml` (background-only input)
+and `driver-managed-policy.rego` (block browser `⌘L`) next to the private
+socket. Agents should attach as MCP server `computer-use`:
+
+```
+cua-driver mcp --embedded --socket "$HOME/Library/Application Support/Lumen/Cua/run/driver.sock"
+```

@@ -21,7 +21,9 @@ pub mod macos {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("osascript failed: {stderr}"));
         }
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
+        let stdout = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_lowercase();
         Ok(stdout == "true")
     }
 
@@ -146,4 +148,3 @@ autostart = true
         assert!(!default_cfg.autostart);
     }
 }
-

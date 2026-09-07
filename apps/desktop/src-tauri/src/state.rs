@@ -32,8 +32,7 @@ pub struct AppState {
     /// Shared 10-minute crash-restart budget for supervisor + health monitor.
     pub restart_budget: RestartBudget,
     /// In-flight assistant (selection popup) streaming requests, by id.
-    pub assistant_tasks:
-        Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
+    pub assistant_tasks: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     /// Composer global shortcut currently registered with the OS ("" = none).
     /// Tracks what the shortcut plugin actually holds, which can differ from
     /// the config value when registration failed (e.g. taken by another app).
@@ -98,7 +97,10 @@ impl AppState {
     }
 
     pub fn save_shell(&self) -> Result<()> {
-        let guard = self.shell.lock().map_err(|_| anyhow::anyhow!("shell lock"))?;
+        let guard = self
+            .shell
+            .lock()
+            .map_err(|_| anyhow::anyhow!("shell lock"))?;
         shell::save_shell(&self.data_dir, &guard)
     }
 
@@ -176,15 +178,15 @@ fn load_or_write_config(path: &Path, data_dir: &Path) -> Result<Config> {
         }
         return Ok(cfg);
     }
-        let mut cfg = Config::default();
-        cfg.data_dir = data_dir.to_path_buf();
-        cfg.api.enabled = true;
-        // Note: api.bind (TCP port) is now used only by the optional browser-
-        // extension listener; the shell talks to the daemon over daemon.sock.
-        // Keep the default 7420 (from ApiConfig::default) so existing
-        // extensions keep working.
-        cfg.capture.screen_ticks = 0;
-        cfg.audio.ticks = 0;
+    let mut cfg = Config::default();
+    cfg.data_dir = data_dir.to_path_buf();
+    cfg.api.enabled = true;
+    // Note: api.bind (TCP port) is now used only by the optional browser-
+    // extension listener; the shell talks to the daemon over daemon.sock.
+    // Keep the default 7420 (from ApiConfig::default) so existing
+    // extensions keep working.
+    cfg.capture.screen_ticks = 0;
+    cfg.audio.ticks = 0;
     let raw = toml::to_string_pretty(&cfg)?;
     std::fs::write(path, raw)?;
     Ok(cfg)

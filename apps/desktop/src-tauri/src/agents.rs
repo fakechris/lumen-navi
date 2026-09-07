@@ -74,7 +74,13 @@ pub fn expand_template(t: &AgentTemplate, prompt: &str) -> Result<Vec<String>, S
     }
     Ok(t.command
         .split_whitespace()
-        .map(|tok| if tok == "{prompt}" { prompt.to_string() } else { tok.to_string() })
+        .map(|tok| {
+            if tok == "{prompt}" {
+                prompt.to_string()
+            } else {
+                tok.to_string()
+            }
+        })
         .collect())
 }
 
@@ -246,7 +252,9 @@ mod tests {
         for t in &AgentsConfig::default().templates {
             let c = &t.command;
             assert!(
-                c.contains("--sandbox") || c.contains("--safe-mode") || c.contains("--permission-mode"),
+                c.contains("--sandbox")
+                    || c.contains("--safe-mode")
+                    || c.contains("--permission-mode"),
                 "{} missing sandbox flags",
                 t.id
             );

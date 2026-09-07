@@ -4,6 +4,8 @@
 //! policy, persistence, OCR, and all interpretation of returned frames.
 
 mod act_driver;
+mod act_driver_policy;
+mod act_driver_replay;
 mod adapter;
 mod client;
 mod focus_lock;
