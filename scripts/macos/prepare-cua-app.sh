@@ -52,6 +52,69 @@ if [[ ! -f "$icon_icns" ]]; then
   exit 1
 fi
 cp "$icon_icns" "$resources_dir/AppIcon.icns"
+
+# Optional MIT cua-driver (Act v2). Missing binary is a warning, not a failed
+# helper build — HID replay does not need it. Never fetch cua-agent[omni].
+helpers_dir="$contents/Helpers"
+mkdir -p "$helpers_dir"
+driver_src=""
+if [[ -n "${CUA_DRIVER_BIN:-}" && -f "${CUA_DRIVER_BIN}" ]]; then
+  driver_src="$CUA_DRIVER_BIN"
+elif [[ -f "$root/apps/cua/vendor/cua-driver" ]]; then
+  driver_src="$root/apps/cua/vendor/cua-driver"
+elif [[ "${CUA_DRIVER_FETCH:-1}" == "1" ]]; then
+  version="${CUA_DRIVER_VERSION:-0.23.2}"
+  vendor="$root/apps/cua/vendor"
+  mkdir -p "$vendor"
+  tarball="$vendor/cua-driver-rs-${version}-darwin-universal-binary.tar.gz"
+  tarball_name="cua-driver-rs-${version}-darwin-universal-binary.tar.gz"
+  url="https://github.com/trycua/cua/releases/download/cua-driver-rs-v${version}/${tarball_name}"
+  pin="$vendor/checksums-${version}.txt"
+  expected_sha="${CUA_DRIVER_SHA256:-}"
+  if [[ -z "$expected_sha" && -f "$pin" ]]; then
+    expected_sha="$(awk -v f="$tarball_name" '$2 == f { print $1; exit }' "$pin")"
+  fi
+  if [[ -z "$expected_sha" ]]; then
+    echo "ERROR: no SHA-256 pin for ${tarball_name}." >&2
+    echo "Add $pin or set CUA_DRIVER_SHA256. Refusing to fetch an unsigned tarball." >&2
+    exit 1
+  fi
+  if [[ ! -f "$vendor/cua-driver" ]]; then
+    echo "Fetching MIT cua-driver ${version} …"
+    if curl -fsSL --retry 3 -o "$tarball" "$url"; then
+      actual_sha="$(shasum -a 256 "$tarball" | awk '{ print $1 }')"
+      if [[ "$actual_sha" != "$expected_sha" ]]; then
+        echo "ERROR: cua-driver tarball SHA-256 mismatch" >&2
+        echo "  expected: $expected_sha" >&2
+        echo "  actual:   $actual_sha" >&2
+        rm -f "$tarball"
+        exit 1
+      fi
+      tmp="$(mktemp -d)"
+      tar -xzf "$tarball" -C "$tmp"
+      found="$(find "$tmp" -type f -name cua-driver | head -1 || true)"
+      if [[ -n "$found" ]]; then
+        cp "$found" "$vendor/cua-driver"
+        chmod +x "$vendor/cua-driver"
+      else
+        echo "WARNING: cua-driver tarball had no cua-driver binary" >&2
+      fi
+      rm -rf "$tmp"
+    else
+      echo "WARNING: could not fetch cua-driver from $url (Act v2 optional)" >&2
+    fi
+  fi
+  if [[ -f "$vendor/cua-driver" ]]; then
+    driver_src="$vendor/cua-driver"
+  fi
+fi
+if [[ -n "$driver_src" ]]; then
+  cp "$driver_src" "$helpers_dir/cua-driver"
+  chmod +x "$helpers_dir/cua-driver"
+  echo "Bundled cua-driver: $helpers_dir/cua-driver"
+else
+  echo "NOTE: cua-driver not bundled (set CUA_DRIVER_BIN or CUA_DRIVER_FETCH=1). HID replay still works."
+fi
 icon_key="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$contents/Info.plist" 2>/dev/null || true)"
 if [[ "$icon_key" != "AppIcon" ]]; then
   echo "apps/cua/Info.plist must set CFBundleIconFile=AppIcon (got: ${icon_key:-<missing>})" >&2
@@ -66,6 +129,11 @@ if [[ "$identity" == "-" ]]; then
   exit 1
 fi
 codesign --force --sign "$identity" --timestamp=none "$macos_dir/lumen-cua"
+if [[ -x "$helpers_dir/cua-driver" ]]; then
+  # Same flags as lumen-cua. Do not enable Hardened Runtime on the nested
+  # binary unless the host has matching entitlements.
+  codesign --force --sign "$identity" --timestamp=none "$helpers_dir/cua-driver"
+fi
 codesign --force --sign "$identity" --timestamp=none "$app"
 codesign --verify --deep --strict --verbose=1 "$app"
 requirement="$(codesign -d -r- "$app" 2>&1 | sed -n 's/^designated => //p')"

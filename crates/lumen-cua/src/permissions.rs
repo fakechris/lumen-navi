@@ -183,9 +183,11 @@ fn kick_shareable_content_registration() -> Result<(), DirectCaptureError> {
     }
 
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    let completion = RcBlock::new(move |_content: *mut SCShareableContent, _error: *mut NSError| {
-        let _ = tx.send(());
-    });
+    let completion = RcBlock::new(
+        move |_content: *mut SCShareableContent, _error: *mut NSError| {
+            let _ = tx.send(());
+        },
+    );
     unsafe {
         SCShareableContent::getShareableContentWithCompletionHandler(&completion);
     }

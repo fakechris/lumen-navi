@@ -50,4 +50,9 @@ apps/desktop/src-tauri/binaries/lumen-daemon*
 !apps/desktop/src-tauri/binaries/.gitkeep
 apps/desktop/src-tauri/helpers/Lumen Cua.app/
 !apps/desktop/src-tauri/helpers/.gitkeep
+
+# Optional MIT cua-driver payload (fetched by prepare-cua-app.sh)
+apps/cua/vendor/cua-driver
+apps/cua/vendor/*.tar.gz
+apps/cua/vendor/*.tgz
 .freebuff/

@@ -813,6 +813,7 @@ pub fn replay_history_skill(
     state: State<'_, AppState>,
     slot_start: String,
     type_texts: Option<Vec<Option<String>>>,
+    allow_foreground: Option<bool>,
 ) -> Result<String, String> {
     let start = chrono::DateTime::parse_from_rfc3339(&slot_start)
         .or_else(|_| chrono::DateTime::parse_from_rfc3339(&slot_start.replace('Z', "+00:00")))
@@ -835,9 +836,14 @@ pub fn replay_history_skill(
     if skill.steps.len() < 2 {
         return Err("步骤太少，无法回放".into());
     }
-    let ops = expand_skill_steps(&slot, &skill.steps, type_texts.as_deref());
-    run_replay(&state, ops)?;
-    Ok(format!("已回放 {} 步「{}」", skill.steps.len(), skill.name))
+    let ops = expand_skill_steps(
+        &slot,
+        &skill.steps,
+        type_texts.as_deref(),
+        allow_foreground.unwrap_or(false),
+    );
+    let effects = run_replay(&state, ops)?;
+    Ok(format_replay_message(skill.steps.len(), &skill.name, &effects))
 }
 
 /// Shared step expansion: slot apps provide bundle ids; type steps take
@@ -846,6 +852,7 @@ pub(crate) fn expand_skill_steps(
     slot: &lumen_api::HistorySlotDto,
     steps: &[lumen_api::SkillStepDto],
     type_texts: Option<&[Option<String>]>,
+    allow_foreground: bool,
 ) -> Vec<lumen_cua::InputStep> {
     let mut ops = Vec::new();
     for (i, step) in steps.iter().enumerate() {
@@ -871,18 +878,40 @@ pub(crate) fn expand_skill_steps(
             ny: step.rel_y,
             wait_ms: Some(200),
             text,
+            dry: false,
+            allow_foreground,
         });
     }
     ops
 }
 
-pub(crate) fn run_replay(state: &State<'_, AppState>, ops: Vec<lumen_cua::InputStep>) -> Result<(), String> {
+pub(crate) fn run_replay(
+    state: &State<'_, AppState>,
+    ops: Vec<lumen_cua::InputStep>,
+) -> Result<Vec<lumen_cua::ActionResult>, String> {
     state
         .cua
         .ensure_running()
         .map_err(err)?
         .input_replay(ops)
         .map_err(|e| format!("CUA 回放失败: {e}"))
+}
+
+fn format_replay_message(
+    step_count: usize,
+    name: &str,
+    effects: &[lumen_cua::ActionResult],
+) -> String {
+    if effects.is_empty() {
+        return format!("已回放 {step_count} 步「{name}」");
+    }
+    let summary = effects
+        .iter()
+        .enumerate()
+        .map(|(i, e)| format!("{}. {}", i + 1, e.summary_line()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("回放 {step_count} 步「{name}」: {summary}")
 }
 
 // --- Skill library (D2) ----------------------------------------------------
@@ -913,7 +942,7 @@ pub(crate) fn expand_skill_steps_for_replay(sk: &lumen_api::SkillDto) -> Vec<lum
         suggested_skills: vec![],
         skill_checked: true,
     };
-    expand_skill_steps(&slot, &sk.steps, None)
+    expand_skill_steps(&slot, &sk.steps, None, false)
 }
 
 /// Tray replay entry (no State wrapper difference — same AppStates).
@@ -921,7 +950,7 @@ pub(crate) fn run_tray_replay(
     state: &tauri::State<'_, crate::state::AppState>,
     ops: Vec<lumen_cua::InputStep>,
 ) -> Result<(), String> {
-    run_replay(state, ops)
+    run_replay(state, ops).map(|_| ())
 }
 
 /// Library skills (newest-updated first).
@@ -983,10 +1012,34 @@ pub fn skill_replay(
         suggested_skills: vec![],
         skill_checked: true,
     };
-    let ops = expand_skill_steps(&slot, &skill.steps, type_texts.as_deref());
-    run_replay(&state, ops)?;
+    let ops = expand_skill_steps(&slot, &skill.steps, type_texts.as_deref(), false);
+    let effects = run_replay(&state, ops)?;
     let _ = state.store.record_skill_used(&name);
-    Ok(format!("已回放 {} 步「{}」", skill.steps.len(), skill.name))
+    Ok(format_replay_message(skill.steps.len(), &skill.name, &effects))
+}
+
+#[tauri::command]
+pub fn act_driver_status(
+    state: State<'_, AppState>,
+) -> Result<lumen_cua::ActDriverInfo, String> {
+    state
+        .cua
+        .ensure_running()
+        .map_err(err)?
+        .act_driver_status()
+        .map_err(err)
+}
+
+#[tauri::command]
+pub fn act_driver_ensure(
+    state: State<'_, AppState>,
+) -> Result<lumen_cua::ActDriverInfo, String> {
+    state
+        .cua
+        .ensure_running()
+        .map_err(err)?
+        .act_driver_ensure()
+        .map_err(err)
 }
 
 fn step_bundle(

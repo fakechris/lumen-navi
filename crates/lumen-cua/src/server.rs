@@ -1,13 +1,13 @@
 use std::path::Path;
-use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+#[cfg(target_os = "macos")]
+use lumen_platform::AxTreeWalkConfig;
 use lumen_platform::{DisplayEnumerator, DisplayId, ScreenCapturer};
 #[cfg(target_os = "macos")]
 use lumen_platform_macos::{ax_tree::walk_window, MacDisplays, MacScreenCapturer};
-#[cfg(target_os = "macos")]
-use lumen_platform::AxTreeWalkConfig;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::protocol::{
@@ -45,6 +45,7 @@ pub async fn serve(socket_path: &Path, token_file: &Path) -> Result<()> {
         std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
         tracing::info!(socket = %socket_path.display(), "Lumen Cua ready");
 
+        let serve_paths = paths_from_endpoints(socket_path, token_file);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel(1);
         loop {
             tokio::select! {
@@ -52,8 +53,9 @@ pub async fn serve(socket_path: &Path, token_file: &Path) -> Result<()> {
                     let (stream, _) = accepted?;
                     let token = token.clone();
                     let shutdown_tx = shutdown_tx.clone();
+                    let serve_paths = serve_paths.clone();
                     tokio::spawn(async move {
-                        match handle_connection(stream, &token).await {
+                        match handle_connection(stream, &token, &serve_paths).await {
                             Ok(true) => { let _ = shutdown_tx.send(()).await; }
                             Ok(false) => {}
                             Err(error) => tracing::warn!(%error, "Lumen Cua request failed"),
@@ -63,6 +65,7 @@ pub async fn serve(socket_path: &Path, token_file: &Path) -> Result<()> {
                 _ = shutdown_rx.recv() => break,
             }
         }
+        crate::act_driver::stop();
         let _ = std::fs::remove_file(socket_path);
         Ok(())
     }
@@ -74,7 +77,23 @@ pub async fn serve(socket_path: &Path, token_file: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-async fn handle_connection(stream: tokio::net::UnixStream, token: &str) -> Result<bool> {
+fn paths_from_endpoints(socket_path: &Path, token_file: &Path) -> crate::CuaPaths {
+    let data_dir = socket_path
+        .parent()
+        .and_then(|run| run.parent())
+        .unwrap_or(socket_path);
+    let mut paths = crate::CuaPaths::under(data_dir);
+    paths.socket = socket_path.to_path_buf();
+    paths.token_file = token_file.to_path_buf();
+    paths
+}
+
+#[cfg(unix)]
+async fn handle_connection(
+    stream: tokio::net::UnixStream,
+    token: &str,
+    paths: &crate::CuaPaths,
+) -> Result<bool> {
     #[cfg(target_os = "macos")]
     crate::peer_auth::authorize_peer(&stream)?;
     let (read_half, mut write_half) = stream.into_split();
@@ -107,9 +126,11 @@ async fn handle_connection(stream: tokio::net::UnixStream, token: &str) -> Resul
         )
     } else {
         tracing::info!(command = ?request.command, "cua executing command");
-        let exec_result = execute(request.command).await;
+        let exec_result = execute(request.command, paths).await;
         match &exec_result {
-            Ok((result, payload)) => tracing::info!(result = ?result, payload_len = payload.len(), "cua execute ok"),
+            Ok((result, payload)) => {
+                tracing::info!(result = ?result, payload_len = payload.len(), "cua execute ok")
+            }
             Err(e) => tracing::warn!(error = %e, "cua execute failed"),
         }
         match exec_result {
@@ -136,10 +157,10 @@ async fn handle_connection(stream: tokio::net::UnixStream, token: &str) -> Resul
     Ok(is_shutdown && response.0.ok)
 }
 
-async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
+async fn execute(command: Command, paths: &crate::CuaPaths) -> Result<(ResponseResult, Vec<u8>)> {
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = command;
+        let _ = (command, paths);
         bail!("Lumen Cua capture service requires macOS")
     }
 
@@ -187,7 +208,10 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
             };
             Ok((ResponseResult::RawFrame { frame: meta }, frame.bgra))
         }
-        Command::Shutdown => Ok((ResponseResult::Ack, Vec::new())),
+        Command::Shutdown => {
+            crate::act_driver::stop();
+            Ok((ResponseResult::Ack, Vec::new()))
+        }
         Command::AxWalk {
             pid,
             window_id,
@@ -253,7 +277,11 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
                     bail!("AX walk channel closed unexpectedly");
                 }
                 Err(_) => {
-                    tracing::warn!(pid, timeout_ms = walk_timeout.as_millis() as u64, "AxWalk TIMED OUT (thread continues in background)");
+                    tracing::warn!(
+                        pid,
+                        timeout_ms = walk_timeout.as_millis() as u64,
+                        "AxWalk TIMED OUT (thread continues in background)"
+                    );
                     bail!("AX walk timed out after {}ms", walk_timeout.as_millis());
                 }
             };
@@ -273,8 +301,54 @@ async fn execute(command: Command) -> Result<(ResponseResult, Vec<u8>)> {
             Ok((ResponseResult::AxSnapshot { meta }, text_bytes))
         }
         Command::InputReplay { steps } => {
-            crate::input::replay(&steps)?;
-            Ok((ResponseResult::Ack, Vec::new()))
+            let effects = tokio::task::spawn_blocking(move || crate::input::replay(&steps))
+                .await
+                .map_err(|e| anyhow::anyhow!("input replay join: {e}"))??;
+            Ok((ResponseResult::Replay { effects }, Vec::new()))
+        }
+        Command::Idle => Ok((
+            ResponseResult::Idle {
+                status: crate::idle::snapshot(),
+            },
+            Vec::new(),
+        )),
+        Command::ProbeApp { name_or_path } => {
+            let report = crate::probe::probe_app(&name_or_path)?;
+            Ok((ResponseResult::Probe { report }, Vec::new()))
+        }
+        Command::CaptureWindow {
+            window_id,
+            max_edge,
+            jpeg,
+            jpeg_quality,
+        } => {
+            let shot = tokio::task::spawn_blocking(move || {
+                crate::window_capture::capture_window(window_id, max_edge, jpeg, jpeg_quality)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("window capture join: {e}"))??;
+            Ok((
+                ResponseResult::WindowFrame {
+                    frame: shot.frame,
+                    window_id,
+                    empty: shot.empty,
+                    diagnosis: shot.diagnosis,
+                },
+                shot.bytes,
+            ))
+        }
+        Command::ActDriverStatus => Ok((
+            ResponseResult::ActDriver {
+                info: crate::act_driver::status(paths),
+            },
+            Vec::new(),
+        )),
+        Command::ActDriverEnsure => {
+            let paths = paths.clone();
+            let info = tokio::task::spawn_blocking(move || crate::act_driver::ensure(&paths))
+                .await
+                .map_err(|e| anyhow::anyhow!("act driver ensure join: {e}"))??;
+            Ok((ResponseResult::ActDriver { info }, Vec::new()))
         }
     }
 }

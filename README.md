@@ -23,7 +23,7 @@ Local-first **continuous context**. Watch the screen (and optionally the mic), k
 | **Time** | Frontmost-app tracking, idle vs away, 15-minute History cards with LLM narrative, app/scene ranking, day timeline. |
 | **Search** | On-device OCR + transcript FTS over what was on screen. |
 | **AI** | Optional local/OpenAI-compat Roast and Chat over the day's evidence. Conservative CUA-replay chips on long stretches. |
-| **Act (optional)** | Selection popup today; computer-use later via MIT **cua-driver** only. Never used for capture. |
+| **Act (optional)** | Selection popup today; CUA-replay chips default to background input (no focus steal). MIT **cua-driver** later, embedded in Lumen Cua.app. Never used for capture. |
 
 All of it stays under `~/Library/Application Support/LumenNavi/` (Windows: `%LOCALAPPDATA%\LumenNavi\`).
 
@@ -33,7 +33,7 @@ All of it stays under `~/Library/Application Support/LumenNavi/` (Windows: `%LOC
 |-------|------|--------|
 | **Observe** | Multi-source intake | Screen + mic productized; browser extension optional |
 | **Memory** | Durable store + async process | SQLite + FTS + jobs (OCR / AX / ASR) |
-| **Act** | Optional computer-use | Selection popup now; **cua-driver** (MIT) later |
+| **Act** | Optional computer-use | Selection popup + gated replay; MIT **cua-driver** nested in Lumen Cua.app |
 
 Full write-up: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · roadmap: [`docs/PLAN.md`](docs/PLAN.md) · capture policy: [`docs/OBSERVE_CAPTURE.md`](docs/OBSERVE_CAPTURE.md)
 

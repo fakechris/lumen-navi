@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { SkillDto,
+  ActDriverInfo,
   ActivitySegment,
   SceneDay,
   HistorySlot,
@@ -82,10 +83,15 @@ export const api = {
     invoke<SceneDay>("activity_scenes", { day }),
   activityHistorySlots: (day: string) =>
     invoke<HistorySlot[]>("activity_history_slots", { day }),
-  replayHistorySkill: (slotStart: string, typeTexts?: Array<string | null>) =>
+  replayHistorySkill: (
+    slotStart: string,
+    typeTexts?: Array<string | null>,
+    allowForeground?: boolean,
+  ) =>
     invoke<string>("replay_history_skill", {
       slotStart,
       typeTexts: typeTexts ?? null,
+      allowForeground: allowForeground ?? false,
     }),
   appIcons: (bundleIds: string[]) =>
     invoke<Record<string, string>>("app_icons", { bundleIds }),
@@ -195,6 +201,8 @@ export const api = {
   skillsDelete: (name: string) => invoke<void>("skills_delete", { name }),
   skillReplay: (name: string, typeTexts?: Array<string | null>) =>
     invoke<string>("skill_replay", { name, typeTexts: typeTexts ?? null }),
+  actDriverStatus: () => invoke<ActDriverInfo>("act_driver_status"),
+  actDriverEnsure: () => invoke<ActDriverInfo>("act_driver_ensure"),
   agentOpenInTerminal: (agentId: string, prompt: string) =>
     invoke<string>("agent_open_in_terminal", { agentId, prompt }),
   assistantCancel: (id: string) => invoke<void>("assistant_cancel", { id }),

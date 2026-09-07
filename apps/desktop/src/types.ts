@@ -66,6 +66,19 @@ export interface SuggestedSkill {
   steps?: SkillStep[];
 }
 
+export interface ActDriverInfo {
+  present: boolean;
+  running: boolean;
+  binary_path?: string | null;
+  socket_path?: string | null;
+  mcp_command?: string | null;
+  mcp_args?: string[];
+  host_bundle_id: string;
+  embedded: boolean;
+  version?: string | null;
+  error?: string | null;
+}
+
 export interface SkillStep {
   action: string;
   app: string;

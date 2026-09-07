@@ -7,8 +7,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::protocol::{
-    Command, InputStep, RequestEnvelope, ResponseEnvelope, ResponseResult, MAX_HEADER_BYTES,
-    MAX_PAYLOAD_BYTES, PROTOCOL_VERSION,
+    ActDriverInfo, ActionResult, Command, IdleStatus, InputStep, ProbeReport, RequestEnvelope,
+    ResponseEnvelope, ResponseResult, MAX_HEADER_BYTES, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION,
 };
 use crate::CuaStatus;
 
@@ -181,9 +181,79 @@ impl CuaClient {
     }
 
     /// Run an explicit Act replay. Observe never calls this.
-    pub fn input_replay(&self, steps: Vec<InputStep>) -> Result<(), CuaError> {
+    pub fn input_replay(&self, steps: Vec<InputStep>) -> Result<Vec<ActionResult>, CuaError> {
         match self.call(Command::InputReplay { steps })?.0 {
-            ResponseResult::Ack => Ok(()),
+            ResponseResult::Replay { effects } => Ok(effects),
+            ResponseResult::Ack => Ok(Vec::new()),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    pub fn idle(&self) -> Result<IdleStatus, CuaError> {
+        match self.call(Command::Idle)?.0 {
+            ResponseResult::Idle { status } => Ok(status),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    pub fn probe_app(&self, name_or_path: impl Into<String>) -> Result<ProbeReport, CuaError> {
+        match self
+            .call(Command::ProbeApp {
+                name_or_path: name_or_path.into(),
+            })?
+            .0
+        {
+            ResponseResult::Probe { report } => Ok(report),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    pub fn capture_window(
+        &self,
+        window_id: u64,
+        max_edge: u32,
+        jpeg: bool,
+        jpeg_quality: u8,
+    ) -> Result<(lumen_platform::ScreenshotFrame, bool, Option<String>), CuaError> {
+        let (result, payload) = self.call(Command::CaptureWindow {
+            window_id,
+            max_edge,
+            jpeg,
+            jpeg_quality,
+        })?;
+        match result {
+            ResponseResult::WindowFrame {
+                frame,
+                empty,
+                diagnosis,
+                ..
+            } => Ok((
+                lumen_platform::ScreenshotFrame {
+                    png_or_jpeg_bytes: payload,
+                    media_type: frame.media_type,
+                    width: frame.width,
+                    height: frame.height,
+                    display_id: lumen_platform::DisplayId(frame.display_id),
+                },
+                empty,
+                diagnosis,
+            )),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Act only. Does not start the driver. Observe must not call this.
+    pub fn act_driver_status(&self) -> Result<ActDriverInfo, CuaError> {
+        match self.call(Command::ActDriverStatus)?.0 {
+            ResponseResult::ActDriver { info } => Ok(info),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Act only. Spawns embedded cua-driver as a child of Lumen Cua if needed.
+    pub fn act_driver_ensure(&self) -> Result<ActDriverInfo, CuaError> {
+        match self.call(Command::ActDriverEnsure)?.0 {
+            ResponseResult::ActDriver { info } => Ok(info),
             other => Err(unexpected(other)),
         }
     }

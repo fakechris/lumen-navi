@@ -113,8 +113,10 @@ Product contract and setup: [`BROWSER_CAPTURE.md`](BROWSER_CAPTURE.md).
 
 ## Phase A1 — Act (optional)
 
-- Bundle/spawn **cua-driver** (MIT only from trycua/cua — MCP-native desktop automation driver)  
-- `lumen-act` thin client  
+- [x] CUA replay chips on 15-minute cards (HID fold, confirm, type-text prompt)
+- [x] Lumen Cua protocol v4: `Idle` / `ProbeApp` / `CaptureWindow` / `InputReplay` → `ActionResult`
+- [x] Zero-focus default (`CGEventPostToPid`); four gates; stop-lines (terminal submit, payment copy, `cmd+q`)
+- [x] **A1b:** embed MIT **cua-driver** inside `Lumen Cua.app` (`serve --embedded`, TCC on `com.lumenopen.cua`). Navi never spawns it. Lazy start via `ActDriverEnsure`. Never `cua-agent[omni]`.
 - Never block intake  
 - First Act-flavored surface shipped: **selection popup (划词助手)** — text-in → action-out
   (translate/ask via OpenAI-compatible HTTP today). Its action seam

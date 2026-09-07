@@ -239,6 +239,9 @@ pub fn sanitize_suggested_skill(raw: &SuggestedSkillDto) -> Option<SuggestedSkil
     {
         return None;
     }
+    if looks_irreversible(trigger) || looks_irreversible(prompt) || looks_irreversible(&name) {
+        return None;
+    }
     let steps: Vec<SkillStepDto> = raw.steps.iter().filter_map(sanitize_step).take(8).collect();
     if steps.len() < 2 {
         return None;
@@ -266,6 +269,12 @@ fn sanitize_step(step: &SkillStepDto) -> Option<SkillStepDto> {
         return None;
     }
     if action == "shortcut" && step.keys.as_deref().unwrap_or("").trim().is_empty() {
+        return None;
+    }
+    if action == "submit" && is_terminal_or_ide_app(app) {
+        return None;
+    }
+    if is_dangerous_shortcut(step.keys.as_deref()) {
         return None;
     }
     let target = step
@@ -321,6 +330,59 @@ fn strip_skill_suffix(name: &str) -> String {
 
 fn is_messaging_app(name: &str) -> bool {
     crate::slot_actions::is_messaging_app(name)
+}
+
+fn is_terminal_or_ide_app(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    [
+        "terminal",
+        "iterm",
+        "warp",
+        "kitty",
+        "ghostty",
+        "alacritty",
+        "cursor",
+        "visual studio code",
+        "vscode",
+        "zed",
+        "xcode",
+        "intellij",
+        "goland",
+        "webstorm",
+        "pycharm",
+    ]
+    .iter()
+    .any(|needle| n.contains(needle))
+}
+
+fn is_dangerous_shortcut(keys: Option<&str>) -> bool {
+    let Some(keys) = keys else {
+        return false;
+    };
+    let k = keys.to_ascii_lowercase().replace(' ', "");
+    matches!(
+        k.as_str(),
+        "cmd+q" | "command+q" | "cmd+shift+q" | "command+shift+q"
+    )
+}
+
+fn looks_irreversible(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    [
+        "付款",
+        "支付",
+        "下单",
+        "删除",
+        "清空回收站",
+        "覆盖保存",
+        "同意条款",
+        "pay now",
+        "place order",
+        "delete permanently",
+        "empty trash",
+    ]
+    .iter()
+    .any(|n| t.contains(&n.to_ascii_lowercase()))
 }
 
 fn evidence_title(ev: &SlotEvidence, slot: &HistorySlotDto) -> Option<String> {
@@ -912,5 +974,33 @@ mod tests {
         assert_eq!(ok.name, "Harness 任务转派复查");
         assert_eq!(ok.steps.len(), 3);
         assert_eq!(ok.steps[0].action, "focus");
+    }
+
+    #[test]
+    fn sanitize_drops_terminal_submit_and_payment_skills() {
+        assert!(sanitize_suggested_skill(&SuggestedSkillDto {
+            kind: "cua".into(),
+            name: "终端发送".into(),
+            trigger: "when the shell prompt is ready".into(),
+            prompt: "在 Terminal 里回车执行刚才那行".into(),
+            verify: String::new(),
+            steps: vec![
+                step("focus", "Terminal", "bash", None),
+                step("submit", "Terminal", "bash", Some("return")),
+            ],
+        })
+        .is_none());
+        assert!(sanitize_suggested_skill(&SuggestedSkillDto {
+            kind: "cua".into(),
+            name: "确认付款".into(),
+            trigger: "checkout page is open".into(),
+            prompt: "把订单提交并付款".into(),
+            verify: String::new(),
+            steps: vec![
+                step("focus", "Safari", "Checkout", None),
+                step("click", "Safari", "Checkout", None),
+            ],
+        })
+        .is_none());
     }
 }

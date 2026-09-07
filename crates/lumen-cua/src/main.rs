@@ -27,11 +27,13 @@ fn main() -> Result<()> {
                 .with_writer(file)
                 .try_init();
         } else {
-            let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "lumen_cua=info,warn".into());
+            let filter =
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| "lumen_cua=info,warn".into());
             let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
         }
     } else {
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "lumen_cua=info,warn".into());
+        let filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| "lumen_cua=info,warn".into());
         let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
     }
 

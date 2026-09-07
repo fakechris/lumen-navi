@@ -39,6 +39,9 @@ objc2-screen-capture-kit = { version = "0.3.2", default-features = false, featur
 objc2-core-graphics = "0.3.2"
 block2 = "0.6"
 core-foundation = "0.10"
+core-graphics = "0.24"
+foreign-types = "0.5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 libc = "0.2"
 security-framework = "3.7"
 
