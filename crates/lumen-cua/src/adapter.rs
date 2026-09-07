@@ -122,9 +122,10 @@ impl AxTreeWalker for CuaAxTreeAdapter {
         config: AxTreeWalkConfig,
     ) -> Result<AxTreeSnapshot, PlatformError> {
         let client = self.client.clone();
-        let result = tokio::task::spawn_blocking(move || client.walk_ax_tree(pid, window_id, &config))
-            .await
-            .map_err(|e| PlatformError::Message(format!("Lumen Cua AX task: {e}")))?;
+        let result =
+            tokio::task::spawn_blocking(move || client.walk_ax_tree(pid, window_id, &config))
+                .await
+                .map_err(|e| PlatformError::Message(format!("Lumen Cua AX task: {e}")))?;
         match result {
             Ok(snap) => Ok(snap),
             Err(CuaError::WindowGone(id)) => Err(PlatformError::WindowGone(id)),

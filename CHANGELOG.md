@@ -4,6 +4,14 @@
 
 ### Added
 
+- Act v1 in Lumen Cua: L0 app probe, four delivery gates, window-level
+  verify, stop-lines, and background `CGEventPostToPid` replay. Default
+  replay does not steal focus. Desktop confirms each skill before Act.
+- Act v2: optional MIT cua-driver nested in `Lumen Cua.app/Contents/Helpers`
+  and spawned as a Cua child (`CUA_DRIVER_EMBEDDED=1`). Observe never
+  starts it. Missing binary is a soft skip. Fetch is SHA-256 pinned.
+- Settings → 技能库: Act engine status and a one-shot 「启动 Act 引擎」.
+
 - 设置 → 快捷键: quick-chat (快捷对话) global shortcut is now configurable
   (record-capture UI, live re-registration, conflict surfaced with the OS
   reason; empty disables). Stored in `navi.toml` `[shortcuts].composer`,

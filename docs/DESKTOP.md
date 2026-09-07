@@ -45,6 +45,7 @@ scripts/macos/ensure-local-identity.sh
 scripts/macos/prepare-cua-app.sh "$(rustc -vV | sed -n 's/^host: //p')"
 # → apps/desktop/src-tauri/helpers/Lumen Cua.app
 #    Contents/MacOS/lumen-cua
+#    Contents/Helpers/cua-driver       # optional MIT Act engine (CUA_DRIVER_FETCH=1)
 #    Contents/Resources/AppIcon.icns   # CUA cursor mark from apps/cua/icon/
 # Navi installs the helper to /Applications/Lumen Cua.app on first use (own TCC identity).
 
@@ -202,7 +203,8 @@ The other permissions belong to Lumen Navi.
    (channel toggles, input monitoring, browser-extension pairing), **语音与转写**
    (ASR engine/models, mic device + record test), **AI 与划词** (global LLM
    config, selection popup), **快捷键** (quick-chat global shortcut recorder),
-   **技能库** (replayable workflows, list scrolls on its own).
+   **技能库** (replayable workflows, list scrolls on its own; replay defaults
+   to background input and reports per-step `ActionResult`).
 
 ## Quick composer (快捷对话)
 

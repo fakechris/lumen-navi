@@ -11,6 +11,7 @@ import { CHAT_PROVIDERS, getProvider } from "../llm/catalog";
 import { Button, NavItem, Notice, StatusDot } from "../design";
 import type { IconName } from "../design";
 import type {
+  ActDriverInfo,
   AsrModelStatus,
   SkillDto,
   AssistantConfig,
@@ -1608,6 +1609,7 @@ function ShortcutCard({
 /** Settings → 技能库: library of CUA-replayable workflows (D2). */
 function SkillLibraryCard() {
   const [skills, setSkills] = useState<SkillDto[] | null>(null);
+  const [driver, setDriver] = useState<ActDriverInfo | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -1615,6 +1617,11 @@ function SkillLibraryCard() {
       setSkills(await api.skillsList());
     } catch {
       setSkills([]);
+    }
+    try {
+      setDriver(await api.actDriverStatus());
+    } catch {
+      setDriver(null);
     }
   }, []);
 
@@ -1625,7 +1632,7 @@ function SkillLibraryCard() {
   async function replay(sk: SkillDto) {
     if (
       !window.confirm(
-        `按 ${sk.steps.length} 步回放「${sk.name}」？\n会激活对应窗口并发送键鼠。`,
+        `按 ${sk.steps.length} 步回放「${sk.name}」？\n默认不抢焦点；失败会告诉你原因。`,
       )
     )
       return;
@@ -1653,8 +1660,38 @@ function SkillLibraryCard() {
     <div className="card">
       <h3>技能库</h3>
       <p className="meta mt">
-        从 15 分钟卡提取的可回放工作流。启用后：触发场景命中时菜单栏会出现「试试」建议；也可手动回放。
+        从 15 分钟卡提取的可回放工作流。启用后：触发场景命中时菜单栏会出现「试试」建议；也可手动回放。回放走 Lumen Cua，默认不抢焦点。
       </p>
+      <p className="meta mt">
+        Act 引擎（MIT cua-driver，嵌在 Lumen Cua 里）:{" "}
+        {driver == null
+          ? "未探测"
+          : driver.running
+            ? `运行中${driver.version ? ` · ${driver.version}` : ""}`
+            : driver.present
+              ? "已捆绑，未启动"
+              : "未捆绑（HID 回放仍可用）"}
+        {driver?.error ? ` · ${driver.error}` : ""}
+      </p>
+      {driver?.present && !driver.running && (
+        <div className="row mt">
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              void api
+                .actDriverEnsure()
+                .then((info) => setDriver(info))
+                .catch((e) => window.alert(String(e)))
+                .finally(() => setBusy(false));
+            }}
+          >
+            启动 Act 引擎
+          </Button>
+        </div>
+      )}
       <div className="stack mt skill-list-scroll">
         {skills === null && <p className="meta">加载中…</p>}
         {skills !== null && skills.length === 0 && (

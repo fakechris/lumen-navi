@@ -12,6 +12,8 @@ pub struct CuaPaths {
     pub app: PathBuf,
     pub socket: PathBuf,
     pub token_file: PathBuf,
+    /// Private socket for the embedded MIT cua-driver daemon (Act only).
+    pub driver_socket: PathBuf,
 }
 
 impl CuaPaths {
@@ -43,6 +45,7 @@ impl CuaPaths {
             app: root.join("Lumen Cua.app"),
             socket: run_dir.join("cua.sock"),
             token_file: run_dir.join("cua.token"),
+            driver_socket: run_dir.join("driver.sock"),
         }
     }
 }

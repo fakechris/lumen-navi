@@ -38,12 +38,22 @@ Patterns borrowed:
 - **Fail soft** on enrichment — never drop raw capture because OCR/ASR failed
 - `platform` + `platform-macos` split
 
-### 2.2 cua-driver — open-source Act plane only
+### 2.2 Act plane — Lumen Cua gates, cua-driver later
 
-- **Upstream:** [trycua/cua](https://github.com/trycua/cua) · **`cua-driver` MIT**  
-- **Role:** optional computer-use *action* (click/type/launch without stealing focus).  
-- **Not intake.** Observe (screenshots/audio) is Navi-owned; cua-driver is for *doing*, not *watching*.  
-- **Integration (later):** bundle/spawn MIT binary or MCP/CLI; thin `lumen-act` client.  
+- **Now:** explicit replay through `Lumen Cua.app` (`InputReplay`). Default
+  delivery is background (`CGEventPostToPid`); activate is opt-in. Each step
+  returns `ActionResult` (`confirmed` / `partial` / `suspected_noop` /
+  `unverifiable` / `refused`). Four gates (frontmost, occlusion, presence,
+  focus lock) plus cross-Space refuse. Window screenshots and L0 `ProbeApp`
+  are Act-only — Observe screen sources never call them.
+- **A1b:** MIT **cua-driver** is nested at
+  `Lumen Cua.app/Contents/Helpers/cua-driver` and spawned as a child
+  (`CUA_DRIVER_EMBEDDED=1`, `serve --embedded --socket …/driver.sock`).
+  TCC stays on `com.lumenopen.cua`. Navi never spawns cua-driver; it only
+  calls `ActDriverStatus` / `ActDriverEnsure`. Coding agents should use the
+  returned `mcp_command` + `mcp_args` (stdio proxy onto that socket). HID
+  replay chips stay on `InputReplay`. Missing binary is a soft skip.
+- **Not intake.** Observe (screenshots/audio) is Navi-owned.  
 - **License line:** **cua-driver only** — never `cua-agent[omni]` (AGPL contagion). OCR stays Navi-owned.
 
 ```
@@ -52,8 +62,9 @@ Observe plane (Navi, media-first)
      ▼
 Memory plane (store + process)
      │
-     ▼ optional later
-Act plane ──► open-source cua-driver (MIT)
+     ▼ optional
+Act plane ──► Lumen Cua (gates + replay)
+                 └── embedded cua-driver (MIT, optional binary)
 ```
 
 ---
@@ -122,7 +133,7 @@ Act plane ──► open-source cua-driver (MIT)
        └─ lumen_asr bridge (OPTIONAL later)
                                 │
                                 ▼ optional
-                      lumen-act → cua-driver (MIT)
+                      lumen-act → Lumen Cua (gates) → later cua-driver (MIT)
 ```
 
 ---
@@ -162,7 +173,7 @@ to a single rev in the workspace `Cargo.toml`:
 | `lumen-sources-media` | **Now** — screen / audio / video |
 | `lumen-sources-browser` | Browser batch contract, URL redaction, positive content gate |
 | `lumen-sources-agent` | Later |
-| `lumen-act` | Optional act via cua-driver |
+| `lumen-act` | Optional act: Cua replay now; embedded cua-driver later |
 | `apps/desktop` | **Now** — Tauri shell |
 
 ### Dependency direction
@@ -273,7 +284,7 @@ Transport: Unix socket (`<data_dir>/daemon.sock`) for the desktop shell and `lum
 
 Agent surface (`lumen-daemon mcp`, stdio): `navi_status`, `navi_get_settings`, `navi_pause`, `navi_resume`, `navi_recent_context`, `navi_search`. No wipe and no Act tools on this server.
 
-Closed 15-minute History cards persist under `history.slot.*`. An optional local/OpenAI-compat narrative overlays title/body without blocking capture. App marks belong on these cards, not on the day roast. Messaging (WeChat / Feishu / Slack) stays in Observe and in the card: a named chat or a sent message gets a clause. Clicks are labeled only from the same app's nearest AX snapshot. The narrative prompt reads `interactions` (verb + app + target); `replay` is a separate CUA draft and is not the story source. A card may also carry a conservative CUA-replay chip when the HID trace is long enough to re-do the work. Chat/mail steps are omitted from that chip. Clicking it (after confirm) runs the draft once through Lumen Cua. Observe never executes it, and it does not write a skill file. Shift-click copies the draft.
+Closed 15-minute History cards persist under `history.slot.*`. An optional local/OpenAI-compat narrative overlays title/body without blocking capture. App marks belong on these cards, not on the day roast. Messaging (WeChat / Feishu / Slack) stays in Observe and in the card: a named chat or a sent message gets a clause. Clicks are labeled only from the same app's nearest AX snapshot. The narrative prompt reads `interactions` (verb + app + target); `replay` is a separate CUA draft and is not the story source. A card may also carry a conservative CUA-replay chip when the HID trace is long enough to re-do the work. Chat/mail steps are omitted from that chip. Clicking it (after confirm) runs the draft once through Lumen Cua with background delivery by default; a second confirm is required to borrow focus. Each step returns an `ActionResult`. Observe never executes it, and it does not write a skill file. Shift-click copies the draft.
 
 ### Source style
 
@@ -288,7 +299,7 @@ Closed 15-minute History cards persist under `history.slot.*`. An optional local
 2. Screen + audio 1h unattended with restart recovery.  
 3. Processors fail/retry without losing raw events.  
 4. Chrome later = edge adapter + API client only.  
-5. cua-driver act path wireable without touching Observe/Memory traits.
+5. cua-driver act path wireable without touching Observe/Memory traits (embedded in Lumen Cua, lazy).
 
 ---
 
