@@ -92,7 +92,7 @@ SmartScreen: **More info → Run anyway**. Install is per-user (`%LOCALAPPDATA%\
 
 ## Workspace
 
-```
+```text
 lumen-navi/
 ├── crates/          # daemon + libraries
 ├── apps/desktop/    # Tauri 2 shell (macOS + Windows)

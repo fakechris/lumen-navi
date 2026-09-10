@@ -92,7 +92,7 @@ SmartScreen：**更多信息 → 仍要运行**。按用户安装（`%LOCALAPPDA
 
 ## 仓库结构
 
-```
+```text
 lumen-navi/
 ├── crates/          # 守护进程 + 库
 ├── apps/desktop/    # Tauri 2 壳（macOS + Windows）
