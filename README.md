@@ -1,5 +1,12 @@
 # Lumen Navi
 
+[![Release](https://img.shields.io/github/v/release/fakechris/lumen-navi)](https://github.com/fakechris/lumen-navi/releases)
+[![CI Windows](https://github.com/fakechris/lumen-navi/actions/workflows/ci-windows.yml/badge.svg)](https://github.com/fakechris/lumen-navi/actions/workflows/ci-windows.yml)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%2010%2F11-blue)](#install)
+[![License: GPL--3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
+
+[English](README.md) | [中文](README.zh.md)
+
 Local-first **continuous context**. Watch the screen (and optionally the mic), keep it on your machine, and turn the day into a timeline you can search — and, if you want, talk to.
 
 **Repo:** https://github.com/fakechris/lumen-navi
@@ -51,7 +58,7 @@ Full write-up: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · roadmap: [`docs
 
 ## Install
 
-Download from **[GitHub Releases](https://github.com/fakechris/lumen-navi/releases/tag/v0.2.0)** (macOS arm64 / Intel DMG, Windows x64 NSIS).
+Download from **[GitHub Releases](https://github.com/fakechris/lumen-navi/releases/latest)** (macOS arm64 / Intel DMG, Windows x64 NSIS).
 
 These builds are **not Apple-notarized** (and the Windows installer is unsigned). That is expected.
 
