@@ -10,7 +10,8 @@ schema 12 adds replay metadata. Observe remains independent of OCR and Act.
 `heartbeat`). New producers also send `source_instance_id` (capture-lifetime UUID),
 `source_seq` (positive, increasing per emitted focus sample), `window_id` and `pid`.
 `SourceEvent.ts` is the UTC capture time, not receipt time. The store records both
-capture and receipt milliseconds. Window identity includes process and window ID;
+capture and receipt milliseconds. All new interval endpoints are normalized to
+millisecond precision before projection. Window identity includes process and window ID;
 a source restart, privacy discontinuity or backward clock change begins a new
 source lifetime. A numeric window ID is never a permanent global identity.
 
@@ -19,8 +20,11 @@ Schema 12 interns repeated payload identities in `activity_sample_identities`.
 and identity reference. Heartbeats do not create screenshot artifacts or flood
 the general `events` table. Changed-focus events still use the existing event
 path. Exact sample replays are idempotent; conflicting reuse of event or source
-sequence identity is rejected. A late sample rebuilds that lifetime in sequence
-order. Normal ordered input folds incrementally into `activity_segments`.
+sequence identity is rejected. Each sample materializes its interval to the next consecutive sample in
+`activity_segments`. Ordered and late arrivals update at most two intervals (the
+new sample and its predecessor); ingestion never rebuilds a whole lifetime.
+Reads merge adjacent equal identities after releasing the database lock.
+Day/range reads use an indexed time window, with one database read per range.
 
 Legacy input without lifetime/sequence remains accepted. Its existing projection
 is preserved. Previously discarded legacy heartbeats cannot be reconstructed;

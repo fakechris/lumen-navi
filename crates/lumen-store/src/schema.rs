@@ -291,5 +291,6 @@ CREATE TABLE activity_samples (
  UNIQUE(source_instance_id, source_seq)
 );
 CREATE INDEX idx_activity_samples_time ON activity_samples(captured_ms);
-CREATE INDEX idx_activity_segments_stream ON activity_segments(source_instance_id);
+CREATE INDEX idx_activity_segments_stream ON activity_segments(source_instance_id,last_source_seq);
+CREATE INDEX IF NOT EXISTS idx_activity_segments_end_time ON activity_segments(julianday(ended_at));
 "#;

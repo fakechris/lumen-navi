@@ -337,6 +337,15 @@ impl SqliteStore {
         let mut seen = HashSet::new();
         let mut duplicates = 0;
         for record in records {
+            // Sequenced activity has its own conflict-aware identity contract.
+            // Do not discard event IDs before validating source sequence/body.
+            if record.event.source == SourceKind::Activity
+                && record.event.kind == event_kind::ACTIVITY_FOCUS_V1
+                && record.event.payload.get("source_instance_id").is_some()
+            {
+                pending.push(record);
+                continue;
+            }
             let event_id = record.event.id.to_string();
             let exists = tx
                 .query_row(
@@ -2614,6 +2623,17 @@ impl SqliteStore {
     /// start time. Returns the dashboard's timeline data.
     pub fn list_activity_segments(&self, day: &str) -> Result<Vec<ActivitySegmentDto>, StoreError> {
         let (start, end) = crate::time_accounting::day_bounds(day)?;
+        let rows = self.load_activity_window(start, end)?;
+        Ok(crate::time_accounting::effective_segments(
+            rows, start, end, day,
+        ))
+    }
+
+    fn load_activity_window(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<ActivitySegmentDto>, StoreError> {
         let conn = self
             .conn
             .lock()
@@ -2622,11 +2642,12 @@ impl SqliteStore {
             .prepare(
                 r#"SELECT seg_id, day, app_name, bundle_id, window_title, url,
                           started_at, ended_at, duration_ms, is_idle, is_locked,
-                          category, productivity_level, event_count, source
+                          category, productivity_level, event_count, source,
+                          source_instance_id, last_source_seq, window_identity
                    FROM activity_segments
-                   WHERE julianday(started_at) < julianday(?2)
-                     AND julianday(COALESCE(ended_at, started_at)) >= julianday(?1)
-                   ORDER BY started_at ASC"#,
+                   WHERE julianday(ended_at) >= julianday(?1)
+                     AND julianday(started_at) < julianday(?2)
+                   ORDER BY source_instance_id, last_source_seq, started_at, seg_id"#,
             )
             .map_err(StoreError::db)?;
         let rows = stmt
@@ -2645,44 +2666,85 @@ impl SqliteStore {
                 let ended_at = ended
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
                     .map(|d| d.with_timezone(&Utc));
-                Ok(ActivitySegmentDto {
-                    seg_id: row.get(0)?,
-                    day: row.get(1)?,
-                    app_name: row.get(2)?,
-                    bundle_id: row.get(3)?,
-                    window_title: row.get(4)?,
-                    url: row.get(5)?,
-                    started_at,
-                    ended_at,
-                    duration_ms: row.get(8)?,
-                    is_idle: row.get::<_, i64>(9)? != 0,
-                    is_locked: row.get::<_, i64>(10)? != 0,
-                    category: row.get(11)?,
-                    productivity_level: row.get(12)?,
-                    event_count: row.get(13)?,
-                    source: row
-                        .get::<_, Option<String>>(14)?
-                        .unwrap_or_else(|| "auto".into()),
-                    scene_label: None,
-                })
+                Ok((
+                    ActivitySegmentDto {
+                        seg_id: row.get(0)?,
+                        day: row.get(1)?,
+                        app_name: row.get(2)?,
+                        bundle_id: row.get(3)?,
+                        window_title: row.get(4)?,
+                        url: row.get(5)?,
+                        started_at,
+                        ended_at,
+                        duration_ms: row.get(8)?,
+                        is_idle: row.get::<_, i64>(9)? != 0,
+                        is_locked: row.get::<_, i64>(10)? != 0,
+                        category: row.get(11)?,
+                        productivity_level: row.get(12)?,
+                        event_count: row.get(13)?,
+                        source: row
+                            .get::<_, Option<String>>(14)?
+                            .unwrap_or_else(|| "auto".into()),
+                        scene_label: None,
+                    },
+                    row.get::<_, Option<String>>(15)?,
+                    row.get::<_, Option<i64>>(16)?,
+                    row.get::<_, Option<String>>(17)?,
+                ))
             })
             .map_err(StoreError::db)?;
-        let mut out = Vec::new();
-        for r in rows {
-            let mut dto = r.map_err(StoreError::db)?;
+        let loaded = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::db)?;
+        drop(stmt);
+        drop(conn);
+        // Merge only consecutive samples of the same lifetime and complete
+        // identity. All interval work runs after releasing the capture writer.
+        let mut out: Vec<ActivitySegmentDto> = Vec::new();
+        let mut previous: Option<(String, i64, Option<String>)> = None;
+        for (mut dto, stream, seq, window) in loaded {
+            let contiguous = match (&previous, &stream, seq) {
+                (Some((old_stream, old_seq, old_window)), Some(stream), Some(seq)) => {
+                    old_stream == stream
+                        && old_seq.checked_add(1) == Some(seq)
+                        && old_window == &window
+                }
+                _ => false,
+            };
+            previous = stream.zip(seq).map(|(stream, seq)| (stream, seq, window));
+            if let Some(last) = out.last_mut().filter(|last| {
+                contiguous
+                    && last.ended_at == Some(dto.started_at)
+                    && last.duration_ms > 0
+                    && last.app_name == dto.app_name
+                    && last.bundle_id == dto.bundle_id
+                    && last.window_title == dto.window_title
+                    && last.url == dto.url
+                    && last.is_idle == dto.is_idle
+                    && last.is_locked == dto.is_locked
+                    && last.category == dto.category
+                    && last.productivity_level == dto.productivity_level
+            }) {
+                last.ended_at = dto.ended_at;
+                last.duration_ms += dto.duration_ms;
+                last.event_count += dto.event_count;
+                continue;
+            }
             if !dto.is_idle {
-                let app = dto.app_name.as_deref().unwrap_or("unknown");
-                let bundle = dto.bundle_id.as_deref().unwrap_or("");
-                let title = dto.window_title.as_deref().unwrap_or("");
                 dto.scene_label = Some(
-                    lumen_scene::stack_for(app, bundle, title, "", dto.url.as_deref()).label(),
+                    lumen_scene::stack_for(
+                        dto.app_name.as_deref().unwrap_or("unknown"),
+                        dto.bundle_id.as_deref().unwrap_or(""),
+                        dto.window_title.as_deref().unwrap_or(""),
+                        "",
+                        dto.url.as_deref(),
+                    )
+                    .label(),
                 );
             }
             out.push(dto);
         }
-        Ok(crate::time_accounting::effective_segments(
-            out, start, end, day,
-        ))
+        Ok(out)
     }
 
     /// Fold today's activity segments into scene episodes / rollups.
@@ -3201,11 +3263,25 @@ impl SqliteStore {
                 "date range must contain 1 to 367 days".into(),
             ));
         }
+        let (window_start, _) = crate::time_accounting::day_bounds(from_day)?;
+        let (_, window_end) = crate::time_accounting::day_bounds(to_day)?;
+        let raw = self.load_activity_window(window_start, window_end)?;
         let mut days = Vec::new();
         let mut all = Vec::new();
         while day <= end {
             let label = day.to_string();
-            let rows = self.list_activity_segments(&label)?;
+            let (start, finish) = crate::time_accounting::day_bounds(&label)?;
+            let rows = crate::time_accounting::effective_segments(
+                raw.iter()
+                    .filter(|r| {
+                        r.started_at < finish && r.ended_at.unwrap_or(r.started_at) >= start
+                    })
+                    .cloned()
+                    .collect(),
+                start,
+                finish,
+                &label,
+            );
             if !rows.is_empty() {
                 let stats = crate::time_accounting::day_stats(&label, &rows, group_by);
                 days.push(DayRollupDto {
@@ -4645,6 +4721,12 @@ fn insert_event_with_mode(
     event: &SourceEvent,
     idempotent: bool,
 ) -> Result<bool, StoreError> {
+    let sequenced_activity = event.source == SourceKind::Activity
+        && event.kind == event_kind::ACTIVITY_FOCUS_V1
+        && event.payload.get("source_instance_id").is_some();
+    if sequenced_activity && !project_activity_event(tx, event)? {
+        return Ok(false);
+    }
     // Steady-state activity heartbeats only extend the open segment.
     // They must not flood `events` (58k orphan focus rows).
     if event.kind == event_kind::ACTIVITY_FOCUS_V1
@@ -4654,7 +4736,9 @@ fn insert_event_with_mode(
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     {
-        project_activity_event(tx, event)?;
+        if !sequenced_activity {
+            project_activity_event(tx, event)?;
+        }
         return Ok(true);
     }
 
@@ -4705,7 +4789,9 @@ fn insert_event_with_mode(
         .map_err(StoreError::db)?;
     }
     project_browser_event(tx, event)?;
-    project_activity_event(tx, event)?;
+    if !sequenced_activity {
+        project_activity_event(tx, event)?;
+    }
     Ok(true)
 }
 
@@ -4741,33 +4827,20 @@ fn fmt_ms_compact(ms: i64) -> String {
     }
 }
 
-/// Prefer a human display name from GROUP_CONCAT(DISTINCT app_name, unit-sep).
-/// Fold `activity.focus.v1` events into continuous `activity_segments` rows.
-///
-/// Model (ActivityWatch-style):
-/// - Same identity within 30s → **extend** the open segment (heartbeat).
-/// - Identity change (or first sample) → **close** the previous open segment
-///   up to `now` (so time between last heartbeat and the switch is not lost),
-///   then open a new segment.
-///
-/// Identity = (app_name, bundle_id, window_title, is_idle, is_locked).
-///
-/// Transient probe failures: if `bundle_id` is missing, **carry forward** the
-/// last non-null bundle for the same `app_name` within a short window so one
-/// flaky poll does not invent a second uncategorized identity.
+/// Persist replay facts and update only the two adjacent sample intervals.
 fn project_activity_event(
     tx: &rusqlite::Transaction<'_>,
     event: &SourceEvent,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
     if event.source != SourceKind::Activity || event.kind != event_kind::ACTIVITY_FOCUS_V1 {
-        return Ok(());
+        return Ok(true);
     }
     let Some(stream) = event
         .payload
         .get("source_instance_id")
         .and_then(|v| v.as_str())
     else {
-        return fold_activity_event(tx, event);
+        return fold_activity_event(tx, event).map(|_| true);
     };
     let seq = event
         .payload
@@ -4811,54 +4884,94 @@ fn project_activity_event(
     if inserted == 0 {
         let same:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM activity_samples WHERE event_id=?1 AND source_instance_id=?2 AND source_seq=?3 AND captured_ms=?4 AND identity_id=?5)",params![event.id.to_string(),stream,seq,event.ts.timestamp_millis(),identity_id],|r|r.get(0)).map_err(StoreError::db)?;
         return if same {
-            Ok(())
+            Ok(false)
         } else {
             Err(StoreError::Other(
                 "conflicting activity replay identity".into(),
             ))
         };
     }
-    let newer:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM activity_samples WHERE source_instance_id=?1 AND source_seq>?2)",params![stream,seq],|r|r.get(0)).map_err(StoreError::db)?;
-    if newer {
-        // Late arrival: replay this capture lifetime in source order. Ordinary
-        // heartbeats remain incremental; a source restart has a new lifetime.
-        let mut stmt=tx.prepare("SELECT s.event_id,s.source_seq,s.captured_ms,i.payload FROM activity_samples s JOIN activity_sample_identities i ON i.id=s.identity_id WHERE s.source_instance_id=?1 ORDER BY s.source_seq").map_err(StoreError::db)?;
-        let samples = stmt
-            .query_map(params![stream], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            })
-            .map_err(StoreError::db)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::db)?;
-        drop(stmt);
-        tx.execute(
-            "DELETE FROM activity_segments WHERE source_instance_id=?1 AND source='auto'",
-            params![stream],
-        )
-        .map_err(StoreError::db)?;
-        for (id, seq, ts, body) in samples {
-            let mut replay = event.clone();
-            replay.id = Uuid::parse_str(&id).map_err(|e| StoreError::Other(e.to_string()))?;
-            replay.ts = DateTime::from_timestamp_millis(ts)
-                .ok_or_else(|| StoreError::Other("invalid sample time".into()))?;
-            replay.payload = serde_json::from_str(&body).map_err(StoreError::json)?;
-            replay.payload["source_instance_id"] = serde_json::json!(stream);
-            replay.payload["source_seq"] = serde_json::json!(seq);
-            fold_activity_event(tx, &replay)?;
-        }
-        Ok(())
-    } else {
-        let mut clean = event.clone();
-        clean.payload = identity;
-        clean.payload["source_instance_id"] = serde_json::json!(stream);
-        clean.payload["source_seq"] = serde_json::json!(seq);
-        fold_activity_event(tx, &clean)
+    // A sample contributes only its edge to the next consecutive sample.
+    // A late insertion can affect exactly two edges, independent of lifetime size.
+    materialize_activity_sample(tx, stream, seq)?;
+    if seq > 1 {
+        materialize_activity_sample(tx, stream, seq - 1)?;
     }
+    Ok(true)
+}
+
+fn materialize_activity_sample(
+    tx: &rusqlite::Transaction<'_>,
+    stream: &str,
+    seq: i64,
+) -> Result<(), StoreError> {
+    let sample: Option<(String, i64, String, Option<i64>)> = tx.query_row(
+        "SELECT s.event_id,s.captured_ms,i.payload,n.captured_ms
+         FROM activity_samples s JOIN activity_sample_identities i ON i.id=s.identity_id
+         LEFT JOIN activity_samples n ON n.source_instance_id=s.source_instance_id AND n.source_seq=s.source_seq+1
+         WHERE s.source_instance_id=?1 AND s.source_seq=?2",
+        params![stream, seq], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    ).optional().map_err(StoreError::db)?;
+    let Some((id, captured, payload, next)) = sample else {
+        return Ok(());
+    };
+    let started = DateTime::from_timestamp_millis(captured)
+        .ok_or_else(|| StoreError::Other("invalid sample time".into()))?;
+    let duration = next
+        .and_then(|n| n.checked_sub(captured))
+        .filter(|d| (0..30_000).contains(d))
+        .unwrap_or(0);
+    let ended = started + chrono::Duration::milliseconds(duration);
+    let identity: serde_json::Value = serde_json::from_str(&payload).map_err(StoreError::json)?;
+    let text = |key: &str| identity.get(key).and_then(|v| v.as_str());
+    let app = text("app_name");
+    let bundle = text("bundle_id");
+    let title = text("window_title");
+    let url = text("url");
+    let ls = text("ls_category_type");
+    let rules = load_user_category_rules(tx)?;
+    let cached = load_cached_classification_tx(tx, bundle)?;
+    let class = crate::categorization::classify(
+        &ActivityFields {
+            app_name: app,
+            bundle_id: bundle,
+            window_title: title,
+            url,
+            ls_category_type: ls,
+        },
+        &rules,
+        cached.as_ref(),
+    );
+    if class.category.is_none() {
+        if let Some(bid) = bundle.filter(|b| !b.is_empty()) {
+            enqueue_pending_tx(tx, bid, app)?;
+        }
+    }
+    let locked = identity
+        .get("is_locked")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let idle = locked
+        || identity
+            .get("is_idle")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    let window = serde_json::to_string(&serde_json::json!([
+        identity.get("pid"),
+        identity.get("window_id")
+    ]))
+    .map_err(StoreError::json)?;
+    tx.execute(
+        "INSERT INTO activity_segments
+         (seg_id,day,app_name,bundle_id,window_title,url,started_at,ended_at,duration_ms,is_idle,is_locked,
+          category,productivity_level,event_count,updated_at,ls_category_type,source_instance_id,last_source_seq,window_identity)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,?14,?15,?16,?17,?18)
+         ON CONFLICT(seg_id) DO UPDATE SET ended_at=excluded.ended_at,duration_ms=excluded.duration_ms,updated_at=excluded.updated_at",
+        params![format!("sample:{id}"),started.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string(),
+          app,bundle,title,url,started.to_rfc3339(),ended.to_rfc3339(),duration,idle as i64,locked as i64,
+          class.category,class.level.map(productivity_level_str),Utc::now().to_rfc3339(),ls,stream,seq,window],
+    ).map_err(StoreError::db)?;
+    Ok(())
 }
 
 fn fold_activity_event(
@@ -6273,12 +6386,18 @@ mod tests {
         let b = tempfile::tempdir().unwrap();
         let live = SqliteStore::open(a.path()).unwrap();
         let replay = SqliteStore::open(b.path()).unwrap();
-        let events = vec![
+        let mut events = vec![
             sequenced_focus("s", 1, 0, "A"),
             sequenced_focus("s", 2, 5, "B"),
             sequenced_focus("s", 3, 10, "A"),
             sequenced_focus("s", 4, 15, "A"),
         ];
+        // Real focus timestamps have submillisecond precision and changed
+        // focus events use the general events path, unlike heartbeats.
+        for (i, e) in events.iter_mut().enumerate() {
+            e.ts += chrono::Duration::microseconds(987 + i as i64 * 333);
+            e.payload["heartbeat"] = json!(i == 3);
+        }
         for e in &events {
             live.append_event(e.clone()).unwrap();
         }
@@ -6296,13 +6415,13 @@ mod tests {
             serde_json::to_value(&x).unwrap(),
             serde_json::to_value(&y).unwrap()
         );
-        assert_eq!(x.iter().map(|r| r.duration_ms).sum::<i64>(), 15_000);
+        assert_eq!(x.iter().map(|r| r.duration_ms).sum::<i64>(), 15_001);
         assert_eq!(
             x.iter()
                 .filter(|r| r.app_name.as_deref() == Some("A"))
                 .map(|r| r.duration_ms)
                 .sum::<i64>(),
-            10_000
+            10_001
         );
         assert_eq!(x.len(), 3);
         let conn = replay.conn.lock().unwrap();
@@ -6318,6 +6437,86 @@ mod tests {
                 .unwrap(),
             2
         );
+    }
+
+    #[test]
+    fn changed_focus_replay_is_idempotent_and_conflicts_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let mut event = sequenced_focus("focus", 1, 0, "A");
+        event.payload["heartbeat"] = json!(false);
+        store.append_event(event.clone()).unwrap();
+        store.append_event(event.clone()).unwrap();
+        let record = |event| EventWithArtifacts {
+            event,
+            artifacts: vec![],
+        };
+        let result = store
+            .append_idempotent_with_artifacts(vec![record(event.clone())])
+            .unwrap();
+        assert_eq!(
+            result,
+            IdempotentAppendOutcome {
+                accepted: 0,
+                duplicates: 1
+            }
+        );
+        let mut conflict = event.clone();
+        conflict.payload["window_title"] = json!("different");
+        assert!(store.append_event(conflict.clone()).is_err());
+        assert!(store
+            .append_idempotent_with_artifacts(vec![record(conflict)])
+            .is_err());
+        let mut reused_sequence = event.clone();
+        reused_sequence.id = Uuid::new_v4();
+        assert!(store.append_event(reused_sequence).is_err());
+        let second = sequenced_focus("focus", 2, 5, "A");
+        let mut bad = second.clone();
+        bad.payload["source_seq"] = json!(3);
+        assert!(store
+            .append_idempotent_with_artifacts(vec![record(second), record(bad)])
+            .is_err());
+        let conn = store.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM activity_samples", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn late_sample_updates_only_adjacent_intervals() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        for seq in (1..=100).filter(|s| *s != 2) {
+            store
+                .append_event(sequenced_focus("long", seq, seq * 5, "A"))
+                .unwrap();
+        }
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch("CREATE TEMP TABLE projection_writes(id TEXT);
+             CREATE TEMP TRIGGER count_projection_insert AFTER INSERT ON activity_segments BEGIN INSERT INTO projection_writes VALUES(new.seg_id); END;
+             CREATE TEMP TRIGGER count_projection_update AFTER UPDATE ON activity_segments BEGIN INSERT INTO projection_writes VALUES(new.seg_id); END;").unwrap();
+        }
+        store
+            .append_event(sequenced_focus("long", 2, 10, "A"))
+            .unwrap();
+        let conn = store.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM projection_writes", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        let plan: String = conn.query_row("EXPLAIN QUERY PLAN SELECT seg_id FROM activity_segments WHERE julianday(ended_at)>=julianday(?1) AND julianday(started_at)<julianday(?2)",params!["2026-09-10","2026-09-11"],|r|r.get(3)).unwrap();
+        assert!(plan.contains("idx_activity_segments_end_time"), "{plan}");
     }
 
     #[test]
