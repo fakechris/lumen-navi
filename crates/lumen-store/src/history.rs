@@ -36,7 +36,7 @@ where
 {
     let mut slots: BTreeMap<DateTime<Utc>, SlotAcc> = BTreeMap::new();
     for seg in segments {
-        if seg.is_idle || seg.is_locked {
+        if seg.app_name.is_none() || seg.source == "gap" || seg.is_idle || seg.is_locked {
             continue;
         }
         let end = seg

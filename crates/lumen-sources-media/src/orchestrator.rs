@@ -102,6 +102,7 @@ pub struct CaptureOrchestrator {
     last_full_capture: HashMap<u32, Instant>,
     cached_frontmost: Option<Option<FrontmostApp>>,
     cached_locked: Option<bool>,
+    lock_state_known: bool,
     sessions: Arc<SharedSessionBinder>,
     activity: ActivityAccumulator,
 
@@ -191,6 +192,7 @@ impl CaptureOrchestrator {
             last_full_capture: HashMap::new(),
             cached_frontmost: None,
             cached_locked: None,
+            lock_state_known: false,
             sessions,
             activity,
             stats_full: AtomicU64::new(0),
@@ -266,7 +268,11 @@ impl CaptureOrchestrator {
         if let Some(cached) = self.cached_locked {
             return cached;
         }
-        let fresh = self.lock.is_locked().await.unwrap_or(false);
+        let result = self.lock.is_locked().await;
+        self.lock_state_known = result.is_ok();
+        // Unknown permission/lock state closes the capture gate. Activity
+        // does not label an unknown probe result as a confirmed locked fact.
+        let fresh = result.unwrap_or(true);
         self.cached_locked = Some(fresh);
         fresh
     }
@@ -307,14 +313,20 @@ impl CaptureOrchestrator {
     /// persist a lock-transition fact, but it never carries app/window/URL.
     pub async fn poll_activity(&mut self) -> ActivityPoll {
         if self.paused.load(Ordering::Relaxed) {
+            self.activity.discontinuity();
             return ActivityPoll::default();
         }
         if self.closed_eyes.load(Ordering::Relaxed) {
+            self.activity.discontinuity();
             return ActivityPoll::default();
         }
 
         self.clear_probe_cache();
         let is_locked = self.sample_locked().await;
+        if !self.lock_state_known {
+            self.activity.discontinuity();
+            return ActivityPoll::default();
+        }
         if is_locked {
             let closed = self.sessions.force_close();
             let idle_seconds = self.idle.idle_seconds().await.unwrap_or(0.0).max(0.0);
@@ -340,9 +352,16 @@ impl CaptureOrchestrator {
             .privacy
             .blocks_bundle(frontmost.as_ref().and_then(|f| f.bundle_id.as_deref()))
         {
+            self.activity.discontinuity();
             return ActivityPoll::default();
         }
-        let idle_seconds = self.idle.idle_seconds().await.unwrap_or(0.0).max(0.0);
+        let idle_seconds = match self.idle.idle_seconds().await {
+            Ok(value) if value.is_finite() => value.max(0.0),
+            _ => {
+                self.activity.discontinuity();
+                return ActivityPoll::default();
+            }
+        };
         let display_sleep_prevented = self.power.display_sleep_prevented().await.unwrap_or(false);
         let sample = ActivitySample {
             frontmost: frontmost.clone(),
@@ -887,6 +906,28 @@ mod tests {
             },
             PrivacyConfig::default(),
         )
+    }
+
+    struct FailedLock;
+    #[async_trait]
+    impl ScreenLockProbe for FailedLock {
+        async fn is_locked(&self) -> Result<bool, PlatformError> {
+            Err(PlatformError::Message("synthetic probe failure".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_lock_probe_closes_capture_without_inventing_idle() {
+        let mut o = orch(FakeCap { n: Mutex::new(0) });
+        o.lock = Arc::new(FailedLock);
+        assert!(o.sample_locked().await);
+        assert!(o.poll_activity().await.events.is_empty());
+        assert!(!o.lock_state_known);
+        assert!(o
+            .capture_tick(TriggerReason::FocusChange)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

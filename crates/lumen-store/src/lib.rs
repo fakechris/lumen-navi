@@ -16,6 +16,7 @@ mod schema;
 mod slot_actions;
 mod slot_evidence;
 mod sqlite;
+mod time_accounting;
 
 pub use categorization::{
     classify, classify_from_itunes_genre, classify_from_metadata_texts, classify_from_text_hint,

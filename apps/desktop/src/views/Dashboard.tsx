@@ -711,11 +711,10 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  // Split active vs idle: active segments get category colors and full
-  // interactivity; idle segments render as muted gray blocks so the user can
-  // see when they were away (e.g. walked off without sleeping the Mac).
+  // Activity uses category colors; idle is muted and missing observations
+  // have a dashed outline so neither color nor the tooltip implies work.
   const active = useMemo(
-    () => segments.filter((s) => !s.is_idle && s.duration_ms > 0),
+    () => segments.filter((s) => s.source !== "gap" && !s.is_idle && s.duration_ms > 0),
     [segments],
   );
   const idleSegs = useMemo(
@@ -723,19 +722,26 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
     [segments],
   );
 
+  const gapSegs = useMemo(
+    () => segments.filter((s) => s.source === "gap" && s.duration_ms > 0),
+    [segments],
+  );
+
   useEffect(() => {
     const el = ref.current;
-    if (!el || (active.length === 0 && idleSegs.length === 0)) return;
+    if (!el || (active.length === 0 && idleSegs.length === 0 && gapSegs.length === 0)) return;
 
     const width = el.clientWidth;
     const height = 56;
     const svg = d3.select(el).append("svg").attr("width", width).attr("height", height);
 
     // 24-hour scale (local day). Segments store UTC; convert to local seconds-of-day.
-    const dayStart = new Date();
-    dayStart.setHours(0, 0, 0, 0);
+    const [year, month, date] = segments[0].day.split("-").map(Number);
+    const dayStart = new Date(year, month - 1, date);
     const dayStartMs = dayStart.getTime();
-    const dayEndMs = dayStartMs + 24 * 3600 * 1000;
+    const dayEnd = new Date(year, month - 1, date + 1);
+    const dayEndMs = dayEnd.getTime();
+    const localHour = (hour: number) => new Date(year, month - 1, date, hour).getTime();
     const x = d3.scaleLinear().domain([dayStartMs, dayEndMs]).range([0, width]);
 
     // Background track
@@ -753,11 +759,11 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
     const barY = height / 2 - barH / 2;
     const tooltipContainer = el;
     const idleColor = readCssVar("--border-strong") || "rgba(127,127,127,0.35)";
-    svg.selectAll("rect.idle")
-      .data(idleSegs)
+    svg.selectAll("rect.non-work")
+      .data([...idleSegs, ...gapSegs])
       .enter()
       .append("rect")
-      .attr("class", "idle")
+      .attr("class", (d) => d.source === "gap" ? "non-work gap" : "non-work idle")
       .attr("x", (d) => x(new Date(d.started_at).getTime()))
       .attr("y", barY)
       .attr("width", (d) =>
@@ -765,8 +771,10 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
       )
       .attr("height", barH)
       .attr("rx", 3)
-      .attr("fill", idleColor)
-      .attr("opacity", 0.7)
+      .attr("fill", (d) => d.source === "gap" ? gridColor : idleColor)
+      .attr("stroke", (d) => d.source === "gap" ? "var(--text-secondary)" : "none")
+      .attr("stroke-dasharray", (d) => d.source === "gap" ? "3 3" : "none")
+      .attr("opacity", (d) => d.source === "gap" ? 1 : 0.7)
       .style("cursor", "help")
       .on("mouseenter", function (event, d) {
         const rect = tooltipContainer.getBoundingClientRect();
@@ -790,7 +798,7 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
 
     // Hour gridlines (every 6h)
     for (let h = 0; h <= 24; h += 6) {
-      const px = x(dayStartMs + h * 3600 * 1000);
+      const px = x(localHour(h));
       svg.append("line")
         .attr("x1", px).attr("x2", px)
         .attr("y1", height / 2 - 14).attr("y2", height / 2 + 14)
@@ -845,7 +853,7 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
       .attr("font-family", "var(--font-mono)")
       .text("00:00");
     svg.append("text")
-      .attr("x", width / 2 - 16).attr("y", 12)
+      .attr("x", x(localHour(12)) - 16).attr("y", 12)
       .attr("fill", labelColor)
       .attr("font-size", 10)
       .attr("font-family", "var(--font-mono)")
@@ -860,11 +868,12 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
     return () => {
       svg.remove();
     };
-  }, [active, idleSegs]);
+  }, [active, idleSegs, gapSegs, segments]);
 
   return (
     <div style={{ position: "relative" }}>
       <div ref={ref} />
+      {gapSegs.length > 0 && <div style={{ color: "var(--text-secondary)", fontSize: "var(--text-xs)" }}>虚线：记录空缺，不计入工作或空闲</div>}
       {tooltip && (
         <div style={{
           position: "absolute",
@@ -882,7 +891,7 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
           zIndex: 10,
         }}>
           <div style={{ fontWeight: 600, marginBottom: 2, display: "flex", alignItems: "center", gap: 6 }}>
-            {tooltip.seg.is_idle ? "空闲 / 离开" : (tooltip.seg.app_name ?? "未知")}
+            {tooltip.seg.source === "gap" ? "记录空缺（不计入工作或空闲）" : tooltip.seg.is_idle ? "空闲 / 离开" : (tooltip.seg.app_name ?? "未知来源")}
             {tooltip.seg.source === "manual" && (
               <span style={{
                 fontSize: 9, padding: "1px 5px", borderRadius: "var(--radius-pill)",
