@@ -288,11 +288,15 @@ pub struct ActivitySegmentDto {
     pub productivity_level: Option<String>,
     pub event_count: i64,
     /// 'auto' (tracked), 'manual' (user-entered overlay), or 'gap' (unobserved).
-    #[serde(default)]
+    #[serde(default = "default_activity_source")]
     pub source: String,
     /// Nested scene stack label (`Ghostty → herdr → writing`). Query-time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scene_label: Option<String>,
+}
+
+fn default_activity_source() -> String {
+    "auto".into()
 }
 
 /// Aggregated stats for one day (the dashboard's `stats` view payload).
@@ -715,6 +719,7 @@ mod tests {
     fn legacy_activity_segment_decodes_and_gap_roundtrips() {
         let raw = serde_json::json!({"seg_id":"old","day":"2026-09-10","app_name":"Editor","bundle_id":null,"window_title":null,"started_at":"2026-09-10T12:00:00Z","ended_at":"2026-09-10T12:00:05Z","duration_ms":5000,"is_idle":false,"is_locked":false,"category":null,"productivity_level":null,"event_count":2});
         let mut segment: ActivitySegmentDto = serde_json::from_value(raw).unwrap();
+        assert_eq!(segment.source, "auto");
         assert!(segment.url.is_none());
         assert!(segment.scene_label.is_none());
         segment.source = "gap".into();

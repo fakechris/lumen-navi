@@ -192,6 +192,18 @@ pub(crate) fn top_apps(rows: &[ActivitySegmentDto], group: GroupBy, limit: usize
                 .filter_map(|r| r.app_name.as_deref())
                 .collect();
             let best = grouped.iter().max_by_key(|r| r.duration_ms).unwrap();
+            let mut classifications = BTreeMap::new();
+            for row in &grouped {
+                *classifications
+                    .entry((row.category.clone(), row.productivity_level.clone()))
+                    .or_insert(0i64) += row.duration_ms;
+            }
+            // Keep the pair together and choose the dominant total duration;
+            // lexical order is only a deterministic tie-breaker.
+            let ((category, productivity_level), _) = classifications
+                .into_iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)))
+                .unwrap();
             AppTotal {
                 app_name: if group == GroupBy::Site {
                     key
@@ -204,11 +216,8 @@ pub(crate) fn top_apps(rows: &[ActivitySegmentDto], group: GroupBy, limit: usize
                     best.bundle_id.clone()
                 },
                 ms: grouped.iter().map(|r| r.duration_ms).sum(),
-                category: grouped.iter().filter_map(|r| r.category.clone()).max(),
-                productivity_level: grouped
-                    .iter()
-                    .filter_map(|r| r.productivity_level.clone())
-                    .max(),
+                category,
+                productivity_level,
                 segment_count: grouped
                     .iter()
                     .map(|r| underlying_segment_id(r))
@@ -332,6 +341,45 @@ mod tests {
         assert_eq!(x.iter().map(|r| r.duration_ms).sum::<i64>(), 60);
         assert_eq!(pulse(&x), Some(100.0));
     }
+    #[test]
+    fn top_app_classification_uses_total_duration_and_keeps_pair() {
+        let mut a = row("a", 0, 40, false);
+        let mut b = row("b", 40, 80, false);
+        let mut c = row("c", 80, 140, false);
+        for r in [&mut a, &mut b, &mut c] {
+            r.bundle_id = Some("same.app".into());
+        }
+        for r in [&mut a, &mut b] {
+            r.category = Some("Entertainment".into());
+            r.productivity_level = Some("distracting".into());
+        }
+        c.category = Some("Writing".into());
+        c.productivity_level = Some("productive".into());
+        let result = top_apps(&[a, b, c], GroupBy::App, 10);
+        assert_eq!(result[0].category.as_deref(), Some("Entertainment"));
+        assert_eq!(result[0].productivity_level.as_deref(), Some("distracting"));
+        assert_eq!(result[0].ms, 140);
+    }
+
+    #[test]
+    fn gaps_are_internal_and_do_not_invent_unobserved_day_tails() {
+        let fold = |rows| {
+            effective_segments(
+                rows,
+                DateTime::from_timestamp_millis(0).unwrap(),
+                DateTime::from_timestamp_millis(100).unwrap(),
+                "1970-01-01",
+            )
+        };
+        assert!(fold(vec![]).is_empty());
+        let rows = fold(vec![row("a", 20, 40, false), row("b", 60, 80, false)]);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].source, "gap");
+        assert_eq!(rows[1].duration_ms, 20);
+        assert_eq!(rows[0].started_at.timestamp_millis(), 20);
+        assert_eq!(rows[2].ended_at.unwrap().timestamp_millis(), 80);
+    }
+
     #[cfg(unix)]
     #[test]
     fn dst_day_lengths_and_hour_sums() {

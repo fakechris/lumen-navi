@@ -203,7 +203,7 @@ https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 
 Contract surfaces:
 - `activity.focus.v1` event payload schema (stabilize field names)
-- `activity_segments` table columns + the `source` ('auto'|'manual') convention
+- `activity_segments` stores `source` ('auto'|'manual'); the read API also emits `gap` for internal unobserved spans (see TIME_ACCOUNTING.md)
 - `/v1/activity/{segments,stats,range,rules,segment}` HTTP endpoint shapes
 - Categorization rule format (`CategoryRule` JSON in kv)
 - `IdleProbe` trait + `FrontmostAppProbe` trait as platform ports
