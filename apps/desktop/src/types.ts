@@ -202,6 +202,11 @@ export interface ObserveCounters {
 }
 
 export interface Health {
+  ocr?: {
+    consecutive_failures: number;
+    retry_after_ms: number;
+    diagnostic_in_process_fallback: boolean;
+  } | null;
   api_version: number;
   product: string;
   sources: SourceStatus[];

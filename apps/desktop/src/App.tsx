@@ -958,7 +958,11 @@ export default function App() {
                 <StatCard
                   label="Search docs"
                   value={overviewStats ? fmtNum(overviewStats.ocr_docs) : "—"}
-                  hint={`${OVERVIEW_RANGE_LABELS[overviewRange]} · OCR 与转写`}
+                  hint={health?.ocr?.diagnostic_in_process_fallback
+                    ? "OCR 诊断模式：原生故障可能影响采集"
+                    : (health?.ocr?.retry_after_ms ?? 0) > 0
+                      ? `OCR 暂停，约 ${Math.ceil(health!.ocr!.retry_after_ms / 1000)} 秒后重试；不影响采集`
+                      : `${OVERVIEW_RANGE_LABELS[overviewRange]} · OCR 与转写`}
                 />
                 <StatCard
                   label="Audio events"
