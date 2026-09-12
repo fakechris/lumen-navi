@@ -882,7 +882,7 @@ function TimelineChart({ segments, onDeleted }: { segments: ActivitySegment[]; o
           zIndex: 10,
         }}>
           <div style={{ fontWeight: 600, marginBottom: 2, display: "flex", alignItems: "center", gap: 6 }}>
-            {tooltip.seg.is_idle ? "空闲 / 离开" : (tooltip.seg.app_name ?? "未知")}
+            {tooltip.seg.source === "gap" ? "记录空缺（不计入工作或空闲）" : tooltip.seg.is_idle ? "空闲 / 离开" : (tooltip.seg.app_name ?? "未知来源")}
             {tooltip.seg.source === "manual" && (
               <span style={{
                 fontSize: 9, padding: "1px 5px", borderRadius: "var(--radius-pill)",

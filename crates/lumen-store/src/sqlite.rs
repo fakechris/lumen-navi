@@ -7,10 +7,9 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use lumen_api::{
-    ActivitySegmentDto, AiMessageDto, AiThreadDto, AppTotal, CategoryTotal, DayRoastSummaryDto,
-    DayRollupDto, DayStatsDto, HistorySlotDto, RangeStatsDto, RoastAppTotal, RoastDomainTotal,
-    RoastHour, RoastIndexDto, RoastInputCounts, RoastRecordDto, RoastSceneTotal, RoastTitleTotal,
-    SceneDayDto, SkillDto,
+    ActivitySegmentDto, AiMessageDto, AiThreadDto, DayRoastSummaryDto, DayRollupDto, DayStatsDto,
+    HistorySlotDto, RangeStatsDto, RoastAppTotal, RoastDomainTotal, RoastHour, RoastIndexDto,
+    RoastInputCounts, RoastRecordDto, RoastSceneTotal, RoastTitleTotal, SceneDayDto, SkillDto,
 };
 use lumen_types::{
     event_kind, ActivitySession, ArtifactRef, SessionStatus, SourceEvent, SourceKind,
@@ -24,8 +23,8 @@ use crate::categorization::{
 };
 use crate::enrichment::{self, BrewCaskRow};
 use crate::schema::{
-    MIGRATE_V1, MIGRATE_V10, MIGRATE_V11, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4, MIGRATE_V5,
-    MIGRATE_V6, MIGRATE_V7, MIGRATE_V8, MIGRATE_V9, SCHEMA_VERSION,
+    MIGRATE_V1, MIGRATE_V10, MIGRATE_V11, MIGRATE_V12, MIGRATE_V2, MIGRATE_V3, MIGRATE_V4,
+    MIGRATE_V5, MIGRATE_V6, MIGRATE_V7, MIGRATE_V8, MIGRATE_V9, SCHEMA_VERSION,
 };
 #[cfg(test)]
 use crate::ReclaimKind;
@@ -2614,6 +2613,7 @@ impl SqliteStore {
 
     /// start time. Returns the dashboard's timeline data.
     pub fn list_activity_segments(&self, day: &str) -> Result<Vec<ActivitySegmentDto>, StoreError> {
+        let (start, end) = crate::time_accounting::day_bounds(day)?;
         let conn = self
             .conn
             .lock()
@@ -2624,12 +2624,13 @@ impl SqliteStore {
                           started_at, ended_at, duration_ms, is_idle, is_locked,
                           category, productivity_level, event_count, source
                    FROM activity_segments
-                   WHERE day = ?1
+                   WHERE julianday(started_at) < julianday(?2)
+                     AND julianday(COALESCE(ended_at, started_at)) >= julianday(?1)
                    ORDER BY started_at ASC"#,
             )
             .map_err(StoreError::db)?;
         let rows = stmt
-            .query_map(params![day], |row| {
+            .query_map(params![start.to_rfc3339(), end.to_rfc3339()], |row| {
                 let started: String = row.get(6)?;
                 let started_at = chrono::DateTime::parse_from_rfc3339(&started)
                     .map(|d| d.with_timezone(&Utc))
@@ -2679,7 +2680,9 @@ impl SqliteStore {
             }
             out.push(dto);
         }
-        Ok(out)
+        Ok(crate::time_accounting::effective_segments(
+            out, start, end, day,
+        ))
     }
 
     /// Fold today's activity segments into scene episodes / rollups.
@@ -2719,12 +2722,15 @@ impl SqliteStore {
         Ok(slots)
     }
 
-    /// Persist today's 15-minute cards. The still-open slot is extracted
+    /// Persist today and the previous local day's 15-minute cards. The still-open slot is extracted
     /// too so the Time tab is not stuck on a duration list until :15.
     /// An existing `ready` narrative is never overwritten by the fold.
     pub fn persist_closed_history_slots(&self) -> Result<usize, StoreError> {
-        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let segs = self.list_activity_segments(&day)?;
+        let today = chrono::Local::now().date_naive();
+        let mut segs = self.list_activity_segments(&today.to_string())?;
+        if let Some(previous) = today.pred_opt() {
+            segs.extend(self.list_activity_segments(&previous.to_string())?);
+        }
         let mut slots = crate::fold_history_slots(&segs, chrono::Local);
 
         {
@@ -3170,434 +3176,60 @@ impl SqliteStore {
         day: &str,
         group_by: GroupBy,
     ) -> Result<DayStatsDto, StoreError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
-
-        // Active/idle totals + context switches (count of active segments).
-        let (total_active_ms, total_idle_ms, context_switches): (i64, i64, i64) = conn
-            .query_row(
-                r#"SELECT
-                       COALESCE(SUM(CASE WHEN is_idle = 0 THEN duration_ms ELSE 0 END), 0),
-                       COALESCE(SUM(CASE WHEN is_idle = 1 THEN duration_ms ELSE 0 END), 0),
-                       COUNT(CASE WHEN is_idle = 0 THEN 1 END)
-                   FROM activity_segments WHERE day = ?1"#,
-                params![day],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(StoreError::db)?;
-
-        // Pulse score: weighted average of classified active segments only.
-        let (weighted_sum, classified_ms): (f64, f64) = conn
-            .query_row(
-                r#"SELECT
-                       COALESCE(SUM(CASE productivity_level
-                           WHEN 'productive' THEN duration_ms
-                           WHEN 'neutral' THEN duration_ms * 0.5
-                           WHEN 'distracting' THEN 0
-                           ELSE 0 END), 0.0),
-                       SUM(CASE WHEN productivity_level IS NOT NULL THEN duration_ms ELSE 0 END)
-                   FROM activity_segments
-                   WHERE day = ?1 AND is_idle = 0"#,
-                params![day],
-                |row| {
-                    Ok((
-                        row.get::<_, f64>(0)?,
-                        row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
-                    ))
-                },
-            )
-            .map_err(StoreError::db)?;
-        let pulse_score = if classified_ms > 0.0 {
-            Some(100.0 * weighted_sum / classified_ms)
-        } else {
-            None
-        };
-
-        // By category.
-        let mut cat_stmt = conn
-            .prepare(
-                r#"SELECT COALESCE(category, 'Uncategorized'), productivity_level,
-                          SUM(duration_ms)
-                   FROM activity_segments
-                   WHERE day = ?1 AND is_idle = 0
-                   GROUP BY COALESCE(category, 'Uncategorized'), productivity_level
-                   ORDER BY SUM(duration_ms) DESC"#,
-            )
-            .map_err(StoreError::db)?;
-        let cat_rows = cat_stmt
-            .query_map(params![day], |row| {
-                Ok(CategoryTotal {
-                    category: row.get(0)?,
-                    productivity_level: row.get(1)?,
-                    ms: row.get(2)?,
-                })
-            })
-            .map_err(StoreError::db)?;
-        let mut by_category = Vec::new();
-        for r in cat_rows {
-            by_category.push(r.map_err(StoreError::db)?);
-        }
-
-        // Top apps (or top sites when group_by == Site).
-        let top_apps = if group_by == GroupBy::Site {
-            // Site mode: aggregate browser time by registrable domain, extracted
-            // in Rust from each segment's full URL (SQLite can't reliably parse
-            // hosts). Mirrors the classifier's registrable_domain so a site row
-            // carries the same category a Domain rule would assign.
-            top_sites(&conn, "day = ?1", params![day], 20)?
-        } else {
-            // App mode (default): group by bundle identity so "Lumen Navi" and
-            // "lumen-navi-desktop" collapse; prefer a human display name.
-            // NOTE: SQLite does not allow GROUP_CONCAT(DISTINCT col, sep).
-            // Use a CTE to group by identity key, then collect distinct names per group.
-            let mut app_stmt = conn
-                .prepare(
-                    r#"WITH grouped AS (
-                         SELECT COALESCE(bundle_id, app_name) AS gkey,
-                                bundle_id, app_name, duration_ms,
-                                category, productivity_level
-                         FROM activity_segments
-                         WHERE day = ?1 AND is_idle = 0 AND app_name IS NOT NULL
-                       )
-                       SELECT (SELECT GROUP_CONCAT(DISTINCT g2.app_name)
-                               FROM grouped g2 WHERE g2.gkey = grouped.gkey),
-                              grouped.bundle_id, grouped.total_ms,
-                              grouped.category, grouped.level, grouped.segs
-                       FROM (
-                         SELECT gkey, bundle_id, SUM(duration_ms) AS total_ms,
-                                MAX(category) AS category,
-                                MAX(productivity_level) AS level,
-                                COUNT(1) AS segs
-                         FROM grouped
-                         GROUP BY gkey
-                         HAVING SUM(duration_ms) > 0
-                       ) grouped
-                       ORDER BY grouped.total_ms DESC
-                       LIMIT 20"#,
-                )
-                .map_err(StoreError::db)?;
-            let app_rows = app_stmt
-                .query_map(params![day], |row| {
-                    Ok(AppTotal {
-                        app_name: preferred_name_from_concat(
-                            &row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                        ),
-                        bundle_id: row.get(1)?,
-                        ms: row.get(2)?,
-                        category: row.get(3)?,
-                        productivity_level: row.get(4)?,
-                        segment_count: row.get(5)?,
-                        title: None,
-                    })
-                })
-                .map_err(StoreError::db)?;
-            let mut out = Vec::new();
-            for r in app_rows {
-                out.push(r.map_err(StoreError::db)?);
-            }
-            out
-        };
-
-        // Per-hour distribution (local-hour buckets from started_at). Also
-        // accumulates by (hour, category) so the hourly bar tooltip can show
-        // "15:00 · Development 30m / Browsing 15m".
-        let mut hour_stmt = conn
-            .prepare(
-                r#"SELECT started_at, duration_ms, is_idle, COALESCE(category, 'Uncategorized')
-                   FROM activity_segments
-                   WHERE day = ?1"#,
-            )
-            .map_err(StoreError::db)?;
-        let hour_rows = hour_stmt
-            .query_map(params![day], |row| {
-                let ts: String = row.get(0)?;
-                let ms: i64 = row.get(1)?;
-                let is_idle: bool = row.get::<_, i64>(2)? != 0;
-                let category: String = row.get(3)?;
-                Ok((ts, ms, is_idle, category))
-            })
-            .map_err(StoreError::db)?;
-        let mut by_hour = [0i64; 24];
-        use std::collections::BTreeMap;
-        let mut by_hour_cat: BTreeMap<(usize, String), i64> = BTreeMap::new();
-        for r in hour_rows {
-            let (ts, ms, is_idle, category) = r.map_err(StoreError::db)?;
-            if is_idle {
-                continue;
-            }
-            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&ts) {
-                let hour = dt.with_timezone(&chrono::Local).format("%H").to_string();
-                if let Ok(h) = hour.parse::<usize>() {
-                    if h < 24 {
-                        by_hour[h] = by_hour[h].saturating_add(ms);
-                        *by_hour_cat.entry((h, category)).or_insert(0) += ms;
-                    }
-                }
-            }
-        }
-        let by_hour_category: Vec<lumen_api::HourCategoryTotal> = by_hour_cat
-            .into_iter()
-            .map(|((hour, category), ms)| lumen_api::HourCategoryTotal {
-                hour: hour as u8,
-                category,
-                ms,
-            })
-            .collect();
-
-        Ok(DayStatsDto {
-            day: day.to_string(),
-            total_active_ms,
-            total_idle_ms,
-            pulse_score,
-            context_switches,
-            by_category,
-            top_apps,
-            by_hour,
-            by_hour_category,
-        })
+        Ok(crate::time_accounting::day_stats(
+            day,
+            &self.list_activity_segments(day)?,
+            group_by,
+        ))
     }
 
-    /// Aggregate activity across a date range `[from_day, to_day]` inclusive
-    /// (YYYY-MM-DD). Returns a per-day rollup plus range-wide totals, top apps,
-    /// and category breakdown — the weekly-view payload.
+    /// Inclusive civil dates; each day's UTC bounds may span 23, 24 or 25 hours.
     pub fn activity_range_stats(
         &self,
         from_day: &str,
         to_day: &str,
         group_by: GroupBy,
     ) -> Result<RangeStatsDto, StoreError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
-
-        // Range totals + pulse.
-        let (total_active_ms, total_idle_ms): (i64, i64) = conn
-            .query_row(
-                r#"SELECT
-                       COALESCE(SUM(CASE WHEN is_idle = 0 THEN duration_ms ELSE 0 END), 0),
-                       COALESCE(SUM(CASE WHEN is_idle = 1 THEN duration_ms ELSE 0 END), 0)
-                   FROM activity_segments WHERE day BETWEEN ?1 AND ?2"#,
-                params![from_day, to_day],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(StoreError::db)?;
-
-        let (weighted_sum, classified_ms): (f64, f64) = conn
-            .query_row(
-                r#"SELECT
-                       COALESCE(SUM(CASE productivity_level
-                           WHEN 'productive' THEN duration_ms
-                           WHEN 'neutral' THEN duration_ms * 0.5
-                           WHEN 'distracting' THEN 0
-                           ELSE 0 END), 0.0),
-                       SUM(CASE WHEN productivity_level IS NOT NULL THEN duration_ms ELSE 0 END)
-                   FROM activity_segments
-                   WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0"#,
-                params![from_day, to_day],
-                |row| {
-                    Ok((
-                        row.get::<_, f64>(0)?,
-                        row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
-                    ))
-                },
-            )
-            .map_err(StoreError::db)?;
-        let pulse_score = if classified_ms > 0.0 {
-            Some(100.0 * weighted_sum / classified_ms)
-        } else {
-            None
+        let parse = |s: &str| {
+            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map_err(|e| StoreError::Other(e.to_string()))
         };
-
-        // Per-day rollups.
-        let mut day_stmt = conn
-            .prepare(
-                r#"SELECT day,
-                          COALESCE(SUM(CASE WHEN is_idle = 0 THEN duration_ms ELSE 0 END), 0),
-                          COALESCE(SUM(CASE WHEN is_idle = 1 THEN duration_ms ELSE 0 END), 0),
-                          COUNT(CASE WHEN is_idle = 0 THEN 1 END)
-                   FROM activity_segments
-                   WHERE day BETWEEN ?1 AND ?2
-                   GROUP BY day
-                   ORDER BY day ASC"#,
-            )
-            .map_err(StoreError::db)?;
-        let day_rows = day_stmt
-            .query_map(params![from_day, to_day], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            })
-            .map_err(StoreError::db)?;
-
-        let mut days: Vec<DayRollupDto> = Vec::new();
-        // Collect each day's category breakdown in a follow-up query for efficiency.
-        let mut cat_stmt = conn
-            .prepare(
-                r#"SELECT day, COALESCE(category, 'Uncategorized'), productivity_level,
-                          SUM(duration_ms)
-                   FROM activity_segments
-                   WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0
-                   GROUP BY day, COALESCE(category, 'Uncategorized'), productivity_level"#,
-            )
-            .map_err(StoreError::db)?;
-        let cat_rows: std::result::Result<Vec<_>, _> = cat_stmt
-            .query_map(params![from_day, to_day], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            })
-            .map_err(StoreError::db)?
-            .collect();
-        let cat_rows = cat_rows.map_err(StoreError::db)?;
-        drop(cat_stmt);
-
-        // Bucket categories by day.
-        use std::collections::BTreeMap;
-        let mut cats_by_day: BTreeMap<String, Vec<CategoryTotal>> = BTreeMap::new();
-        for (day, category, level, ms) in cat_rows {
-            cats_by_day.entry(day).or_default().push(CategoryTotal {
-                category,
-                productivity_level: level,
-                ms,
-            });
+        let mut day = parse(from_day)?;
+        let end = parse(to_day)?;
+        if end < day || (end - day).num_days() > 366 {
+            return Err(StoreError::Other(
+                "date range must contain 1 to 367 days".into(),
+            ));
         }
-        for v in cats_by_day.values_mut() {
-            v.sort_by(|a, b| b.ms.cmp(&a.ms));
-        }
-
-        for r in day_rows {
-            let (day, active, idle, switches) = r.map_err(StoreError::db)?;
-            // Per-day pulse.
-            let day_cats = cats_by_day.get(&day).cloned().unwrap_or_default();
-            let day_pulse = {
-                let (w, c): (f64, f64) = day_cats
-                    .iter()
-                    .filter(|ct| ct.productivity_level.is_some())
-                    .fold((0.0, 0.0), |(w, c), ct| {
-                        let weight = match ct.productivity_level.as_deref() {
-                            Some("productive") => 100.0,
-                            Some("neutral") => 50.0,
-                            Some("distracting") => 0.0,
-                            _ => return (w, c),
-                        };
-                        (w + weight * ct.ms as f64, c + ct.ms as f64)
-                    });
-                if c > 0.0 {
-                    Some(100.0 * w / c)
-                } else {
-                    None
-                }
-            };
-            days.push(DayRollupDto {
-                day,
-                total_active_ms: active,
-                total_idle_ms: idle,
-                pulse_score: day_pulse,
-                context_switches: switches,
-                by_category: day_cats,
-            });
-        }
-        drop(day_stmt);
-
-        // Range-wide top apps (or top sites when group_by == Site).
-        let top_apps = if group_by == GroupBy::Site {
-            top_sites(
-                &conn,
-                "day BETWEEN ?1 AND ?2",
-                params![from_day, to_day],
-                15,
-            )?
-        } else {
-            // App mode (default): bundle identity + preferred display name.
-            let mut app_stmt = conn
-                .prepare(
-                    r#"WITH grouped AS (
-                         SELECT COALESCE(bundle_id, app_name) AS gkey,
-                                bundle_id, app_name, duration_ms,
-                                category, productivity_level
-                         FROM activity_segments
-                         WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0 AND app_name IS NOT NULL
-                       )
-                       SELECT (SELECT GROUP_CONCAT(DISTINCT g2.app_name)
-                               FROM grouped g2 WHERE g2.gkey = grouped.gkey),
-                              grouped.bundle_id, grouped.total_ms,
-                              grouped.category, grouped.level, grouped.segs
-                       FROM (
-                         SELECT gkey, bundle_id, SUM(duration_ms) AS total_ms,
-                                MAX(category) AS category,
-                                MAX(productivity_level) AS level,
-                                COUNT(1) AS segs
-                         FROM grouped
-                         GROUP BY gkey
-                         HAVING SUM(duration_ms) > 0
-                       ) grouped
-                       ORDER BY grouped.total_ms DESC
-                       LIMIT 15"#,
-                )
-                .map_err(StoreError::db)?;
-            let app_rows = app_stmt
-                .query_map(params![from_day, to_day], |row| {
-                    Ok(AppTotal {
-                        app_name: preferred_name_from_concat(
-                            &row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                        ),
-                        bundle_id: row.get(1)?,
-                        ms: row.get(2)?,
-                        category: row.get(3)?,
-                        productivity_level: row.get(4)?,
-                        segment_count: row.get(5)?,
-                        title: None,
-                    })
-                })
-                .map_err(StoreError::db)?;
-            let mut out = Vec::new();
-            for r in app_rows {
-                out.push(r.map_err(StoreError::db)?);
+        let mut days = Vec::new();
+        let mut all = Vec::new();
+        while day <= end {
+            let label = day.to_string();
+            let rows = self.list_activity_segments(&label)?;
+            if !rows.is_empty() {
+                let stats = crate::time_accounting::day_stats(&label, &rows, group_by);
+                days.push(DayRollupDto {
+                    day: label,
+                    total_active_ms: stats.total_active_ms,
+                    total_idle_ms: stats.total_idle_ms,
+                    pulse_score: stats.pulse_score,
+                    context_switches: stats.context_switches,
+                    by_category: stats.by_category,
+                });
+                all.extend(rows);
             }
-            out
-        };
-
-        // Range-wide category breakdown.
-        let mut rcat_stmt = conn
-            .prepare(
-                r#"SELECT COALESCE(category, 'Uncategorized'), productivity_level,
-                          SUM(duration_ms)
-                   FROM activity_segments
-                   WHERE day BETWEEN ?1 AND ?2 AND is_idle = 0
-                   GROUP BY COALESCE(category, 'Uncategorized'), productivity_level
-                   ORDER BY SUM(duration_ms) DESC"#,
-            )
-            .map_err(StoreError::db)?;
-        let rcat_rows = rcat_stmt
-            .query_map(params![from_day, to_day], |row| {
-                Ok(CategoryTotal {
-                    category: row.get(0)?,
-                    productivity_level: row.get(1)?,
-                    ms: row.get(2)?,
-                })
-            })
-            .map_err(StoreError::db)?;
-        let mut by_category = Vec::new();
-        for r in rcat_rows {
-            by_category.push(r.map_err(StoreError::db)?);
+            let Some(next) = day.succ_opt() else {
+                break;
+            };
+            day = next;
         }
-
         Ok(RangeStatsDto {
+            total_active_ms: days.iter().map(|d| d.total_active_ms).sum(),
+            total_idle_ms: days.iter().map(|d| d.total_idle_ms).sum(),
+            pulse_score: crate::time_accounting::pulse(&all),
+            top_apps: crate::time_accounting::top_apps(&all, group_by, 15),
+            by_category: crate::time_accounting::categories(&all),
             days,
-            total_active_ms,
-            total_idle_ms,
-            pulse_score,
-            top_apps,
-            by_category,
         })
     }
 
@@ -3614,13 +3246,18 @@ impl SqliteStore {
         category: Option<&str>,
         productivity_level: Option<&str>,
     ) -> Result<String, StoreError> {
+        if ended_at <= started_at || app_name.trim().is_empty() {
+            return Err(StoreError::Other(
+                "manual interval needs a non-empty app and end after start".into(),
+            ));
+        }
         let ts_str = started_at.to_rfc3339();
         let day = started_at
             .with_timezone(&chrono::Local)
             .format("%Y-%m-%d")
             .to_string();
         let duration_ms = (ended_at - started_at).num_milliseconds().max(0) as i64;
-        let seg_id = blake3::hash(format!("manual|{day}|{ts_str}|{app_name}").as_bytes())
+        let seg_id = blake3::hash(format!("manual|{ts_str}|{ended_at}|{app_name}|{window_title:?}|{category:?}|{productivity_level:?}").as_bytes())
             .to_hex()
             .to_string();
         let now = Utc::now().to_rfc3339();
@@ -3674,6 +3311,13 @@ impl SqliteStore {
             .lock()
             .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let tx = conn.transaction().map_err(StoreError::db)?;
+        let overlap: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM activity_segments WHERE source='manual' AND seg_id != ?1 AND julianday(started_at)<julianday(?3) AND julianday(ended_at)>julianday(?2))",params![seg_id,ts_str,ended_at.to_rfc3339()],|r|r.get(0)).map_err(StoreError::db)?;
+        if overlap {
+            return Err(StoreError::Other(
+                "manual interval overlaps another manual entry".into(),
+            ));
+        }
+
         tx.execute(
             r#"INSERT OR IGNORE INTO activity_segments
                (seg_id, day, app_name, bundle_id, window_title, url,
@@ -3755,6 +3399,8 @@ impl SqliteStore {
             .map_err(|_| StoreError::Other("lock poisoned".into()))?;
         let tx = conn.transaction().map_err(StoreError::db)?;
 
+        // Preserve an explicit classifier revision without modifying source facts.
+        tx.execute("INSERT INTO kv(key,value) VALUES('activity.category_rules_revision','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)", []).map_err(StoreError::db)?;
         // Upsert the rule list.
         tx.execute(
             r#"INSERT INTO kv (key, value) VALUES ('activity.category_rules', ?1)
@@ -4367,6 +4013,9 @@ impl SqliteStore {
                 DELETE FROM jobs;
                 DELETE FROM artifacts;
                 DELETE FROM events;
+                DELETE FROM activity_samples;
+                DELETE FROM activity_sample_identities;
+                DELETE FROM activity_segments;
                 DELETE FROM kv;
                 "#,
         )
@@ -4718,6 +4367,16 @@ fn migrate(conn: &Connection) -> Result<(), StoreError> {
         v = 11;
     }
 
+    if v < 12 {
+        let tx = conn.unchecked_transaction().map_err(StoreError::db)?;
+        tx.execute_batch(MIGRATE_V12).map_err(StoreError::db)?;
+        tx.execute(
+            "UPDATE schema_meta SET value = '12' WHERE key = 'version'",
+            [],
+        )
+        .map_err(StoreError::db)?;
+        tx.commit().map_err(StoreError::db)?;
+    }
     let _ = v;
     Ok(())
 }
@@ -5083,114 +4742,6 @@ fn fmt_ms_compact(ms: i64) -> String {
 }
 
 /// Prefer a human display name from GROUP_CONCAT(DISTINCT app_name, unit-sep).
-fn preferred_name_from_concat(concat: &str) -> String {
-    let names: Vec<&str> = concat
-        .split('\u{001f}')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    crate::categorization::preferred_display_name(&names)
-}
-
-/// Aggregate browser time by registrable domain. Fetches segments that have a
-/// URL (i.e. the frontmost app was a scriptable browser — PR #24), extracts the
-/// domain in Rust via `registrable_domain` (same logic the classifier uses for
-/// `MatchField::Domain`), and sums duration per domain. Non-browser segments
-/// (url IS NULL) are excluded — they have no site to attribute to.
-///
-/// `where_clause` + params let this serve both the day and range rollups
-/// (e.g. `"day = ?1"` vs `"day BETWEEN ?1 AND ?2"`).
-fn top_sites<P: rusqlite::Params>(
-    conn: &rusqlite::Connection,
-    where_clause: &str,
-    params: P,
-    limit: usize,
-) -> Result<Vec<AppTotal>, StoreError> {
-    use crate::categorization::registrable_domain;
-    use std::collections::BTreeMap;
-
-    // Fetch the raw browser segments. duration_ms > 0 mirrors the app query's
-    // HAVING filter; is_idle = 0 excludes away time. window_title feeds the
-    // representative-title label (see below).
-    let sql = format!(
-        r#"SELECT url, duration_ms, category, productivity_level, window_title
-           FROM activity_segments
-           WHERE {where_clause}
-             AND is_idle = 0
-             AND url IS NOT NULL AND url != ''
-             AND duration_ms > 0"#
-    );
-    let mut stmt = conn.prepare(&sql).map_err(StoreError::db)?;
-    // Per-domain accumulator:
-    //   (total_ms, segment_count, category, level, best_title_ms, best_title)
-    // MAX(category)/MAX(level) mirror the SQL app query. best_title holds the
-    // window_title from the longest-held segment for that domain — a stable,
-    // representative label that's far more readable than the bare domain.
-    let mut acc: BTreeMap<
-        String,
-        (
-            i64,
-            i64,
-            Option<String>,
-            Option<String>,
-            i64,
-            Option<String>,
-        ),
-    > = BTreeMap::new();
-    let rows = stmt
-        .query_map(params, |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-            ))
-        })
-        .map_err(StoreError::db)?;
-    for r in rows {
-        let (url, ms, category, level, title) = r.map_err(StoreError::db)?;
-        if let Some(domain) = registrable_domain(&url) {
-            let e = acc.entry(domain).or_insert((0, 0, None, None, 0, None));
-            e.0 += ms;
-            e.1 += 1;
-            match (&e.2, &category) {
-                (None, Some(_)) => e.2 = category,
-                (Some(a), Some(b)) if b > a => e.2 = category,
-                _ => {}
-            }
-            match (&e.3, &level) {
-                (None, Some(_)) => e.3 = level,
-                (Some(a), Some(b)) if b > a => e.3 = level,
-                _ => {}
-            }
-            // Keep the title from the longest segment (most representative).
-            if ms >= e.4 && title.as_deref().map(|t| !t.is_empty()).unwrap_or(false) {
-                e.4 = ms;
-                e.5 = title;
-            }
-        }
-    }
-    let mut out: Vec<AppTotal> = acc
-        .into_iter()
-        .map(
-            |(domain, (ms, segs, category, level, _best_ms, title))| AppTotal {
-                app_name: domain,
-                bundle_id: None,
-                ms,
-                category,
-                productivity_level: level,
-                segment_count: segs,
-                title,
-            },
-        )
-        .collect();
-    // Sort by duration desc, take top N.
-    out.sort_by(|a, b| b.ms.cmp(&a.ms));
-    out.truncate(limit);
-    Ok(out)
-}
-
 /// Fold `activity.focus.v1` events into continuous `activity_segments` rows.
 ///
 /// Model (ActivityWatch-style):
@@ -5205,6 +4756,112 @@ fn top_sites<P: rusqlite::Params>(
 /// last non-null bundle for the same `app_name` within a short window so one
 /// flaky poll does not invent a second uncategorized identity.
 fn project_activity_event(
+    tx: &rusqlite::Transaction<'_>,
+    event: &SourceEvent,
+) -> Result<(), StoreError> {
+    if event.source != SourceKind::Activity || event.kind != event_kind::ACTIVITY_FOCUS_V1 {
+        return Ok(());
+    }
+    let Some(stream) = event
+        .payload
+        .get("source_instance_id")
+        .and_then(|v| v.as_str())
+    else {
+        return fold_activity_event(tx, event);
+    };
+    let seq = event
+        .payload
+        .get("source_seq")
+        .and_then(|v| v.as_i64())
+        .filter(|v| *v > 0)
+        .ok_or_else(|| StoreError::Other("invalid activity source sequence".into()))?;
+    let mut identity = event.payload.clone();
+    if let Some(map) = identity.as_object_mut() {
+        for key in [
+            "source_seq",
+            "source_instance_id",
+            "heartbeat",
+            "idle_seconds",
+        ] {
+            map.remove(key);
+        }
+    }
+    // Sanitize even an incorrectly formed producer's locked event.
+    if identity.get("is_locked").and_then(|v| v.as_bool()) == Some(true) {
+        for key in [
+            "app_name",
+            "bundle_id",
+            "window_title",
+            "url",
+            "ls_category_type",
+            "pid",
+            "window_id",
+        ] {
+            identity[key] = serde_json::Value::Null;
+        }
+    }
+    let payload = serde_json::to_string(&identity).map_err(StoreError::json)?;
+    let identity_id = blake3::hash(payload.as_bytes()).to_hex().to_string();
+    tx.execute(
+        "INSERT OR IGNORE INTO activity_sample_identities(id,payload) VALUES(?1,?2)",
+        params![identity_id, payload],
+    )
+    .map_err(StoreError::db)?;
+    let inserted=tx.execute("INSERT OR IGNORE INTO activity_samples(event_id,source_instance_id,source_seq,captured_ms,received_ms,identity_id) VALUES(?1,?2,?3,?4,?5,?6)",params![event.id.to_string(),stream,seq,event.ts.timestamp_millis(),Utc::now().timestamp_millis(),identity_id]).map_err(StoreError::db)?;
+    if inserted == 0 {
+        let same:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM activity_samples WHERE event_id=?1 AND source_instance_id=?2 AND source_seq=?3 AND captured_ms=?4 AND identity_id=?5)",params![event.id.to_string(),stream,seq,event.ts.timestamp_millis(),identity_id],|r|r.get(0)).map_err(StoreError::db)?;
+        return if same {
+            Ok(())
+        } else {
+            Err(StoreError::Other(
+                "conflicting activity replay identity".into(),
+            ))
+        };
+    }
+    let newer:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM activity_samples WHERE source_instance_id=?1 AND source_seq>?2)",params![stream,seq],|r|r.get(0)).map_err(StoreError::db)?;
+    if newer {
+        // Late arrival: replay this capture lifetime in source order. Ordinary
+        // heartbeats remain incremental; a source restart has a new lifetime.
+        let mut stmt=tx.prepare("SELECT s.event_id,s.source_seq,s.captured_ms,i.payload FROM activity_samples s JOIN activity_sample_identities i ON i.id=s.identity_id WHERE s.source_instance_id=?1 ORDER BY s.source_seq").map_err(StoreError::db)?;
+        let samples = stmt
+            .query_map(params![stream], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(StoreError::db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::db)?;
+        drop(stmt);
+        tx.execute(
+            "DELETE FROM activity_segments WHERE source_instance_id=?1 AND source='auto'",
+            params![stream],
+        )
+        .map_err(StoreError::db)?;
+        for (id, seq, ts, body) in samples {
+            let mut replay = event.clone();
+            replay.id = Uuid::parse_str(&id).map_err(|e| StoreError::Other(e.to_string()))?;
+            replay.ts = DateTime::from_timestamp_millis(ts)
+                .ok_or_else(|| StoreError::Other("invalid sample time".into()))?;
+            replay.payload = serde_json::from_str(&body).map_err(StoreError::json)?;
+            replay.payload["source_instance_id"] = serde_json::json!(stream);
+            replay.payload["source_seq"] = serde_json::json!(seq);
+            fold_activity_event(tx, &replay)?;
+        }
+        Ok(())
+    } else {
+        let mut clean = event.clone();
+        clean.payload = identity;
+        clean.payload["source_instance_id"] = serde_json::json!(stream);
+        clean.payload["source_seq"] = serde_json::json!(seq);
+        fold_activity_event(tx, &clean)
+    }
+}
+
+fn fold_activity_event(
     tx: &rusqlite::Transaction<'_>,
     event: &SourceEvent,
 ) -> Result<(), StoreError> {
@@ -5310,33 +4967,28 @@ fn project_activity_event(
     // window (heartbeat interval + slack). If found, extend it; else close
     // the previous open segment and insert a new one.
     // 30s window covers the 5s heartbeat with margin for scheduler jitter.
-    let identity_match = r#"
-        app_name IS ?1
-        AND bundle_id IS ?2
-        AND window_title IS ?3
-        AND url IS ?4
-        AND is_idle = ?5
-        AND is_locked = ?6
-        AND ended_at IS NOT NULL
-        AND (julianday(?7) - julianday(ended_at)) * 86400.0 < 30.0
-        AND (julianday(?7) - julianday(ended_at)) * 86400.0 >= 0.0
-        ORDER BY ended_at DESC LIMIT 1"#;
-    let existing: Option<(String, String)> = tx
-        .query_row(
-            &format!("SELECT seg_id, started_at FROM activity_segments WHERE {identity_match}"),
-            params![
-                app_name,
-                bundle_id,
-                window_title,
-                url,
-                is_idle as i64,
-                is_locked as i64,
-                ts_str,
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(StoreError::db)?;
+    let stream = event
+        .payload
+        .get("source_instance_id")
+        .and_then(|v| v.as_str());
+    let seq = event.payload.get("source_seq").and_then(|v| v.as_i64());
+    let window_identity = serde_json::to_string(&serde_json::json!([
+        event.payload.get("pid"),
+        event.payload.get("window_id")
+    ]))
+    .map_err(StoreError::json)?;
+    // A -> B -> A must open a fresh A; searching all matching historical A
+    // intervals would erase B and double-count its time.
+    let existing: Option<(String,String)> = tx.query_row(r#"
+      SELECT seg_id,started_at FROM activity_segments
+      WHERE seg_id=(SELECT seg_id FROM activity_segments WHERE source='auto' AND source_instance_id IS ?8 ORDER BY COALESCE(last_source_seq,-1) DESC, ended_at DESC, rowid DESC LIMIT 1)
+        AND app_name IS ?1 AND bundle_id IS ?2 AND window_title IS ?3 AND url IS ?4
+        AND is_idle=?5 AND is_locked=?6 AND source='auto'
+        AND window_identity IS ?9
+        AND (?10 IS NULL OR last_source_seq=?10-1)
+        AND (julianday(?7)-julianday(ended_at))*86400.0 >= 0
+        AND (julianday(?7)-julianday(ended_at))*86400.0 < 30
+      "#,params![app_name,bundle_id,window_title,url,is_idle as i64,is_locked as i64,ts_str,stream,window_identity,seq],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(StoreError::db)?;
 
     let now = Utc::now().to_rfc3339();
     if let Some((seg_id, started_at)) = existing {
@@ -5350,31 +5002,21 @@ fn project_activity_event(
                SET ended_at = ?1,
                    duration_ms = ?2,
                    event_count = event_count + 1,
-                   updated_at = ?3
+                   updated_at = ?3, last_source_seq = ?5
                WHERE seg_id = ?4"#,
-            params![ts_str, duration_ms, now, seg_id],
+            params![ts_str, duration_ms, now, seg_id, seq],
         )
         .map_err(StoreError::db)?;
     } else {
         // Identity change (or first sample): finalize the previously open
         // segment so time from its last heartbeat → this event is attributed
         // to the *previous* app/title, not dropped as a 0ms stub.
-        close_open_activity_segment(
-            tx,
-            &ts_str,
-            now.as_str(),
-            app_name,
-            bundle_id,
-            window_title,
-            url,
-            is_idle,
-            is_locked,
-        )?;
+        close_open_activity_segment(tx, &ts_str, &now, stream, seq)?;
 
         // New segment. Deterministic id so replays are idempotent. Includes
         // `url` so a browser tab change produces a distinct segment.
         let identity = format!(
-            "{day}|{app_name:?}|{bundle_id:?}|{window_title:?}|{url:?}|{is_idle}|{is_locked}|{ts_str}"
+            "{stream:?}|{seq:?}|{window_identity}|{app_name:?}|{bundle_id:?}|{window_title:?}|{url:?}|{is_idle}|{is_locked}|{ts_str}"
         );
         let seg_id = blake3::hash(identity.as_bytes()).to_hex().to_string();
         let level_str = classification.level.map(productivity_level_str);
@@ -5383,9 +5025,9 @@ fn project_activity_event(
                (seg_id, day, app_name, bundle_id, window_title, url,
                 started_at, ended_at, duration_ms, is_idle, is_locked,
                 category, project, productivity_level, event_count, updated_at,
-                ls_category_type)
+                ls_category_type, source_instance_id, last_source_seq, window_identity)
                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10,
-                       ?11, NULL, ?12, 1, ?13, ?14)"#,
+                       ?11, NULL, ?12, 1, ?13, ?14, ?15, ?16, ?17)"#,
             params![
                 seg_id,
                 day,
@@ -5401,6 +5043,9 @@ fn project_activity_event(
                 level_str.as_deref(),
                 now,
                 ls_category_type,
+                stream,
+                seq,
+                window_identity,
             ],
         )
         .map_err(StoreError::db)?;
@@ -5415,42 +5060,16 @@ fn close_open_activity_segment(
     tx: &rusqlite::Transaction<'_>,
     ts_str: &str,
     now: &str,
-    app_name: Option<&str>,
-    bundle_id: Option<&str>,
-    window_title: Option<&str>,
-    url: Option<&str>,
-    is_idle: bool,
-    is_locked: bool,
+    stream: Option<&str>,
+    seq: Option<i64>,
 ) -> Result<(), StoreError> {
-    let prev: Option<(String, String)> = tx
-        .query_row(
-            r#"SELECT seg_id, started_at FROM activity_segments
-               WHERE ended_at IS NOT NULL
-                 AND (julianday(?1) - julianday(ended_at)) * 86400.0 < 30.0
-                 AND (julianday(?1) - julianday(ended_at)) * 86400.0 >= 0.0
-                 AND NOT (
-                   app_name IS ?2
-                   AND bundle_id IS ?3
-                   AND window_title IS ?4
-                   AND url IS ?5
-                   AND is_idle = ?6
-                   AND is_locked = ?7
-                 )
-               ORDER BY ended_at DESC LIMIT 1"#,
-            params![
-                ts_str,
-                app_name,
-                bundle_id,
-                window_title,
-                url,
-                is_idle as i64,
-                is_locked as i64,
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(StoreError::db)?;
-
+    let prev:Option<(String,String)>=tx.query_row(r#"
+      SELECT seg_id,started_at FROM activity_segments
+      WHERE seg_id=(SELECT seg_id FROM activity_segments WHERE source='auto' AND source_instance_id IS ?2 ORDER BY COALESCE(last_source_seq,-1) DESC,ended_at DESC,rowid DESC LIMIT 1)
+        AND (?3 IS NULL OR last_source_seq=?3-1)
+        AND (julianday(?1)-julianday(ended_at))*86400.0 >= 0
+        AND (julianday(?1)-julianday(ended_at))*86400.0 < 30
+      "#,params![ts_str,stream,seq],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(StoreError::db)?;
     let Some((seg_id, started_at)) = prev else {
         return Ok(());
     };
@@ -5545,12 +5164,13 @@ fn reapply_all_segments_tx(
 ) -> Result<(), StoreError> {
     let mut stmt = tx
         .prepare(
-            r#"SELECT seg_id, app_name, bundle_id, window_title, ls_category_type
-               FROM activity_segments"#,
+            r#"SELECT seg_id, app_name, bundle_id, window_title, ls_category_type, url
+               FROM activity_segments WHERE source='auto'"#,
         )
         .map_err(StoreError::db)?;
     let rows: Vec<(
         String,
+        Option<String>,
         Option<String>,
         Option<String>,
         Option<String>,
@@ -5563,6 +5183,7 @@ fn reapply_all_segments_tx(
                 row.get(2)?,
                 row.get(3)?,
                 row.get(4)?,
+                row.get(5)?,
             ))
         })
         .map_err(StoreError::db)?
@@ -5570,13 +5191,13 @@ fn reapply_all_segments_tx(
         .map_err(StoreError::db)?;
     drop(stmt);
 
-    for (seg_id, app_name, bundle_id, window_title, ls) in rows {
+    for (seg_id, app_name, bundle_id, window_title, ls, url) in rows {
         let cached = load_cached_classification_tx(tx, bundle_id.as_deref())?;
         let fields = ActivityFields {
             app_name: app_name.as_deref(),
             bundle_id: bundle_id.as_deref(),
             window_title: window_title.as_deref(),
-            url: None,
+            url: url.as_deref(),
             ls_category_type: ls.as_deref(),
         };
         let c = crate::categorization::classify(&fields, rules, cached.as_ref());
@@ -6630,6 +6251,317 @@ mod tests {
         assert!(like_pattern("中文").is_some());
     }
 
+    fn sequenced_focus(stream: &str, seq: i64, offset: i64, app: &str) -> SourceEvent {
+        let mut event = SourceEvent::new(
+            SourceKind::Activity,
+            event_kind::ACTIVITY_FOCUS_V1,
+            json!({
+                "app_name":app,"bundle_id":format!("test.{app}"),"window_title":"synthetic","is_idle":false,"is_locked":false,
+                "source_instance_id":stream,"source_seq":seq,"window_id":1,"pid":123,"heartbeat":true
+            }),
+        );
+        event.ts = DateTime::parse_from_rfc3339("2026-09-10T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+            + chrono::Duration::seconds(offset);
+        event
+    }
+
+    #[test]
+    fn source_order_replay_matches_live_and_does_not_revive_old_window() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let live = SqliteStore::open(a.path()).unwrap();
+        let replay = SqliteStore::open(b.path()).unwrap();
+        let events = vec![
+            sequenced_focus("s", 1, 0, "A"),
+            sequenced_focus("s", 2, 5, "B"),
+            sequenced_focus("s", 3, 10, "A"),
+            sequenced_focus("s", 4, 15, "A"),
+        ];
+        for e in &events {
+            live.append_event(e.clone()).unwrap();
+        }
+        for i in [0, 2, 3, 1, 2] {
+            replay.append_event(events[i].clone()).unwrap();
+        }
+        let day = events[0]
+            .ts
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        let x = live.list_activity_segments(&day).unwrap();
+        let y = replay.list_activity_segments(&day).unwrap();
+        assert_eq!(
+            serde_json::to_value(&x).unwrap(),
+            serde_json::to_value(&y).unwrap()
+        );
+        assert_eq!(x.iter().map(|r| r.duration_ms).sum::<i64>(), 15_000);
+        assert_eq!(
+            x.iter()
+                .filter(|r| r.app_name.as_deref() == Some("A"))
+                .map(|r| r.duration_ms)
+                .sum::<i64>(),
+            10_000
+        );
+        assert_eq!(x.len(), 3);
+        let conn = replay.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM activity_samples", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM activity_sample_identities", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn restart_gap_and_window_lifetime_are_not_merged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        for event in [
+            sequenced_focus("before", 1, 0, "A"),
+            sequenced_focus("before", 2, 5, "A"),
+            sequenced_focus("after", 1, 10, "A"),
+            sequenced_focus("after", 2, 15, "A"),
+        ] {
+            store.append_event(event).unwrap();
+        }
+        let day = sequenced_focus("s", 1, 0, "A")
+            .ts
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(
+            store
+                .activity_day_stats(&day, GroupBy::App)
+                .unwrap()
+                .total_active_ms,
+            10_000
+        );
+        let mut switched = sequenced_focus("after", 3, 20, "A");
+        switched.payload["window_id"] = json!(2);
+        store.append_event(switched).unwrap();
+        let mut heartbeat = sequenced_focus("after", 4, 25, "A");
+        heartbeat.payload["window_id"] = json!(2);
+        store.append_event(heartbeat).unwrap();
+        assert_eq!(
+            store
+                .list_activity_segments(&day)
+                .unwrap()
+                .iter()
+                .filter(|s| s.source != "gap")
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn manual_overlay_day_week_and_undo_share_one_accounting_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let first = sequenced_focus("s", 1, 0, "A");
+        let start = first.ts;
+        store.append_event(first).unwrap();
+        store
+            .append_event(sequenced_focus("s", 2, 20, "A"))
+            .unwrap();
+        let id = store
+            .add_manual_segment(
+                start + chrono::Duration::seconds(5),
+                start + chrono::Duration::seconds(15),
+                "Meeting",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(store
+            .add_manual_segment(
+                start + chrono::Duration::seconds(10),
+                start + chrono::Duration::seconds(18),
+                "Conflict",
+                None,
+                None,
+                None
+            )
+            .is_err());
+        let day = start
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        let stats = store.activity_day_stats(&day, GroupBy::App).unwrap();
+        let week = store
+            .activity_range_stats(&day, &day, GroupBy::App)
+            .unwrap();
+        assert_eq!(stats.total_active_ms, 20_000);
+        assert_eq!(week.total_active_ms, stats.total_active_ms);
+        assert_eq!(week.days[0].pulse_score, stats.pulse_score);
+        assert_eq!(stats.by_hour.iter().sum::<i64>(), 20_000);
+        store.delete_manual_segment(&id).unwrap();
+        let rows = store.list_activity_segments(&day).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].duration_ms, 20_000);
+    }
+
+    #[test]
+    fn cross_midnight_manual_time_is_clipped_and_reversible() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let (_, midnight) = crate::time_accounting::day_bounds("2026-09-10").unwrap();
+        let id = store
+            .add_manual_segment(
+                midnight - chrono::Duration::minutes(10),
+                midnight + chrono::Duration::minutes(20),
+                "Meeting",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let a = store
+            .activity_day_stats("2026-09-10", GroupBy::App)
+            .unwrap();
+        let b = store
+            .activity_day_stats("2026-09-11", GroupBy::App)
+            .unwrap();
+        assert_eq!(a.total_active_ms, 600_000);
+        assert_eq!(b.total_active_ms, 1_200_000);
+        assert_eq!(
+            store
+                .activity_range_stats("2026-09-10", "2026-09-11", GroupBy::App)
+                .unwrap()
+                .total_active_ms,
+            1_800_000
+        );
+        assert!(store
+            .add_manual_segment(midnight, midnight, "Empty", None, None, None)
+            .is_err());
+        store.delete_manual_segment(&id).unwrap();
+        assert_eq!(
+            store
+                .activity_range_stats("2026-09-10", "2026-09-11", GroupBy::App)
+                .unwrap()
+                .total_active_ms,
+            0
+        );
+    }
+
+    #[test]
+    fn rule_reapply_preserves_source_and_manual_category_and_uses_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let mut first = sequenced_focus("s", 1, 0, "Browser");
+        first.payload["url"] = json!("https://example.test/project");
+        let mut second = sequenced_focus("s", 2, 10, "Browser");
+        second.payload["url"] = first.payload["url"].clone();
+        store.append_event(first.clone()).unwrap();
+        store.append_event(second).unwrap();
+        let manual = store
+            .add_manual_segment(
+                first.ts + chrono::Duration::seconds(20),
+                first.ts + chrono::Duration::seconds(30),
+                "Browser",
+                None,
+                Some("Pinned"),
+                Some("neutral"),
+            )
+            .unwrap();
+        store
+            .save_category_rules_and_reapply(vec![CategoryRule {
+                field: crate::MatchField::Url,
+                value: "example.test/project".into(),
+                category: "Project work".into(),
+                level: Some(ProductivityLevel::Productive),
+            }])
+            .unwrap();
+        let day = first
+            .ts
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        let rows = store.list_activity_segments(&day).unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.source == "auto")
+                .unwrap()
+                .category
+                .as_deref(),
+            Some("Project work")
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.seg_id == manual)
+                .unwrap()
+                .category
+                .as_deref(),
+            Some("Pinned")
+        );
+        let conn = store.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM activity_samples", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            kv_get(&conn, "activity.category_rules_revision")
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn schema_11_upgrade_preserves_legacy_time_and_wipe_removes_replay_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        store.append_event(sequenced_focus("s", 1, 0, "A")).unwrap();
+        store
+            .append_event(sequenced_focus("s", 2, 20, "A"))
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch("DROP TABLE activity_samples; DROP TABLE activity_sample_identities; DROP INDEX idx_activity_segments_stream; ALTER TABLE activity_segments DROP COLUMN source_instance_id; ALTER TABLE activity_segments DROP COLUMN last_source_seq; ALTER TABLE activity_segments DROP COLUMN window_identity; UPDATE schema_meta SET value='11' WHERE key='version';").unwrap();
+        }
+        drop(store);
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let day = sequenced_focus("s", 1, 0, "A")
+            .ts
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(
+            store
+                .activity_day_stats(&day, GroupBy::App)
+                .unwrap()
+                .total_active_ms,
+            20_000
+        );
+        store
+            .append_event(sequenced_focus("new", 1, 30, "A"))
+            .unwrap();
+        store.wipe_sync().unwrap();
+        let conn = store.conn.lock().unwrap();
+        for table in [
+            "activity_samples",
+            "activity_sample_identities",
+            "activity_segments",
+        ] {
+            assert_eq!(
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
     #[test]
     fn activity_projection_merges_heartbeats_and_splits_on_change() {
         let dir = tempdir().unwrap();
@@ -6952,8 +6884,8 @@ mod tests {
             .append_event(mk(10, "Safari", "com.apple.Safari"))
             .unwrap();
         // Comet gets exactly one sample, then focus leaves to Activity Monitor.
-        // Comet's segment stays at 0ms because no second Comet heartbeat ever
-        // closes it.
+        // The switch closes Comet at 30s; only the final Activity Monitor
+        // sample has no observed trailing interval.
         store
             .append_event(mk(20, "Comet", "ai.perplexity.comet"))
             .unwrap();
@@ -6970,8 +6902,8 @@ mod tests {
 
         let names: Vec<&str> = stats.top_apps.iter().map(|a| a.app_name.as_str()).collect();
         assert!(
-            !names.contains(&"Comet"),
-            "0ms Comet must not appear in top_apps, got: {:?}",
+            names.contains(&"Comet"),
+            "Comet must receive the observed 20s to 30s interval, got: {:?}",
             names
         );
         assert!(

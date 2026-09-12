@@ -53,6 +53,7 @@ struct ActivityKey {
     /// each accruing its own duration → per-website time tracking.
     tab_url: Option<String>,
     window_id: Option<u64>,
+    pid: Option<i32>,
     is_idle: bool,
     is_locked: bool,
 }
@@ -70,6 +71,7 @@ impl ActivityKey {
                 window_title: None,
                 tab_url: None,
                 window_id: None,
+                pid: None,
                 is_idle: true,
                 is_locked: true,
             };
@@ -83,6 +85,7 @@ impl ActivityKey {
                 .and_then(|f| f.window_title.clone()),
             tab_url: sample.frontmost.as_ref().and_then(|f| f.tab_url.clone()),
             window_id: sample.frontmost.as_ref().and_then(|f| f.window_id),
+            pid: sample.frontmost.as_ref().and_then(|f| f.pid),
             is_idle,
             is_locked: false,
         }
@@ -96,6 +99,7 @@ impl ActivityKey {
         &Option<String>,
         &Option<String>,
         Option<u64>,
+        Option<i32>,
     ) {
         (
             &self.app_name,
@@ -103,6 +107,7 @@ impl ActivityKey {
             &self.window_title,
             &self.tab_url,
             self.window_id,
+            self.pid,
         )
     }
 }
@@ -112,6 +117,8 @@ pub struct ActivityAccumulator {
     heartbeat: Duration,
     last_key: Option<ActivityKey>,
     last_emit: Option<chrono::DateTime<Utc>>,
+    source_instance_id: Uuid,
+    source_seq: u64,
 }
 
 impl ActivityAccumulator {
@@ -123,7 +130,18 @@ impl ActivityAccumulator {
             heartbeat,
             last_key: None,
             last_emit: None,
+            source_instance_id: Uuid::new_v4(),
+            source_seq: 0,
         }
+    }
+
+    /// A privacy gate or capture restart ends the previous continuity lease.
+    /// No content-bearing event is emitted while the gate is closed.
+    pub fn discontinuity(&mut self) {
+        self.last_key = None;
+        self.last_emit = None;
+        self.source_instance_id = Uuid::new_v4();
+        self.source_seq = 0;
     }
 
     /// Ingest a sample; returns a focus heartbeat/change row when worth keeping.
@@ -140,6 +158,9 @@ impl ActivityAccumulator {
         sample: ActivitySample,
         now: chrono::DateTime<Utc>,
     ) -> ActivityTick {
+        if self.last_emit.is_some_and(|last| now <= last) {
+            self.discontinuity();
+        }
         let key = ActivityKey::from(&sample, self.idle_threshold);
         let window_identity_changed = match &self.last_key {
             None => true,
@@ -162,7 +183,11 @@ impl ActivityAccumulator {
         }
         self.last_key = Some(key.clone());
         self.last_emit = Some(now);
-        let focus = Some(make_event(&sample, &key, now, !changed));
+        self.source_seq += 1;
+        let mut event = make_event(&sample, &key, now, !changed);
+        event.payload["source_instance_id"] = json!(self.source_instance_id);
+        event.payload["source_seq"] = json!(self.source_seq);
+        let focus = Some(event);
         let window_changed = if window_identity_changed && !key.is_idle && !key.is_locked {
             Some(make_window_changed(&sample, &key, now))
         } else {
@@ -193,11 +218,13 @@ fn make_event(
         .and_then(|f| f.ls_category_type.clone());
     let payload = json!({
         "payload_version": 1,
+        "window_id": key.window_id,
+        "pid": key.pid,
         "app_name": key.app_name,
         "bundle_id": key.bundle_id,
         "window_title": key.window_title,
         "url": key.tab_url,
-        "ls_category_type": ls_category_type,
+        "ls_category_type": if key.is_locked { None } else { ls_category_type },
         "idle_seconds": sample.idle_seconds,
         "is_idle": key.is_idle,
         "is_locked": key.is_locked,
@@ -256,6 +283,41 @@ mod tests {
 
     fn sample(app: &str, title: Option<&str>, idle: f64) -> ActivitySample {
         sample_window(app, title, idle, None)
+    }
+
+    #[test]
+    fn privacy_discontinuity_and_clock_reversal_start_new_lifetimes() {
+        let mut acc = ActivityAccumulator::new(Duration::from_secs(300), Duration::from_secs(5));
+        let now = Utc::now();
+        let first = acc.ingest(sample("A", Some("private"), 0.0), now).unwrap();
+        let second = acc
+            .ingest(
+                sample("A", Some("private"), 0.0),
+                now + chrono::Duration::seconds(5),
+            )
+            .unwrap();
+        assert_eq!(
+            first.payload["source_instance_id"],
+            second.payload["source_instance_id"]
+        );
+        assert_eq!(second.payload["source_seq"], json!(2));
+        acc.discontinuity();
+        let resumed = acc
+            .ingest(
+                sample("A", Some("private"), 0.0),
+                now + chrono::Duration::seconds(10),
+            )
+            .unwrap();
+        assert_ne!(
+            first.payload["source_instance_id"],
+            resumed.payload["source_instance_id"]
+        );
+        assert_eq!(resumed.payload["source_seq"], json!(1));
+        let reversed = acc.ingest(sample("A", Some("private"), 0.0), now).unwrap();
+        assert_ne!(
+            resumed.payload["source_instance_id"],
+            reversed.payload["source_instance_id"]
+        );
     }
 
     #[test]

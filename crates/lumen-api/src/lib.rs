@@ -287,7 +287,7 @@ pub struct ActivitySegmentDto {
     pub category: Option<String>,
     pub productivity_level: Option<String>,
     pub event_count: i64,
-    /// 'auto' (tracked) or 'manual' (user-entered retro-entry).
+    /// 'auto' (tracked), 'manual' (user-entered overlay), or 'gap' (unobserved).
     #[serde(default)]
     pub source: String,
     /// Nested scene stack label (`Ghostty → herdr → writing`). Query-time.
@@ -710,6 +710,20 @@ pub struct RangeStatsDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_activity_segment_decodes_and_gap_roundtrips() {
+        let raw = serde_json::json!({"seg_id":"old","day":"2026-09-10","app_name":"Editor","bundle_id":null,"window_title":null,"started_at":"2026-09-10T12:00:00Z","ended_at":"2026-09-10T12:00:05Z","duration_ms":5000,"is_idle":false,"is_locked":false,"category":null,"productivity_level":null,"event_count":2});
+        let mut segment: ActivitySegmentDto = serde_json::from_value(raw).unwrap();
+        assert!(segment.url.is_none());
+        assert!(segment.scene_label.is_none());
+        segment.source = "gap".into();
+        segment.app_name = None;
+        let decoded: ActivitySegmentDto =
+            serde_json::from_str(&serde_json::to_string(&segment).unwrap()).unwrap();
+        assert_eq!(decoded.source, "gap");
+        assert!(!decoded.is_idle);
+    }
 
     #[test]
     fn health_roundtrip() {

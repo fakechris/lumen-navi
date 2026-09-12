@@ -187,7 +187,7 @@ https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 
 ---
 
-## Time tracking (v0.2 — experiment shipped, contract pending)
+## Time tracking (v0.2 — experiment and accounting contract)
 
 > Follows Principle 11 (§3 ARCHITECTURE.md): the runnable experiment is live;
 > the CLI contract below is being distilled from it.
@@ -199,7 +199,9 @@ https://github.com/trycua/cua             ← cua-driver only (MIT Act plane)
 - Weekly view (v1.1), retro-entry (v1.2), menu bar tracker (v1.3)
 - Frontmost detection via CGWindowList (correct for background daemons)
 
-**Contract to freeze (next):**
+**Versioned behavior: [TIME_ACCOUNTING.md](TIME_ACCOUNTING.md).**
+
+Contract surfaces:
 - `activity.focus.v1` event payload schema (stabilize field names)
 - `activity_segments` table columns + the `source` ('auto'|'manual') convention
 - `/v1/activity/{segments,stats,range,rules,segment}` HTTP endpoint shapes

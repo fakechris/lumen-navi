@@ -12,7 +12,12 @@ use lumen_scene::stack_for;
 pub fn fold_scene_day(day: &str, segments: &[ActivitySegmentDto]) -> SceneDayDto {
     let mut episodes: Vec<SceneEpisodeDto> = Vec::new();
     for seg in segments {
-        if seg.is_idle || seg.is_locked || seg.duration_ms <= 0 {
+        if seg.app_name.is_none()
+            || seg.source == "gap"
+            || seg.is_idle
+            || seg.is_locked
+            || seg.duration_ms <= 0
+        {
             continue;
         }
         let app = seg.app_name.as_deref().unwrap_or("unknown");

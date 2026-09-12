@@ -1,6 +1,6 @@
 //! SQLite schema for meta/navi.db
 
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 pub const MIGRATE_V1: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -277,4 +277,19 @@ CREATE TABLE IF NOT EXISTS skills (
 );
 
 CREATE INDEX IF NOT EXISTS idx_skills_enabled ON skills(enabled);
+"#;
+
+/// Compact replay facts: repeated titles are interned, not copied each heartbeat.
+pub const MIGRATE_V12: &str = r#"
+ALTER TABLE activity_segments ADD COLUMN source_instance_id TEXT;
+ALTER TABLE activity_segments ADD COLUMN last_source_seq INTEGER;
+ALTER TABLE activity_segments ADD COLUMN window_identity TEXT;
+CREATE TABLE activity_sample_identities (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+CREATE TABLE activity_samples (
+ event_id TEXT PRIMARY KEY, source_instance_id TEXT NOT NULL, source_seq INTEGER NOT NULL,
+ captured_ms INTEGER NOT NULL, received_ms INTEGER NOT NULL, identity_id TEXT NOT NULL REFERENCES activity_sample_identities(id),
+ UNIQUE(source_instance_id, source_seq)
+);
+CREATE INDEX idx_activity_samples_time ON activity_samples(captured_ms);
+CREATE INDEX idx_activity_segments_stream ON activity_segments(source_instance_id);
 "#;
