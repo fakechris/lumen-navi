@@ -30,7 +30,9 @@ capture → store event + blob → enqueue job ocr_screen (deduped if open)
 | Idempotency | One open job per event; one `ocr.v1` derived per event |
 | Retry | Exponential backoff via `available_at` |
 | Stuck jobs | Reclaim `running` older than `stale_running_ms` |
-| Timeouts | Per-call `timeout_ms` |
+| Timeouts | `timeout_ms` covers helper IPC and process exit; timeout kills and reaps the child |
+| Fault isolation | Helper failures return retryable errors; no default in-process fallback |
+| Circuit breaker | Stop claiming after consecutive failures; retry after cooldown without spending queued attempts |
 | Size limits | Reject oversized images permanently |
 | Languages | Default `zh-Hans` + `en-US` |
 | Layout boxes | Optional; by default only when text empty |
@@ -49,11 +51,25 @@ max_attempts = 5
 retry_base_ms = 2000
 retry_max_ms = 60000
 timeout_ms = 90000
+diagnostic_in_process_fallback = false
+circuit_failure_threshold = 3
+circuit_cooldown_ms = 60000
 stale_running_ms = 300000
 max_image_bytes = 26214400
 max_text_chars = 500000
 shutdown_drain_ms = 30000
 ```
+
+`diagnostic_in_process_fallback = true` is a troubleshooting escape hatch. It
+runs native OCR inside the daemon after helper failure and therefore loses
+native crash isolation. Startup logs and desktop health show this warning.
+Leave it disabled for normal operation. If the executable cannot be found,
+normal mode retries and opens the circuit instead of silently using native OCR.
+
+`/health.ocr` reports consecutive failures, remaining cooldown, and diagnostic
+fallback mode. During cooldown pending jobs retain their attempts; the next
+eligible job probes recovery. Success clears the circuit. Individual jobs
+still become dead at `max_attempts`; recovery does not silently resurrect dead jobs.
 
 ## Derived payload `ocr.v1`
 
@@ -113,7 +129,6 @@ bind = "127.0.0.1:7420"
 - Cloud OCR  
 - PII redaction of OCR text  
 - Desktop/timeline search UI (API only)  
-- Separate OCR helper process (S4.1 optional)  
 
 ## Exit criteria
 

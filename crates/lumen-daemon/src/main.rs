@@ -769,19 +769,21 @@ async fn main() -> Result<()> {
     // --- OCR worker ---
     let (ocr_cancel_tx, ocr_cancel_rx) = watch::channel(false);
     let ocr_handle = if config.ocr.enabled {
-        let in_process_engine = host::ocr(config.ocr.max_image_bytes as usize);
-        let engine: Arc<dyn lumen_platform::OcrEngine> =
-            if let Ok(current_exe) = std::env::current_exe() {
-                Arc::new(OutOfProcessOcrEngine::new(
-                    current_exe,
-                    vec!["ocr-helper".into(), "--stdio".into()],
-                    Duration::from_millis(config.ocr.timeout_ms),
-                    config.ocr.max_image_bytes as usize,
-                    in_process_engine,
-                ))
-            } else {
-                in_process_engine
-            };
+        let fallback = if config.ocr.diagnostic_in_process_fallback {
+            warn!("diagnostic in-process OCR fallback enabled; native crash isolation is disabled");
+            Some(host::ocr(config.ocr.max_image_bytes as usize))
+        } else {
+            None
+        };
+        // Empty path produces a retryable spawn error. Never silently switch
+        // to a native in-process engine when executable discovery fails.
+        let engine: Arc<dyn lumen_platform::OcrEngine> = Arc::new(OutOfProcessOcrEngine::new(
+            std::env::current_exe().unwrap_or_default(),
+            vec!["ocr-helper".into(), "--stdio".into()],
+            Duration::from_millis(config.ocr.timeout_ms.max(1)),
+            config.ocr.max_image_bytes as usize,
+            fallback,
+        ));
         if engine.is_supported() {
             let worker = Arc::new(OcrWorker::new(
                 Arc::clone(&store),
@@ -795,7 +797,12 @@ async fn main() -> Result<()> {
                     max_attempts: config.ocr.max_attempts as i64,
                     retry_base: Duration::from_millis(config.ocr.retry_base_ms),
                     retry_max: Duration::from_millis(config.ocr.retry_max_ms),
-                    engine_timeout: Duration::from_millis(config.ocr.timeout_ms),
+                    // Let the helper timeout kill and reap its child before
+                    // the outer worker cancellation guard fires.
+                    engine_timeout: Duration::from_millis(config.ocr.timeout_ms.max(1))
+                        .saturating_add(Duration::from_secs(5)),
+                    circuit_failure_threshold: config.ocr.circuit_failure_threshold,
+                    circuit_cooldown: Duration::from_millis(config.ocr.circuit_cooldown_ms),
                     stale_running: Duration::from_millis(config.ocr.stale_running_ms),
                     max_image_bytes: config.ocr.max_image_bytes as usize,
                     max_text_chars: config.ocr.max_text_chars as usize,
@@ -957,7 +964,7 @@ async fn main() -> Result<()> {
     // extension, which can't open sockets). Socket bind failure is fatal
     // (exit 1 → supervisor alert + restart); TCP failure is non-fatal.
     let _api_handle: Option<tokio::task::JoinHandle<()>> = if config.api.enabled {
-        let control_state = control_server::ControlState::new(
+        let mut control_state = control_server::ControlState::new(
             Arc::clone(&store),
             Arc::clone(&observe_paused),
             Arc::clone(&observe_closed_eyes),
@@ -996,6 +1003,8 @@ async fn main() -> Result<()> {
             config.privacy.app_blocklist.clone(),
         );
 
+        control_state.ocr_worker = ocr_handle.as_ref().map(|(worker, _)| Arc::clone(worker));
+        control_state.ocr_diagnostic_fallback = config.ocr.diagnostic_in_process_fallback;
         let socket_path = config.data_dir.join("daemon.sock");
         // Fatal on bind failure: the shell depends on this socket.
         match control_server::spawn(&socket_path, control_state.clone()) {

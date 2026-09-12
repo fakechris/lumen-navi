@@ -9,8 +9,8 @@
 //! - Image size / empty artifact handling
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use lumen_platform::{OcrEngine, OcrResult, PlatformError};
@@ -34,6 +34,8 @@ pub struct OcrWorkerConfig {
     pub retry_base: Duration,
     pub retry_max: Duration,
     pub engine_timeout: Duration,
+    pub circuit_failure_threshold: u64,
+    pub circuit_cooldown: Duration,
     pub stale_running: Duration,
     pub max_image_bytes: usize,
     pub max_text_chars: usize,
@@ -53,6 +55,8 @@ impl Default for OcrWorkerConfig {
             retry_base: Duration::from_secs(2),
             retry_max: Duration::from_secs(60),
             engine_timeout: Duration::from_secs(90),
+            circuit_failure_threshold: 3,
+            circuit_cooldown: Duration::from_secs(60),
             stale_running: Duration::from_secs(5 * 60),
             max_image_bytes: 25 * 1024 * 1024,
             max_text_chars: 500_000,
@@ -73,6 +77,12 @@ pub struct OcrWorkerStats {
     pub timed_out: u64,
 }
 
+#[derive(Default)]
+struct CircuitState {
+    consecutive_failures: u64,
+    retry_at: Option<Instant>,
+}
+
 pub struct OcrWorker {
     store: Arc<SqliteStore>,
     engine: Arc<dyn OcrEngine>,
@@ -85,6 +95,8 @@ pub struct OcrWorker {
     skipped_existing: AtomicU64,
     reclaimed: AtomicU64,
     timed_out: AtomicU64,
+    circuit: Mutex<CircuitState>,
+    tick_lock: tokio::sync::Mutex<()>,
 }
 
 impl OcrWorker {
@@ -105,6 +117,8 @@ impl OcrWorker {
             skipped_existing: AtomicU64::new(0),
             reclaimed: AtomicU64::new(0),
             timed_out: AtomicU64::new(0),
+            circuit: Mutex::new(CircuitState::default()),
+            tick_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -122,6 +136,33 @@ impl OcrWorker {
             skipped_existing: self.skipped_existing.load(Ordering::Relaxed),
             reclaimed: self.reclaimed.load(Ordering::Relaxed),
             timed_out: self.timed_out.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Failures and remaining cooldown; no content or native error text.
+    pub fn circuit_status(&self) -> (u64, u64) {
+        let state = self.circuit.lock().unwrap_or_else(|e| e.into_inner());
+        let remaining = state
+            .retry_at
+            .map(|at| at.saturating_duration_since(Instant::now()));
+        (
+            state.consecutive_failures,
+            remaining.map_or(0, |d| d.as_millis().max(u128::from(!d.is_zero())) as u64),
+        )
+    }
+
+    fn record_outcome(&self, success: bool) {
+        let mut state = self.circuit.lock().unwrap_or_else(|e| e.into_inner());
+        if success {
+            *state = CircuitState::default();
+        } else {
+            state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+            if state.consecutive_failures >= self.config.circuit_failure_threshold.max(1) {
+                state.retry_at = Some(
+                    Instant::now() + self.config.circuit_cooldown.max(Duration::from_millis(1)),
+                );
+                warn!("OCR paused after consecutive failures; capture continues; automatic retry after cooldown");
+            }
         }
     }
 
@@ -143,6 +184,7 @@ impl OcrWorker {
 
     /// Process one batch. Returns jobs claimed.
     pub async fn tick_once(&self) -> Result<usize, String> {
+        let _tick_guard = self.tick_lock.lock().await;
         if !self.engine.is_supported() {
             let n = self
                 .store
@@ -154,14 +196,26 @@ impl OcrWorker {
             return Ok(0);
         }
         let _ = self.reclaim_stale();
-        let jobs = self
-            .store
-            .claim_pending_jobs(JOB_KIND_OCR_SCREEN, self.config.batch_size)
-            .map_err(|e| e.to_string())?;
-        let n = jobs.len();
-        for job in jobs {
+        let mut n = 0;
+        for _ in 0..self.config.batch_size.max(1) {
+            if self.circuit_status().1 > 0 {
+                break;
+            }
+            // Claim only when we can execute. Opening the circuit must not
+            // strand a preclaimed batch or consume its retry attempts.
+            let mut jobs = self
+                .store
+                .claim_pending_jobs(JOB_KIND_OCR_SCREEN, 1)
+                .map_err(|e| e.to_string())?;
+            let Some(job) = jobs.pop() else {
+                break;
+            };
+            n += 1;
             self.processed.fetch_add(1, Ordering::Relaxed);
             self.handle_job(job).await;
+            if self.circuit_status().0 > 0 {
+                break;
+            }
         }
         Ok(n)
     }
@@ -169,6 +223,7 @@ impl OcrWorker {
     async fn handle_job(&self, job: JobRecord) {
         match self.process_job(&job).await {
             Ok(JobOutcome::Success { nonempty }) => {
+                self.record_outcome(true);
                 if nonempty {
                     self.succeeded.fetch_add(1, Ordering::Relaxed);
                 } else {
@@ -189,6 +244,9 @@ impl OcrWorker {
                         .complete_job(job.id, JobStatus::Skipped, Some(&msg));
                     warn!(event = %job.event_id, error = %msg, "ocr_screen skipped (unavailable)");
                     return;
+                }
+                if !permanent {
+                    self.record_outcome(false);
                 }
                 if e.timeout {
                     self.timed_out.fetch_add(1, Ordering::Relaxed);
@@ -428,6 +486,9 @@ impl JobError {
 }
 
 fn ocr_unavailable(msg: &str) -> bool {
+    if msg.contains("OCR helper failure:") {
+        return false;
+    }
     let lower = msg.to_ascii_lowercase();
     lower.contains("ocr_unavailable")
         || lower.contains("engine unavailable")
@@ -439,11 +500,12 @@ fn ocr_unavailable(msg: &str) -> bool {
 fn classify_platform_err(e: PlatformError) -> JobError {
     let msg = e.to_string();
     let lower = msg.to_lowercase();
-    let permanent = lower.contains("decode failed")
-        || lower.contains("empty image")
-        || lower.contains("too large")
-        || lower.contains("unsupported")
-        || lower.contains("zero dimensions");
+    let permanent = !msg.contains("OCR helper failure:")
+        && (lower.contains("decode failed")
+            || lower.contains("empty image")
+            || lower.contains("too large")
+            || lower.contains("unsupported")
+            || lower.contains("zero dimensions"));
     JobError {
         message: msg,
         permanent,
@@ -618,6 +680,74 @@ mod tests {
             .unwrap();
         assert_eq!(worker.tick_once().await.unwrap(), 1);
         assert!(store.has_derived(eid, DERIVED_OCR_V1).unwrap());
+    }
+
+    #[tokio::test]
+    async fn circuit_preserves_attempts_and_capture_then_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SqliteStore::open(dir.path()).unwrap());
+        let eid = seed_event(&store, b"x").await;
+        let job_id = store
+            .enqueue_job(eid, JOB_KIND_OCR_SCREEN)
+            .unwrap()
+            .unwrap()
+            .id;
+        let engine = Arc::new(FakeEngine {
+            calls: AtomicUsize::new(0),
+            text: Mutex::new("recovered".into()),
+            fail_times: AtomicUsize::new(2),
+            supported: true,
+        });
+        let worker = OcrWorker::new(
+            store.clone(),
+            engine.clone(),
+            OcrWorkerConfig {
+                include_boxes: false,
+                circuit_failure_threshold: 2,
+                circuit_cooldown: Duration::from_secs(60),
+                ..Default::default()
+            },
+        );
+        for _ in 0..2 {
+            store
+                .complete_job_at(job_id, JobStatus::Pending, None, Some(Utc::now()))
+                .unwrap();
+            assert_eq!(worker.tick_once().await.unwrap(), 1);
+        }
+        assert_eq!(worker.circuit_status().0, 2);
+        assert!(worker.circuit_status().1 > 0);
+        // Capturing a new event while OCR is suspended still persists it.
+        let next = seed_event(&store, b"next capture").await;
+        store.enqueue_job(next, JOB_KIND_OCR_SCREEN).unwrap();
+        store
+            .complete_job_at(job_id, JobStatus::Pending, None, Some(Utc::now()))
+            .unwrap();
+        for _ in 0..5 {
+            assert_eq!(worker.tick_once().await.unwrap(), 0);
+        }
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store
+                .list_jobs(10)
+                .unwrap()
+                .iter()
+                .find(|j| j.id == job_id)
+                .unwrap()
+                .attempts,
+            2
+        );
+        worker.circuit.lock().unwrap().retry_at = Some(Instant::now());
+        assert_eq!(worker.tick_once().await.unwrap(), 2);
+        assert_eq!(worker.circuit_status(), (0, 0));
+        assert!(store.has_derived(eid, DERIVED_OCR_V1).unwrap());
+        assert!(store.has_derived(next, DERIVED_OCR_V1).unwrap());
+    }
+
+    #[test]
+    fn broken_helper_pipe_is_not_skipped_or_permanent() {
+        let msg = "OCR helper failure: broken pipe / decode failed";
+        assert!(!ocr_unavailable(msg));
+        assert!(!classify_platform_err(PlatformError::Message(msg.into())).permanent);
     }
 
     #[tokio::test]

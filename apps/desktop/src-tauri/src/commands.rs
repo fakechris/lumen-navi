@@ -222,6 +222,7 @@ pub async fn get_health(state: State<'_, AppState>) -> Result<HealthResponse, St
                     .unwrap_or(0)
             }),
         ocr_docs,
+        ocr: daemon_health.as_ref().and_then(|h| h.ocr.clone()),
         schema_version: SCHEMA_VERSION,
         browser,
         observe: daemon_health.as_ref().and_then(|h| h.observe.clone()),
@@ -2507,6 +2508,7 @@ mod command_tests {
             closed_eyes: false,
             stored_events: 0,
             stored_audio_events: 0,
+            ocr: None,
             ocr_docs: 0,
             schema_version: 0,
             browser: None,

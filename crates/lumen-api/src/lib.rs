@@ -27,6 +27,8 @@ pub struct HealthResponse {
     /// Indexed OCR documents (`ocr_docs` / FTS).
     #[serde(default)]
     pub ocr_docs: usize,
+    #[serde(default)]
+    pub ocr: Option<OcrHealthResponse>,
     /// Store schema version.
     #[serde(default)]
     pub schema_version: i64,
@@ -42,6 +44,13 @@ pub struct HealthResponse {
     /// Process memory telemetry (RSS, VSZ) when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<ProcessMemoryDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OcrHealthResponse {
+    pub consecutive_failures: u64,
+    pub retry_after_ms: u64,
+    pub diagnostic_in_process_fallback: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -244,6 +253,7 @@ impl HealthResponse {
             stored_events,
             stored_audio_events: 0,
             ocr_docs,
+            ocr: None,
             schema_version,
             browser: None,
             observe: None,

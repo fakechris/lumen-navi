@@ -628,6 +628,10 @@ pub struct OcrConfig {
     pub retry_base_ms: u64,
     pub retry_max_ms: u64,
     pub timeout_ms: u64,
+    /// Diagnostic only: disables native crash isolation. Defaults to false.
+    pub diagnostic_in_process_fallback: bool,
+    pub circuit_failure_threshold: u64,
+    pub circuit_cooldown_ms: u64,
     pub stale_running_ms: u64,
     pub max_image_bytes: u64,
     pub max_text_chars: u64,
@@ -647,6 +651,9 @@ impl Default for OcrConfig {
             retry_base_ms: 2_000,
             retry_max_ms: 60_000,
             timeout_ms: 90_000,
+            diagnostic_in_process_fallback: false,
+            circuit_failure_threshold: 3,
+            circuit_cooldown_ms: 60_000,
             stale_running_ms: 300_000,
             max_image_bytes: 25 * 1024 * 1024,
             max_text_chars: 500_000,
@@ -780,6 +787,17 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_ocr_config_keeps_native_fallback_disabled() {
+        let old: Config = toml::from_str("[ocr]\ntimeout_ms = 1234\n").unwrap();
+        assert_eq!(old.ocr.timeout_ms, 1234);
+        assert!(!old.ocr.diagnostic_in_process_fallback);
+        assert_eq!(old.ocr.circuit_failure_threshold, 3);
+        let diagnostic: Config =
+            toml::from_str("[ocr]\ndiagnostic_in_process_fallback = true\n").unwrap();
+        assert!(diagnostic.ocr.diagnostic_in_process_fallback);
+    }
 
     #[test]
     fn defaults_product_observe() {

@@ -31,6 +31,8 @@ use tracing::{error, info, warn};
 
 #[derive(Clone)]
 pub struct ControlState {
+    pub ocr_worker: Option<Arc<lumen_process::OcrWorker>>,
+    pub ocr_diagnostic_fallback: bool,
     pub store: Arc<SqliteStore>,
     pub paused: Arc<AtomicBool>,
     closed_eyes: Arc<AtomicBool>,
@@ -123,6 +125,8 @@ impl ControlState {
             paused,
             closed_eyes,
             max_blob_bytes,
+            ocr_worker: None,
+            ocr_diagnostic_fallback: false,
             screen_locked: Arc::new(lumen_platform_host::is_screen_locked),
             sources,
             audio_status,
@@ -1004,6 +1008,14 @@ async fn build_health(st: &ControlState) -> Result<HealthResponse, anyhow::Error
         stored_events: stored,
         stored_audio_events,
         ocr_docs,
+        ocr: st.ocr_worker.as_ref().map(|worker| {
+            let (consecutive_failures, retry_after_ms) = worker.circuit_status();
+            lumen_api::OcrHealthResponse {
+                consecutive_failures,
+                retry_after_ms,
+                diagnostic_in_process_fallback: st.ocr_diagnostic_fallback,
+            }
+        }),
         schema_version: SCHEMA_VERSION,
         observe: Some(st.counters.snapshot()),
         liveness: st.store.last_liveness()?.map(|meta| LivenessHealthDto {

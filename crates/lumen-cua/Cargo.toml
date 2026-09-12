@@ -11,6 +11,7 @@ name = "lumen-cua"
 path = "src/main.rs"
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 lumen-platform = { workspace = true }
@@ -41,7 +42,6 @@ block2 = "0.6"
 core-foundation = "0.10"
 core-graphics = "0.24"
 foreign-types = "0.5"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 libc = "0.2"
 security-framework = "3.7"
 
