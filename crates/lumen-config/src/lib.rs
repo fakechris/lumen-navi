@@ -600,6 +600,14 @@ pub struct RetentionConfig {
     pub jobs_retention_hours: u32,
     /// Whether automatic background maintenance and rolling pruning are enabled. Default: true.
     pub auto_prune: bool,
+    /// Hard cap for the whole data directory (blobs + database + caches), in MB.
+    /// When exceeded, maintenance trims oldest media first, then old metadata.
+    /// 0 = unlimited. Default: 0.
+    pub max_total_mb: u64,
+    /// Deep metadata pruning never touches events younger than this many days,
+    /// so recent history stays fully searchable even under a tight total cap.
+    /// 0 = no floor. Default: 7 days.
+    pub metadata_min_age_days: u32,
 }
 
 impl Default for RetentionConfig {
@@ -610,6 +618,8 @@ impl Default for RetentionConfig {
             screenshot_retention_days: 30,
             jobs_retention_hours: 24,
             auto_prune: true,
+            max_total_mb: 0,
+            metadata_min_age_days: 7,
         }
     }
 }

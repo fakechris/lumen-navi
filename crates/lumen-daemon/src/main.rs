@@ -968,7 +968,7 @@ async fn main() -> Result<()> {
             Arc::clone(&store),
             Arc::clone(&observe_paused),
             Arc::clone(&observe_closed_eyes),
-            config.retention.max_blob_mb.saturating_mul(1024 * 1024),
+            config.retention.clone(),
             vec![
                 screen_status.clone(),
                 audio_status

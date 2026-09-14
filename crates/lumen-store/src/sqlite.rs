@@ -40,6 +40,101 @@ pub struct EnrichmentPassReport {
     pub failed: usize,
 }
 
+/// Outcome of the total-data-directory quota ladder.
+#[derive(Debug, Clone, Default)]
+pub struct TotalQuotaReport {
+    pub artifacts_pruned: usize,
+    pub blobs_deleted: usize,
+    pub media_bytes_reclaimed: u64,
+    pub derived_pruned: usize,
+    pub ocr_docs_pruned: usize,
+    pub events_pruned: usize,
+    pub vacuumed: bool,
+    pub final_usage_bytes: u64,
+    pub quota_met: bool,
+}
+
+/// Outcome of one orphan blob sweep.
+#[derive(Debug, Clone, Default)]
+pub struct OrphanSweepReport {
+    pub files_deleted: usize,
+    pub bytes_reclaimed: u64,
+}
+
+/// Where an intake byte budget is measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageScope {
+    /// Bytes under `$data_dir/blobs` only.
+    Blobs,
+    /// Bytes across the whole data directory (blobs + db + caches).
+    DataDir,
+}
+
+fn is_stale(path: &Path, max_age: std::time::Duration) -> bool {
+    match std::fs::metadata(path).and_then(|m| m.modified()) {
+        Ok(modified) => match modified.elapsed() {
+            Ok(age) => age >= max_age,
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Recursively delete unreferenced files under `dir`, then prune empty
+/// subdirectories. `data_dir` is the root used to compute artifact-relative
+/// paths. Returns (files_deleted, bytes_reclaimed).
+fn sweep_orphans_in_dir(
+    dir: &Path,
+    data_dir: &Path,
+    referenced: &HashSet<String>,
+    max_age: std::time::Duration,
+) -> (usize, u64) {
+    let mut files_deleted = 0_usize;
+    let mut bytes_reclaimed = 0_u64;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return (0, 0),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let (d, b) = sweep_orphans_in_dir(&path, data_dir, referenced, max_age);
+            files_deleted += d;
+            bytes_reclaimed += b;
+            // Best-effort prune of now-empty hash buckets.
+            let _ = std::fs::remove_dir(&path);
+        } else if let Ok(rel) = path.strip_prefix(data_dir) {
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if referenced.contains(&rel) || !is_stale(&path, max_age) {
+                continue;
+            }
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if std::fs::remove_file(&path).is_ok() {
+                files_deleted += 1;
+                bytes_reclaimed += size;
+            }
+        }
+    }
+    (files_deleted, bytes_reclaimed)
+}
+
+fn sweep_stale_tmp(tmp_dir: &Path, max_age: std::time::Duration, report: &mut OrphanSweepReport) {
+    let entries = match std::fs::read_dir(tmp_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && is_stale(&path, max_age) {
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if std::fs::remove_file(&path).is_ok() {
+                report.files_deleted += 1;
+                report.bytes_reclaimed += size;
+            }
+        }
+    }
+}
+
 /// One OCR search hit (FTS).
 #[derive(Debug, Clone)]
 pub struct OcrSearchHit {
@@ -173,6 +268,17 @@ pub struct StoreMaintenanceReport {
     pub blobs_deleted: usize,
     pub bytes_reclaimed: u64,
     pub fts_optimized: bool,
+    /// Rows removed by the deep metadata tier (derived + ocr_docs).
+    pub metadata_pruned: usize,
+    /// Event rows removed by the deep metadata tier.
+    pub events_pruned: usize,
+    /// Orphan blob files (on disk, no artifacts row) removed.
+    pub orphans_deleted: usize,
+    /// True when the data directory finished at or under `max_total_mb`
+    /// (always true when no total cap is configured).
+    pub total_quota_met: bool,
+    /// Whole data directory size after maintenance.
+    pub data_dir_bytes: u64,
 }
 
 /// On-disk store: `$data_dir/meta/navi.db` + `$data_dir/blobs/...`.
@@ -201,6 +307,8 @@ impl SqliteStore {
             PRAGMA cache_size = -2000;
             PRAGMA temp_store = MEMORY;
             PRAGMA wal_autocheckpoint = 1000;
+            PRAGMA journal_size_limit = 67108864;
+            PRAGMA auto_vacuum = INCREMENTAL;
             PRAGMA mmap_size = 0;
             "#,
         )
@@ -319,10 +427,26 @@ impl SqliteStore {
 
     /// Persist a replay-safe batch while atomically serializing blob quota
     /// calculation and writes. Duplicate event ids are filtered before blobs.
+    /// The byte budget is measured against the blob tree.
     pub fn append_idempotent_with_artifacts_up_to(
         &self,
         records: Vec<EventWithArtifacts>,
         max_blob_bytes: u64,
+    ) -> Result<BlobLimitedAppendOutcome, StoreError> {
+        self.append_idempotent_with_artifacts_up_to_scoped(
+            records,
+            max_blob_bytes,
+            UsageScope::Blobs,
+        )
+    }
+
+    /// Like [`Self::append_idempotent_with_artifacts_up_to`] but measures
+    /// current usage against `scope` before admitting new blobs.
+    pub fn append_idempotent_with_artifacts_up_to_scoped(
+        &self,
+        records: Vec<EventWithArtifacts>,
+        max_bytes: u64,
+        scope: UsageScope,
     ) -> Result<BlobLimitedAppendOutcome, StoreError> {
         let _blob_guard = self
             .blob_intake
@@ -362,15 +486,17 @@ impl SqliteStore {
                 pending.push(record);
             }
         }
-        let current_blob_bytes = self.blobs.total_bytes()?;
+        let current_bytes = match scope {
+            UsageScope::Blobs => self.blobs.total_bytes()?,
+            UsageScope::DataDir => self.data_dir_usage()?,
+        };
         let additional_blob_bytes = self.blobs.additional_bytes(
             pending
                 .iter()
                 .flat_map(|record| record.artifacts.iter())
                 .map(|artifact| artifact.bytes.as_slice()),
         )?;
-        if additional_blob_bytes > 0
-            && current_blob_bytes.saturating_add(additional_blob_bytes) > max_blob_bytes
+        if additional_blob_bytes > 0 && current_bytes.saturating_add(additional_blob_bytes) > max_bytes
         {
             return Ok(BlobLimitedAppendOutcome::LimitExceeded);
         }
@@ -926,6 +1052,305 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// On-disk bytes of the whole data directory (blobs + meta + caches + logs).
+    /// This is what a disk-usage tool would report for `$data_dir`.
+    pub fn data_dir_usage(&self) -> Result<u64, StoreError> {
+        crate::blob::directory_size_bytes(&self.data_dir)
+    }
+
+    /// Enforce a hard cap on the whole data directory. Trim order:
+    /// 1. oldest media artifacts across all kinds (dedup-safe),
+    /// 2. oldest metadata (derived bodies → OCR docs → events) older than
+    ///    `metadata_min_age_days`, so recent history stays searchable,
+    /// 3. one VACUUM when freed pages are worth reclaiming.
+    pub fn enforce_total_retention_quota(
+        &self,
+        max_total_bytes: u64,
+        metadata_min_age_days: u32,
+    ) -> Result<TotalQuotaReport, StoreError> {
+        let mut report = TotalQuotaReport::default();
+        let initial_usage = self.data_dir_usage()?;
+        report.final_usage_bytes = initial_usage;
+        if max_total_bytes == 0 {
+            report.quota_met = true;
+            return Ok(report);
+        }
+        let target_bytes = max_total_bytes.saturating_mul(9) / 10;
+
+        // --- Tier 1: oldest media first, any artifact kind ---
+        // Reclaimed bytes are tracked incrementally; re-walking a 50k-file
+        // blob tree for every 200-row batch would dominate the pass.
+        let mut estimated_usage = initial_usage;
+        loop {
+            if estimated_usage <= target_bytes {
+                break;
+            }
+            let free_needed = estimated_usage - target_bytes;
+            let freed = self.trim_media_batch(free_needed, &mut report)?;
+            if freed == 0 {
+                break;
+            }
+            estimated_usage = estimated_usage.saturating_sub(freed);
+        }
+
+        // --- Tier 2: oldest metadata, beyond the freshness floor ---
+        if estimated_usage > target_bytes {
+            let cutoff = Utc::now() - chrono::Duration::days(metadata_min_age_days as i64);
+            for _ in 0..1000 {
+                let freed = self.trim_metadata_batch(cutoff, &mut report)?;
+                if freed == 0 {
+                    break;
+                }
+                estimated_usage = estimated_usage.saturating_sub(freed);
+                if estimated_usage <= target_bytes {
+                    break;
+                }
+            }
+        }
+
+        // --- Tier 3: hand freed pages back to the OS ---
+        if estimated_usage > target_bytes || self.freelist_bytes()? >= 512 * 1024 {
+            let started = std::time::Instant::now();
+            {
+                let conn = self
+                    .conn
+                    .lock()
+                    .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+                conn.execute_batch("VACUUM")
+                    .map_err(StoreError::db)
+                    .map_err(|e| {
+                        tracing::warn!("quota VACUUM failed: {e}");
+                        e
+                    })
+                    .ok();
+            }
+            report.vacuumed = true;
+            tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "quota VACUUM done");
+        }
+
+        // Fold the WAL back in so the final measurement reflects real disk use.
+        {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+            let _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", []);
+        }
+
+        report.final_usage_bytes = self.data_dir_usage()?;
+        report.quota_met = report.final_usage_bytes <= max_total_bytes;
+        Ok(report)
+    }
+
+    /// Delete the oldest media artifact batch, stopping as soon as
+    /// `free_needed` bytes are reached so newer media survives. Returns
+    /// estimated bytes reclaimed (0 when no media remains).
+    fn trim_media_batch(
+        &self,
+        free_needed: u64,
+        report: &mut TotalQuotaReport,
+    ) -> Result<u64, StoreError> {
+        let _blob_guard = self
+            .blob_intake
+            .lock()
+            .map_err(|_| StoreError::Other("blob intake lock poisoned".into()))?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        let mut stmt = tx
+            .prepare(
+                r#"
+                SELECT a.id, a.path, COALESCE(a.bytes, 0)
+                FROM artifacts a
+                JOIN events e ON a.event_id = e.id
+                ORDER BY e.ts ASC
+                LIMIT 200
+                "#,
+            )
+            .map_err(StoreError::db)?;
+        let rows: Vec<(String, String, u64)> = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? as u64))
+            })
+            .map_err(StoreError::db)?
+            .filter_map(|res| res.ok())
+            .collect();
+        drop(stmt);
+
+        if rows.is_empty() {
+            tx.commit().map_err(StoreError::db)?;
+            return Ok(0);
+        }
+
+        let mut freed = 0_u64;
+        for (id, path, bytes) in &rows {
+            if freed >= free_needed {
+                break;
+            }
+            let other_refs: i64 = tx
+                .query_row(
+                    "SELECT COUNT(1) FROM artifacts WHERE path = ?1 AND id != ?2",
+                    params![path, id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            tx.execute("DELETE FROM artifacts WHERE id = ?1", params![id])
+                .map_err(StoreError::db)?;
+            report.artifacts_pruned += 1;
+            if other_refs == 0 {
+                let on_disk = self
+                    .blobs
+                    .read_file_size(path)
+                    .unwrap_or(None)
+                    .unwrap_or(*bytes);
+                if self.blobs.delete_relative(path).unwrap_or(false) {
+                    report.blobs_deleted += 1;
+                    freed = freed.saturating_add(on_disk);
+                }
+            }
+        }
+        tx.commit().map_err(StoreError::db)?;
+        report.media_bytes_reclaimed =
+            report.media_bytes_reclaimed.saturating_add(freed);
+        Ok(freed)
+    }
+
+    /// Delete one oldest-first metadata batch (derived → OCR docs → events).
+    /// Rows are counted in `report`; the DB page freelist delta estimates the
+    /// bytes that a later VACUUM will hand back to the OS.
+    fn trim_metadata_batch(
+        &self,
+        cutoff: DateTime<Utc>,
+        report: &mut TotalQuotaReport,
+    ) -> Result<u64, StoreError> {
+        let cutoff_str = cutoff.to_rfc3339();
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let tx = conn.transaction().map_err(StoreError::db)?;
+        let freelist_before: i64 = tx
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        // One snapshot: the same oldest events feed all three deletes, so no
+        // derived/ocr row is orphaned behind its event row.
+        let ids: Vec<String> = {
+            let mut stmt = tx
+                .prepare("SELECT id FROM events WHERE ts < ?1 ORDER BY ts, id LIMIT 500")
+                .map_err(StoreError::db)?;
+            let rows = stmt
+                .query_map(params![cutoff_str], |r| r.get::<_, String>(0))
+                .map_err(StoreError::db)?
+                .filter_map(|res| res.ok())
+                .collect::<Vec<_>>();
+            drop(stmt);
+            rows
+        };
+        if ids.is_empty() {
+            tx.commit().map_err(StoreError::db)?;
+            return Ok(0);
+        }
+
+        let mut derived = 0_usize;
+        let mut ocr = 0_usize;
+        let mut events = 0_usize;
+        for id in &ids {
+            derived += tx
+                .execute("DELETE FROM derived WHERE event_id = ?1", params![id])
+                .map_err(StoreError::db)?;
+            ocr += tx
+                .execute("DELETE FROM ocr_docs WHERE event_id = ?1", params![id])
+                .map_err(StoreError::db)?;
+            events += tx
+                .execute("DELETE FROM events WHERE id = ?1", params![id])
+                .map_err(StoreError::db)?;
+        }
+        report.derived_pruned += derived;
+        report.ocr_docs_pruned += ocr;
+        report.events_pruned += events;
+        tx.commit().map_err(StoreError::db)?;
+
+        // Same connection, now idle after commit: read the freelist delta that
+        // estimates what the closing VACUUM will return to the OS.
+        let freelist_after: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap_or(freelist_before);
+        let page_size: i64 = conn
+            .query_row("PRAGMA page_size", [], |r| r.get(0))
+            .unwrap_or(4096);
+        drop(conn);
+
+        let freed = (freelist_after.saturating_sub(freelist_before)).max(0) as u64
+            * page_size.max(0) as u64;
+        // Guarantee loop progress even when freed pages are immediately reused
+        // (legacy non-auto_vacuum databases): one batch is one unit of work.
+        Ok(freed.max(if derived + ocr + events > 0 { 1 } else { 0 }))
+    }
+
+    fn freelist_bytes(&self) -> Result<u64, StoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+        let pages: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap_or(0);
+        let page_size: i64 = conn
+            .query_row("PRAGMA page_size", [], |r| r.get(0))
+            .unwrap_or(4096);
+        Ok(pages.max(0) as u64 * page_size.max(0) as u64)
+    }
+
+    /// Delete blob files with no artifacts row (left behind by a crash between
+    /// blob write and commit) and stale `tmp/*.part` files. Files touched
+    /// within the last hour are left alone so an in-flight write is never
+    /// removed.
+    pub fn sweep_orphan_blobs(&self) -> Result<OrphanSweepReport, StoreError> {
+        self.sweep_orphan_blobs_with_max_age(std::time::Duration::from_secs(3600))
+    }
+
+    /// [`Self::sweep_orphan_blobs`] with an explicit freshness threshold.
+    pub fn sweep_orphan_blobs_with_max_age(
+        &self,
+        max_age: std::time::Duration,
+    ) -> Result<OrphanSweepReport, StoreError> {
+        let _blob_guard = self
+            .blob_intake
+            .lock()
+            .map_err(|_| StoreError::Other("blob intake lock poisoned".into()))?;
+        let referenced: HashSet<String> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| StoreError::Other("lock poisoned".into()))?;
+            let mut stmt = conn
+                .prepare("SELECT DISTINCT path FROM artifacts")
+                .map_err(StoreError::db)?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(StoreError::db)?
+                .filter_map(|res| res.ok())
+                .collect();
+            rows
+        };
+
+        let mut report = OrphanSweepReport::default();
+        let (files, bytes) = sweep_orphans_in_dir(
+            &self.data_dir.join("blobs"),
+            &self.data_dir,
+            &referenced,
+            max_age,
+        );
+        report.files_deleted += files;
+        report.bytes_reclaimed += bytes;
+        sweep_stale_tmp(&self.data_dir.join("tmp"), max_age, &mut report);
+        Ok(report)
+    }
+
+
     /// Perform database maintenance with default retention policy.
     pub fn maintenance(&self) -> Result<StoreMaintenanceReport, StoreError> {
         self.maintenance_with_retention(&lumen_config::RetentionConfig::default())
@@ -936,8 +1361,10 @@ impl SqliteStore {
     /// 2. Prune done/skipped jobs older than `jobs_retention_hours`
     /// 3. Prune screenshot artifacts older than `screenshot_retention_days`
     /// 4. Enforce `max_blob_mb` quota if exceeded
-    /// 5. Optimize FTS index
-    /// 6. Incremental vacuum to reclaim pages
+    /// 5. Enforce `max_total_mb` whole-directory quota (media → metadata → vacuum)
+    /// 6. Sweep orphan blobs
+    /// 7. Optimize FTS index
+    /// 8. Incremental vacuum to reclaim pages
     pub fn maintenance_with_retention(
         &self,
         retention: &lumen_config::RetentionConfig,
@@ -959,6 +1386,10 @@ impl SqliteStore {
         let mut artifacts_pruned = 0;
         let mut blobs_deleted = 0;
         let mut bytes_reclaimed = 0;
+        let mut metadata_pruned = 0;
+        let mut events_pruned = 0;
+        let mut orphans_deleted = 0;
+        let mut total_quota_met = true;
 
         if retention.auto_prune {
             if retention.jobs_retention_hours > 0 {
@@ -987,6 +1418,30 @@ impl SqliteStore {
                     bytes_reclaimed += rep.bytes_reclaimed;
                 }
             }
+
+            if retention.max_total_mb > 0 {
+                let max_bytes = retention.max_total_mb.saturating_mul(1024 * 1024);
+                match self.enforce_total_retention_quota(max_bytes, retention.metadata_min_age_days)
+                {
+                    Ok(rep) => {
+                        artifacts_pruned += rep.artifacts_pruned;
+                        blobs_deleted += rep.blobs_deleted;
+                        bytes_reclaimed += rep.media_bytes_reclaimed;
+                        metadata_pruned = rep.derived_pruned + rep.ocr_docs_pruned;
+                        events_pruned = rep.events_pruned;
+                        total_quota_met = rep.quota_met;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "total quota trim failed");
+                        total_quota_met = false;
+                    }
+                }
+            }
+        }
+
+        if let Ok(rep) = self.sweep_orphan_blobs() {
+            orphans_deleted = rep.files_deleted;
+            bytes_reclaimed += rep.bytes_reclaimed;
         }
 
         let fts_optimized = self.optimize_fts().is_ok();
@@ -997,6 +1452,7 @@ impl SqliteStore {
                 .lock()
                 .map_err(|_| StoreError::Other("lock poisoned".into()))?;
             let _ = conn.execute("PRAGMA incremental_vacuum(500)", []);
+            let _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", []);
             let pc: i64 = conn
                 .query_row("PRAGMA page_count", [], |r| r.get(0))
                 .unwrap_or(0);
@@ -1008,6 +1464,8 @@ impl SqliteStore {
                 .unwrap_or(0);
             (pc, ps, fc)
         };
+
+        let data_dir_bytes = self.data_dir_usage().unwrap_or(0);
 
         Ok(StoreMaintenanceReport {
             checkpoint_busy: busy,
@@ -1021,6 +1479,11 @@ impl SqliteStore {
             blobs_deleted,
             bytes_reclaimed,
             fts_optimized,
+            metadata_pruned,
+            events_pruned,
+            orphans_deleted,
+            total_quota_met,
+            data_dir_bytes,
         })
     }
 
@@ -7784,14 +8247,226 @@ mod tests {
 
         // 3. Maintenance report
         let maint = store
-            .maintenance_with_retention(&lumen_config::RetentionConfig {
-                max_blob_mb: 20480,
-                wipe_on_request: true,
-                screenshot_retention_days: 30,
-                jobs_retention_hours: 24,
-                auto_prune: true,
-            })
+            .maintenance_with_retention(&lumen_config::RetentionConfig::default())
             .unwrap();
         assert!(maint.fts_optimized);
+        assert!(maint.total_quota_met);
+
+        // 4. PRAGMA journal_size_limit keeps the WAL file bounded after
+        //    checkpoints (64 MiB).
+        let jsl: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row("PRAGMA journal_size_limit", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(jsl, 64 * 1024 * 1024);
+    }
+
+    /// Seed one event with one artifact body, return its blob relative path.
+    fn seed_with_blob(
+        store: &SqliteStore,
+        kind: &str,
+        media: &str,
+        body: &[u8],
+        ts: DateTime<Utc>,
+    ) -> String {
+        let mut event = SourceEvent::new(SourceKind::Screen, kind, json!({"seeded": true}));
+        event.ts = ts;
+        let record = EventWithArtifacts {
+            event,
+            artifacts: vec![ArtifactInput {
+                media_type: media.into(),
+                bytes: body.to_vec(),
+            }],
+        };
+        store
+            .append_idempotent_with_artifacts(vec![record])
+            .unwrap();
+        let conn = store.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT a.path FROM artifacts a JOIN events e ON a.event_id = e.id
+             WHERE e.ts = ?1",
+            params![ts.to_rfc3339()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn event_count(store: &SqliteStore) -> i64 {
+        let conn = store.conn.lock().unwrap();
+        conn.query_row("SELECT COUNT(1) FROM events", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn total_quota_trims_media_oldest_first_across_kinds() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let now = Utc::now();
+
+        let old_shot = seed_with_blob(
+            &store,
+            event_kind::SCREENSHOT_V1,
+            "image/jpeg",
+            &[7u8; 100],
+            now - chrono::Duration::days(10),
+        );
+        let old_audio = seed_with_blob(
+            &store,
+            event_kind::AUDIO_CHUNK_V1,
+            "audio/wav",
+            &[9u8; 100],
+            now - chrono::Duration::days(9),
+        );
+        let fresh_shot = seed_with_blob(
+            &store,
+            event_kind::SCREENSHOT_V1,
+            "image/jpeg",
+            &[11u8; 100],
+            now,
+        );
+
+        // The trim target is 90% of the cap. Pick the cap so that target sits
+        // between the 2nd-oldest and 3rd-oldest blob: both old blobs must go,
+        // the newest survives.
+        let before = store.data_dir_usage().unwrap();
+        let cap = (before - 150) * 10 / 9;
+        let report = store.enforce_total_retention_quota(cap, 0).unwrap();
+
+        assert_eq!(report.artifacts_pruned, 2);
+        assert_eq!(report.blobs_deleted, 2);
+        assert_eq!(report.media_bytes_reclaimed, 200);
+        assert_eq!(event_count(&store), 3, "media trim must keep event rows");
+        assert!(store.blobs().read_relative(&old_shot).is_err());
+        assert!(store.blobs().read_relative(&old_audio).is_err());
+        assert!(store.blobs().read_relative(&fresh_shot).is_ok());
+    }
+
+    #[test]
+    fn total_quota_deep_prunes_old_metadata_and_keeps_recent_searchable() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let now = Utc::now();
+
+        // Old event: media + a large derived OCR body (also lands in ocr_docs + FTS).
+        let old_blob = seed_with_blob(
+            &store,
+            event_kind::SCREENSHOT_V1,
+            "image/jpeg",
+            &[3u8; 64],
+            now - chrono::Duration::days(10),
+        );
+        let old_event_id: Uuid = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT id FROM events WHERE ts < ?1",
+                params![(now - chrono::Duration::days(9)).to_rfc3339()],
+                |r| r.get(0),
+            )
+            .map(|s: String| Uuid::parse_str(&s).unwrap())
+            .unwrap()
+        };
+        let big_body = json!({ "text": "x".repeat(1_000_000) }).to_string();
+        store
+            .insert_derived(old_event_id, "ocr.v1", big_body)
+            .unwrap();
+
+        // Recent metadata-only event: must survive the freshness floor
+        // (metadata_min_age_days = 1).
+        let fresh_event = SourceEvent::new(SourceKind::Screen, event_kind::SCREENSHOT_V1, json!({}));
+        store.append_event(fresh_event).unwrap();
+
+        let before = store.data_dir_usage().unwrap();
+        // Media alone (64B) cannot free the required 50KB → tier 2 must fire,
+        // and the tail VACUUM must hand the freed pages back to the OS.
+        let report = store
+            .enforce_total_retention_quota(before - 50_000, 1)
+            .unwrap();
+
+        assert!(report.quota_met, "final usage {} vs cap {}", report.final_usage_bytes, before - 50_000);
+        assert_eq!(event_count(&store), 1, "only the recent event survives");
+        assert!(store.blobs().read_relative(&old_blob).is_err());
+
+        let (derived_left, ocr_left) = {
+            let conn = store.conn.lock().unwrap();
+            let d: i64 = conn
+                .query_row("SELECT COUNT(1) FROM derived", [], |r| r.get(0))
+                .unwrap();
+            let o: i64 = conn
+                .query_row("SELECT COUNT(1) FROM ocr_docs", [], |r| r.get(0))
+                .unwrap();
+            (d, o)
+        };
+        assert_eq!((derived_left, ocr_left), (0, 0));
+
+        // Re-ingesting the same event id is still replay-safe after deep prune.
+        assert!(store.get_event_payload(old_event_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn orphan_sweep_removes_unreferenced_blobs_and_stale_tmp() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+
+        let referenced = seed_with_blob(
+            &store,
+            event_kind::SCREENSHOT_V1,
+            "image/jpeg",
+            b"referenced-body",
+            Utc::now(),
+        );
+        let orphan = store.blobs().put_bytes("image/jpeg", b"orphan-body").unwrap();
+        let stale_tmp = dir.path().join("tmp").join("stale.part");
+        std::fs::write(&stale_tmp, b"partial").unwrap();
+
+        let report = store
+            .sweep_orphan_blobs_with_max_age(std::time::Duration::ZERO)
+            .unwrap();
+
+        assert_eq!(report.files_deleted, 2);
+        assert!(store.blobs().read_relative(&referenced).is_ok());
+        assert!(store.blobs().read_relative(&orphan.path).is_err());
+        assert!(!stale_tmp.exists());
+    }
+
+    #[test]
+    fn intake_scoped_to_data_dir_budgets_whole_directory() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(dir.path()).unwrap();
+        let mk_record = || {
+            let event = SourceEvent::new(SourceKind::Screen, event_kind::SCREENSHOT_V1, json!({}));
+            EventWithArtifacts {
+                event,
+                artifacts: vec![ArtifactInput {
+                    media_type: "image/jpeg".into(),
+                    bytes: vec![1u8; 1024],
+                }],
+            }
+        };
+
+        let usage = store.data_dir_usage().unwrap();
+        // 1KB of new media pushes total usage past a budget pinned just above
+        // current usage → whole-directory scope must reject…
+        let outcome = store
+            .append_idempotent_with_artifacts_up_to_scoped(
+                vec![mk_record()],
+                usage + 100,
+                UsageScope::DataDir,
+            )
+            .unwrap();
+        assert!(matches!(outcome, BlobLimitedAppendOutcome::LimitExceeded));
+
+        // …and admit once the budget leaves room.
+        let outcome = store
+            .append_idempotent_with_artifacts_up_to_scoped(
+                vec![mk_record()],
+                usage + 10_000,
+                UsageScope::DataDir,
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            BlobLimitedAppendOutcome::Appended(_)
+        ));
     }
 }
