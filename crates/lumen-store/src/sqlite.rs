@@ -1158,7 +1158,12 @@ impl SqliteStore {
             .conn
             .lock()
             .map_err(|_| StoreError::Other("lock poisoned".into()))?;
-        let tx = conn.transaction().map_err(StoreError::db)?;
+        // BEGIN IMMEDIATE: the desktop shell (and OCR helper) hold their own
+        // connections, and a DEFERRED read-then-write upgrade fails outright
+        // with SQLITE_BUSY_SNAPSHOT when they write between our batches.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(StoreError::db)?;
         let mut stmt = tx
             .prepare(
                 r#"
@@ -1230,7 +1235,9 @@ impl SqliteStore {
             .conn
             .lock()
             .map_err(|_| StoreError::Other("lock poisoned".into()))?;
-        let tx = conn.transaction().map_err(StoreError::db)?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(StoreError::db)?;
         let freelist_before: i64 = tx
             .query_row("PRAGMA freelist_count", [], |r| r.get(0))
             .unwrap_or(0);
