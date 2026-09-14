@@ -90,6 +90,14 @@ flowchart TD
 [retention]
 # Hard quota cap for total blob storage (in MB, default 20 GB)
 max_blob_mb = 20480
+# Hard cap for the WHOLE data directory (blobs + database + caches), in MB.
+# When exceeded, maintenance trims oldest media first, then old metadata.
+# 0 = unlimited (default).
+max_total_mb = 0
+# Deep metadata pruning never touches events younger than this many days,
+# so recent history stays fully searchable even under a tight total cap.
+# 0 = no floor. Default: 7 days.
+metadata_min_age_days = 7
 # Maximum age in days for full screenshot blobs (default 30 days; 0 = unlimited)
 screenshot_retention_days = 30
 # Maximum age in hours for completed background jobs (default 24 hours)
@@ -99,6 +107,40 @@ auto_prune = true
 # Allow user-initiated factory reset wipe
 wipe_on_request = true
 ```
+
+### 3.4 Whole-Directory Quota Ladder (`max_total_mb`)
+
+`max_blob_mb` only bounds the blob tree; the SQLite database, WAL and caches
+can still grow without limit. `max_total_mb` is the hard disk contract: it
+measures the **entire data directory** (what a disk-usage tool reports) and
+trims it back under the cap during each maintenance pass:
+
+1. **Tier 1 — Oldest media first, any kind** (screenshots, audio, browser
+   artifacts): dedup-safe deletion of artifact rows and their content-addressed
+   blobs until usage reaches 90% of the cap. Event rows, OCR text and derived
+   payloads stay intact — search keeps working for trimmed media.
+2. **Tier 2 — Oldest metadata** beyond `metadata_min_age_days`: `derived`
+   bodies (AX trees, OCR boxes), then `ocr_docs` (FTS kept in sync by
+   triggers), then the `events` rows themselves — oldest first. Recent history
+   inside the freshness floor is never touched.
+3. **Tier 3 — Reclaim**: one `VACUUM` plus a `wal_checkpoint(TRUNCATE)` so
+   freed pages and the WAL actually return to the operating system instead of
+   being reserved inside the database file.
+
+Intake backpressure follows the same contract: with `max_total_mb` configured,
+browser artifact ingestion is budgeted against whole-directory usage (falling
+back to metadata-only records when the budget is exhausted), not just the blob
+tree.
+
+Two auxiliary passes keep the cap reachable over time:
+
+- **Orphan sweep**: blob files left on disk by a crash between blob write and
+  commit (no `artifacts` row) are deleted; files written within the last hour
+  are spared so in-flight captures are never removed. Stale `tmp/*.part`
+  files are collected too.
+- **WAL bound**: `journal_size_limit = 64 MiB` at store open plus a truncating
+  checkpoint at the end of each maintenance pass keeps the WAL file from
+  ballooning (previously observed at ~1 GB on long-running installs).
 
 ---
 

@@ -215,6 +215,21 @@ pub struct StoreMaintenanceReportDto {
     pub blobs_deleted: usize,
     pub bytes_reclaimed: u64,
     pub fts_optimized: bool,
+    /// Rows removed by the deep metadata tier (derived + ocr_docs).
+    #[serde(default)]
+    pub metadata_pruned: usize,
+    /// Event rows removed by the deep metadata tier.
+    #[serde(default)]
+    pub events_pruned: usize,
+    /// Orphan blob files removed (on disk without an artifacts row).
+    #[serde(default)]
+    pub orphans_deleted: usize,
+    /// True when the data directory finished at or under the total cap.
+    #[serde(default = "default_true")]
+    pub total_quota_met: bool,
+    /// Whole data directory size after maintenance, in bytes.
+    #[serde(default)]
+    pub data_dir_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

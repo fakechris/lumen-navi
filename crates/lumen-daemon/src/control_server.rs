@@ -22,12 +22,38 @@ use lumen_sources_browser::{
 };
 use lumen_store::{
     ArtifactInput, BlobLimitedAppendOutcome, EventStore, EventWithArtifacts, SqliteStore,
-    SCHEMA_VERSION,
+    UsageScope, SCHEMA_VERSION,
 };
 use lumen_types::SourceKind;
 use serde::Deserialize;
 use serde_json::json;
 use tracing::{error, info, warn};
+
+/// Byte budget for browser artifact intake, measured against `scope`.
+#[derive(Debug, Clone, Copy)]
+struct IntakeLimit {
+    max_bytes: u64,
+    scope: UsageScope,
+}
+
+impl IntakeLimit {
+    /// With a total data-directory cap configured, intake is budgeted against
+    /// whole-directory usage so admitted bytes can never outrun the cap by
+    /// more than one maintenance window; otherwise the legacy blob-tree cap.
+    fn from_retention(retention: &lumen_config::RetentionConfig) -> Self {
+        if retention.max_total_mb > 0 {
+            Self {
+                max_bytes: retention.max_total_mb.saturating_mul(1024 * 1024),
+                scope: UsageScope::DataDir,
+            }
+        } else {
+            Self {
+                max_bytes: retention.max_blob_mb.saturating_mul(1024 * 1024),
+                scope: UsageScope::Blobs,
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct ControlState {
@@ -36,7 +62,8 @@ pub struct ControlState {
     pub store: Arc<SqliteStore>,
     pub paused: Arc<AtomicBool>,
     closed_eyes: Arc<AtomicBool>,
-    max_blob_bytes: u64,
+    intake_limit: IntakeLimit,
+    retention: lumen_config::RetentionConfig,
     screen_locked: Arc<dyn Fn() -> bool + Send + Sync>,
     pub sources: Vec<SourceStatus>,
     pub audio_status: Arc<Mutex<SourceStatus>>,
@@ -113,7 +140,7 @@ impl ControlState {
         store: Arc<SqliteStore>,
         paused: Arc<AtomicBool>,
         closed_eyes: Arc<AtomicBool>,
-        max_blob_bytes: u64,
+        retention: lumen_config::RetentionConfig,
         sources: Vec<SourceStatus>,
         audio_status: Arc<Mutex<SourceStatus>>,
         browser: BrowserRuntimeConfig,
@@ -124,7 +151,8 @@ impl ControlState {
             store,
             paused,
             closed_eyes,
-            max_blob_bytes,
+            intake_limit: IntakeLimit::from_retention(&retention),
+            retention,
             ocr_worker: None,
             ocr_diagnostic_fallback: false,
             screen_locked: Arc::new(lumen_platform_host::is_screen_locked),
@@ -353,10 +381,11 @@ async fn post_browser_batch(
         .map(|record| record.artifacts.len())
         .sum::<usize>();
     let fallback_records = records.clone();
-    let (outcome, rejected_artifacts) = match st
-        .store
-        .append_idempotent_with_artifacts_up_to(records, st.max_blob_bytes)
-    {
+    let (outcome, rejected_artifacts) = match st.store.append_idempotent_with_artifacts_up_to_scoped(
+        records,
+        st.intake_limit.max_bytes,
+        st.intake_limit.scope,
+    ) {
         Ok(BlobLimitedAppendOutcome::Appended(value)) => (value, validation_rejected_artifacts),
         Ok(BlobLimitedAppendOutcome::LimitExceeded) => {
             let metadata_only = fallback_records
@@ -377,10 +406,11 @@ async fn post_browser_batch(
                     record
                 })
                 .collect();
-            match st
-                .store
-                .append_idempotent_with_artifacts_up_to(metadata_only, st.max_blob_bytes)
-            {
+            match st.store.append_idempotent_with_artifacts_up_to_scoped(
+                metadata_only,
+                st.intake_limit.max_bytes,
+                st.intake_limit.scope,
+            ) {
                 Ok(BlobLimitedAppendOutcome::Appended(value)) => {
                     (value, validation_rejected_artifacts + rejected_artifacts)
                 }
@@ -959,9 +989,12 @@ async fn handle_control(
         }
         ControlRequest::Maintenance => {
             let store = Arc::clone(&st.store);
-            let rep = tokio::task::spawn_blocking(move || store.maintenance())
-                .await
-                .map_err(|e| anyhow::anyhow!("maintenance join error: {e}"))??;
+            let retention = st.retention.clone();
+            let rep = tokio::task::spawn_blocking(move || {
+                store.maintenance_with_retention(&retention)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("maintenance join error: {e}"))??;
             Ok(ControlResponse::Maintenance(lumen_api::StoreMaintenanceReportDto {
                 checkpoint_busy: rep.checkpoint_busy,
                 checkpoint_log: rep.checkpoint_log,
@@ -974,6 +1007,11 @@ async fn handle_control(
                 blobs_deleted: rep.blobs_deleted,
                 bytes_reclaimed: rep.bytes_reclaimed,
                 fts_optimized: rep.fts_optimized,
+                metadata_pruned: rep.metadata_pruned,
+                events_pruned: rep.events_pruned,
+                orphans_deleted: rep.orphans_deleted,
+                total_quota_met: rep.total_quota_met,
+                data_dir_bytes: rep.data_dir_bytes,
             }))
         }
         ControlRequest::Permissions => Ok(ControlResponse::Error {
@@ -1187,7 +1225,10 @@ mod tests {
             store,
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
-            1024 * 1024,
+            lumen_config::RetentionConfig {
+                max_blob_mb: 1,
+                ..lumen_config::RetentionConfig::default()
+            },
             vec![],
             Arc::new(Mutex::new(SourceStatus {
                 id: "audio".into(),
@@ -1369,7 +1410,7 @@ mod tests {
     #[tokio::test]
     async fn artifact_intake_respects_the_blob_retention_limit() {
         let (_dir, mut state) = state();
-        state.max_blob_bytes = 1;
+        state.intake_limit.max_bytes = 1;
         state.browser.policy.content_allow_hosts = vec!["example.test".into()];
         let event_id = Uuid::parse_str("00000000-0000-4000-8000-000000000102").unwrap();
         let body = serde_json::to_vec(&BrowserBatch {

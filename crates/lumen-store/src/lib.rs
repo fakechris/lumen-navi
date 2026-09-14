@@ -56,9 +56,9 @@ pub use slot_evidence::{
 };
 pub use sqlite::{
     ArtifactInput, BlobLimitedAppendOutcome, BrowserVisitProjection, CursorEvent,
-    EnrichmentPassReport, EventWithArtifacts, IdempotentAppendOutcome, OcrSearchHit,
-    PruneArtifactsReport, SessionDerivedRow, SqliteStore, StoreMaintenanceReport, TimelineItem,
-    TimelineQuery,
+    EnrichmentPassReport, EventWithArtifacts, IdempotentAppendOutcome, OrphanSweepReport,
+    OcrSearchHit, PruneArtifactsReport, SessionDerivedRow, SqliteStore, StoreMaintenanceReport,
+    TimelineItem, TimelineQuery, TotalQuotaReport, UsageScope,
 };
 // RecoveryPolicy / RecoveryReport are defined in this module.
 

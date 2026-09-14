@@ -103,6 +103,19 @@ impl BlobStore {
         Ok(total)
     }
 
+    /// Size in bytes of a stored blob, if it exists on disk.
+    pub fn read_file_size(&self, relative: &str) -> Result<Option<u64>, StoreError> {
+        let data_dir = self
+            .root
+            .parent()
+            .ok_or_else(|| StoreError::Other("blob root has no parent".into()))?;
+        let path = data_dir.join(relative);
+        match fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => Ok(Some(meta.len())),
+            _ => Ok(None),
+        }
+    }
+
     /// Delete a single blob by relative path (e.g. `blobs/ca/ab/<hash>`).
     /// Returns true if the file was present and removed, false if it did not exist.
     pub fn delete_relative(&self, relative: &str) -> Result<bool, StoreError> {
@@ -173,6 +186,11 @@ fn directory_bytes(path: &Path) -> Result<u64, StoreError> {
         }
     }
     Ok(total)
+}
+
+/// Recursively measure on-disk bytes of a directory (files only).
+pub fn directory_size_bytes(path: &Path) -> Result<u64, StoreError> {
+    directory_bytes(path)
 }
 
 fn relative_blob_path(hex: &str) -> String {
