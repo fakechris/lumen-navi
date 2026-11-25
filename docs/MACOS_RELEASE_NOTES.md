@@ -1,4 +1,4 @@
-# Lumen Navi v0.2.0 (macOS)
+# Lumen Navi v0.3.0 (macOS)
 
 Product notes and Windows install: [`DESKTOP_RELEASE_NOTES.md`](DESKTOP_RELEASE_NOTES.md).
 

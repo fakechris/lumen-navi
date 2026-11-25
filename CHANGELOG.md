@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-11-24
+
+First release with installers since v0.1.0 (the v0.2.0 tag never shipped assets).
+
 ### Added
 
 - Act v1 in Lumen Cua: L0 app probe, four delivery gates, window-level
@@ -23,6 +27,13 @@
   default remains `Alt+Space`.
 - Tray menu item 打开快捷对话 as the keyboard-free fallback when the
   shortcut is disabled or taken by another app.
+- ⌥Space quick composer with result injection back into the origin app;
+  skill library with menu-bar suggestions; Terminal handoff for agent
+  commands.
+- System autostart setting and macOS login-item integration.
+- Storage lifecycle: retention maintenance plus a whole-data-directory
+  disk quota with tiered trim (media → old metadata → VACUUM) (#103).
+- Onboarding v2 on the shared design system.
 
 ### Changed
 
@@ -32,8 +43,20 @@
   list scrolls on its own. Settings UI moved from `App.tsx` (~1100 lines)
   into `views/SettingsView.tsx`.
 
+- OCR runs in an isolated helper; failures return retryable errors with
+  bounded backoff instead of falling back in-process.
+- Time accounting is deterministic and replay-safe (#102).
+- Default capture resolution and JPEG quality tuned for storage.
+- Platform layer consumes the lumen-platform crates from lumen-suite.
+
 ### Fixed
 
+- Windows: data-directory usage stats each file directly; directory
+  enumeration sizes were stale for files SQLite holds open, so the disk
+  quota trimmed the wrong amount.
+- Quota trim batches take an immediate write lock (#104).
+- Daemon Cocoa autorelease leak and memory growth.
+- Dashboard card order and controls unified across range tabs.
 - Dock icon badge displaying red "0" on macOS after health recovery: pass
   `undefined` instead of `0` to `setBadgeCount` to remove the badge.
 

@@ -1,19 +1,23 @@
-# Lumen Navi v0.2.0
+# Lumen Navi v0.3.0
 
-Local-first continuous context: smart screenshots, time tracking, 15-minute History cards, on-device OCR search, optional Roast/Chat.
+Local-first continuous context: smart screenshots, time tracking, 15-minute History cards, on-device OCR search, optional Roast/Chat, and an optional gated Act plane.
 
-![Overview](https://raw.githubusercontent.com/fakechris/lumen-navi/v0.2.0/docs/images/overview.jpg)
+![Overview](https://raw.githubusercontent.com/fakechris/lumen-navi/v0.3.0/docs/images/overview.jpg)
 
-![Time](https://raw.githubusercontent.com/fakechris/lumen-navi/v0.2.0/docs/images/time.jpg)
+![Time](https://raw.githubusercontent.com/fakechris/lumen-navi/v0.3.0/docs/images/time.jpg)
 
-## What's new since v0.1.0
+## What's new since v0.2.0
 
-- **Time tab** — 15-minute History cards with LLM narrative, app marks, day timeline. Idle and lock time are excluded.
-- **Observe** — focus / visual-change screenshots; a 2-minute static-screen **liveness** frame (last JPEG per display, not OCR'd, not on the timeline).
-- **AI tab** — Roast + Chat over the day's evidence (optional local / OpenAI-compat / Anthropic). Conservative CUA-replay chips on long stretches.
-- **Windows** — unsigned x64 NSIS installer (see gaps below).
-- **AX + scene** — accessibility text for recall; scene rules on the Time dashboard.
-- Capture health, daemon supervisor, mic device picker, Chrome Observe extension.
+v0.2.0 was never published with installers; this is the first release since v0.1.0 that ships them.
+
+- **Act** — gated CUA replay through the embedded MIT **cua-driver** in `Lumen Cua.app`. Input is background-only (no focus steal) behind four delivery gates and stop-lines. Settings can write a `computer-use` MCP entry into Codex / Claude Code. Skill library, Terminal handoff, and result injection back into the source app.
+- **⌥Space quick composer** — global launcher; the shortcut is configurable in Settings.
+- **Settings** — six sections; login-item autostart on macOS.
+- **Storage** — retention lifecycle plus a whole-data-directory disk quota with tiered trim (oldest media → old metadata → VACUUM). Recent history stays searchable.
+- **OCR** — runs in an isolated helper; failures retry with bounded backoff instead of falling back into the daemon.
+- **Time accounting** — deterministic and replay-safe.
+- **Daemon** — fixed Cocoa autorelease leak and memory growth; lower default capture resolution / JPEG quality.
+- **Windows** — data-directory usage is measured correctly, so the disk quota trims the right amount.
 
 Full changelog: [`CHANGELOG.md`](../CHANGELOG.md). Capture policy: [`OBSERVE_CAPTURE.md`](OBSERVE_CAPTURE.md).
 
@@ -30,7 +34,7 @@ Full changelog: [`CHANGELOG.md`](../CHANGELOG.md). Capture policy: [`OBSERVE_CAP
 
 ### 首次打开（未公证）
 
-GitHub 上的 macOS 包 **没有 Apple 公证**。拖进 Applications 后，系统会提示「无法打开，因为无法验证开发者」或「已损坏」。这是隔离标记，不是包坏了。
+GitHub 上的 macOS 包使用自签名证书签名，**没有 Apple 公证**。拖进 Applications 后，系统会提示「无法打开，因为无法验证开发者」或「已损坏」。这是隔离标记，不是包坏了。
 
 终端里清掉隔离（把路径按你的安装位置改）：
 
