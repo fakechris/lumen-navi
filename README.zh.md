@@ -29,8 +29,9 @@ Local-first 的**连续上下文**。看着屏幕（可选加麦克风），数�
 | **Observe（观察）** | 智能截屏（焦点 / 视觉变化 / 2 分钟活性覆盖）。可选麦克风 + 本地 ASR。硬闸门：暂停、闭眼、锁屏、应用黑名单。 |
 | **Time（时间）** | 前台应用跟踪、闲置 vs 离开、15 分钟 History 卡片带 LLM 叙述、应用/场景排名、一天时间线。 |
 | **Search（搜索）** | 设备上的 OCR + 转写全文检索，覆盖屏幕上出现过的内容。 |
-| **AI** | 可选的本地 / OpenAI 兼容 Roast 与 Chat，基于当天的证据。长时段给出保守的 CUA-replay 建议。 |
-| **Act（行动，可选）** | 目前是选区弹窗；CUA-replay 建议默认走后台输入（不抢焦点）。后续是 MIT **cua-driver**，内嵌于 Lumen Cua.app。绝不用于采集。 |
+| **AI** | 可选的本地 / OpenAI 兼容 Roast 与 Chat，基于当天的证据。⌥Space 快捷对话，结果可写回来源应用。 |
+| **Act（行动，可选）** | 受门控的 CUA 回放与技能库。默认只走后台输入（不抢焦点），需通过四道投递门禁和停止线。MIT **cua-driver** 内嵌于 Lumen Cua.app，并以 `computer-use` MCP 提供给 Codex / Claude Code。绝不用于采集。 |
+| **Storage（存储）** | 保留生命周期，加上整个数据目录的磁盘配额与分层清理（最旧媒体 → 旧元数据 → VACUUM）。近期历史保持可搜索。 |
 
 所有数据都在 `~/Library/Application Support/LumenNavi/`（Windows：`%LOCALAPPDATA%\LumenNavi\`）。
 
@@ -40,7 +41,7 @@ Local-first 的**连续上下文**。看着屏幕（可选加麦克风），数�
 |-------|------|--------|
 | **Observe** | 多源接入 | 屏幕 + 麦克风已产品化；浏览器扩展可选 |
 | **Memory** | 持久存储 + 异步处理 | SQLite + FTS + 任务（OCR / AX / ASR） |
-| **Act** | 可选的计算机操作 | 选区弹窗 + 受门控的回放；MIT **cua-driver** 内嵌在 Lumen Cua.app 里 |
+| **Act** | 可选的计算机操作 | 通过内嵌的 MIT **cua-driver** 做受门控的回放（仅后台输入） |
 
 完整阐述：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · 路线图：[`docs/PLAN.md`](docs/PLAN.md) · 采集政策：[`docs/OBSERVE_CAPTURE.md`](docs/OBSERVE_CAPTURE.md)
 
@@ -48,19 +49,21 @@ Local-first 的**连续上下文**。看着屏幕（可选加麦克风），数�
 
 | 领域 | 状态 |
 |------|--------|
-| 屏幕观察 + OCR | ✅（人工长跑未完） |
+| 屏幕观察 + OCR | ✅ OCR 在隔离的 helper 进程中运行，失败有界重试（人工长跑未完） |
 | 时间跟踪 + 15 分钟 History 卡片 | ✅ |
 | 音频 + Observe ASR | ✅（默认 SenseVoice；可选 Whisper / Speech / Qwen HTTP） |
-| 桌面应用（macOS） | ✅ |
+| 桌面应用（macOS） | ✅ 分区设置、登录项自启动、可配置快捷键 |
+| 存储生命周期 | ✅ 保留策略 + 整个数据目录的磁盘配额 |
+| Act（可选） | ✅ v1/v2：受门控回放、内嵌 cua-driver、终端交接 |
 | Windows 10/11 x64 | ✅ 移植完成；硬件长跑待做 —— [`WINDOWS_PORT_STATUS.md`](docs/WINDOWS_PORT_STATUS.md) |
 | Chrome 观察 | ✅ 实现完成；长跑待做 |
-| 系统音频 / 完整 Act | 后续 |
+| 系统音频 | 后续 |
 
 ## 安装
 
-从 **[GitHub Releases](https://github.com/fakechris/lumen-navi/releases/latest)** 下载（macOS arm64 / Intel DMG，Windows x64 NSIS）。
+最新版本：**v0.3.0**。从 **[GitHub Releases](https://github.com/fakechris/lumen-navi/releases/latest)** 下载（macOS arm64 / Intel DMG，Windows x64 NSIS）。变更见 [`CHANGELOG.md`](CHANGELOG.md)。
 
-这些构建**未做 Apple 公证**（Windows 安装包也未签名）。这是预期行为。
+这些构建**未做 Apple 公证**。macOS 应用使用自签名证书签名，Windows 安装包未签名。这是预期行为。
 
 ### macOS
 

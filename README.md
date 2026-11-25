@@ -29,8 +29,9 @@ Local-first **continuous context**. Watch the screen (and optionally the mic), k
 | **Observe** | Smart screenshots (focus / visual change / 2-min liveness overwrite). Optional mic + local ASR. Hard gates: pause, closed-eyes, lock, app blocklist. |
 | **Time** | Frontmost-app tracking, idle vs away, 15-minute History cards with LLM narrative, app/scene ranking, day timeline. |
 | **Search** | On-device OCR + transcript FTS over what was on screen. |
-| **AI** | Optional local/OpenAI-compat Roast and Chat over the day's evidence. Conservative CUA-replay chips on long stretches. |
-| **Act (optional)** | Selection popup today; CUA-replay chips default to background input (no focus steal). MIT **cua-driver** later, embedded in Lumen Cua.app. Never used for capture. |
+| **AI** | Optional local/OpenAI-compat Roast and Chat over the day's evidence. ⌥Space quick composer with result injection back into the source app. |
+| **Act (optional)** | Gated CUA replay and skill library. Default input is background-only (no focus steal) and passes four delivery gates plus stop-lines. MIT **cua-driver** is embedded in Lumen Cua.app and exposed to Codex / Claude Code as the `computer-use` MCP. Never used for capture. |
+| **Storage** | Retention lifecycle plus a whole-data-directory disk quota with tiered trim (oldest media → old metadata → VACUUM). Recent history stays searchable. |
 
 All of it stays under `~/Library/Application Support/LumenNavi/` (Windows: `%LOCALAPPDATA%\LumenNavi\`).
 
@@ -40,7 +41,7 @@ All of it stays under `~/Library/Application Support/LumenNavi/` (Windows: `%LOC
 |-------|------|--------|
 | **Observe** | Multi-source intake | Screen + mic productized; browser extension optional |
 | **Memory** | Durable store + async process | SQLite + FTS + jobs (OCR / AX / ASR) |
-| **Act** | Optional computer-use | Selection popup + gated replay; MIT **cua-driver** nested in Lumen Cua.app |
+| **Act** | Optional computer-use | Gated replay through the embedded MIT **cua-driver** (background input only) |
 
 Full write-up: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · roadmap: [`docs/PLAN.md`](docs/PLAN.md) · capture policy: [`docs/OBSERVE_CAPTURE.md`](docs/OBSERVE_CAPTURE.md)
 
@@ -48,19 +49,21 @@ Full write-up: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · roadmap: [`docs
 
 | Area | Status |
 |------|--------|
-| Screen Observe + OCR | ✅ (manual soak still open) |
+| Screen Observe + OCR | ✅ OCR runs in an isolated helper with bounded retry (manual soak still open) |
 | Time tracking + 15-min History cards | ✅ |
 | Audio + Observe ASR | ✅ (SenseVoice default; Whisper / Speech / Qwen HTTP) |
-| Desktop app (macOS) | ✅ |
+| Desktop app (macOS) | ✅ sectioned settings, login-item autostart, configurable shortcuts |
+| Storage lifecycle | ✅ retention + whole-directory disk quota |
+| Act (optional) | ✅ v1/v2: gated replay, embedded cua-driver, Terminal handoff |
 | Windows 10/11 x64 | ✅ port; hardware soak pending — [`WINDOWS_PORT_STATUS.md`](docs/WINDOWS_PORT_STATUS.md) |
 | Chrome Observe | ✅ implementation; soak pending |
-| System audio / full Act | later |
+| System audio | later |
 
 ## Install
 
-Download from **[GitHub Releases](https://github.com/fakechris/lumen-navi/releases/latest)** (macOS arm64 / Intel DMG, Windows x64 NSIS).
+Latest: **v0.3.0**. Download from **[GitHub Releases](https://github.com/fakechris/lumen-navi/releases/latest)** (macOS arm64 / Intel DMG, Windows x64 NSIS). What changed: [`CHANGELOG.md`](CHANGELOG.md).
 
-These builds are **not Apple-notarized** (and the Windows installer is unsigned). That is expected.
+These builds are **not Apple-notarized**. The macOS apps are signed with a self-signed certificate, and the Windows installer is unsigned. That is expected.
 
 ### macOS
 
