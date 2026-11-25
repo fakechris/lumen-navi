@@ -178,9 +178,19 @@ fn directory_bytes(path: &Path) -> Result<u64, StoreError> {
     let mut total = 0_u64;
     for entry in fs::read_dir(path).map_err(StoreError::io)? {
         let entry = entry.map_err(StoreError::io)?;
-        let metadata = entry.metadata().map_err(StoreError::io)?;
+        let path = entry.path();
+        // Stat the path itself rather than trusting `DirEntry::metadata()`:
+        // on Windows that comes from the directory enumeration record, which
+        // NTFS does not refresh while another handle (SQLite's DB/WAL) keeps
+        // the file open and growing — sizes would be stale by megabytes.
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            // Files can vanish mid-walk (WAL truncate, blob GC); skip them.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(StoreError::io(e)),
+        };
         if metadata.is_dir() {
-            total = total.saturating_add(directory_bytes(&entry.path())?);
+            total = total.saturating_add(directory_bytes(&path)?);
         } else if metadata.is_file() {
             total = total.saturating_add(metadata.len());
         }
